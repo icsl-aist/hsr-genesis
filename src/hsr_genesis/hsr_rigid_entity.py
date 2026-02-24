@@ -292,10 +292,7 @@ class HSRRigidEntity(RigidEntity):
         self._hsr_base_mode = getattr(morph, "hsr_base_mode", "planar")
         self._hsr_end_effector_frame = getattr(morph, "hsr_end_effector_frame", "hand_palm_link")
         self._hsr_optimizer = getattr(morph, "hsr_optimizer", "auto")
-        use_base_controller = getattr(morph, "hsr_use_base_controller", None)
-        if use_base_controller is None:
-            use_base_controller = getattr(morph, "hsr_use_vehicle_controller", False)
-        self._hsr_use_base_controller = bool(use_base_controller)
+        self._hsr_use_base_controller = bool(getattr(morph, "hsr_use_base_controller", False))
         requested_mode = getattr(morph, "hsr_base_control_mode", None)
         if requested_mode is None:
             requested_mode = BaseControlMode.CONTROLLER if self._hsr_use_base_controller else BaseControlMode.QPOS
@@ -1423,7 +1420,6 @@ class HSRBURDF(gs.morphs.URDF):
         base_mode: str = "planar",
         end_effector_frame: str = "hand_palm_link",
         use_base_controller: bool = True,
-        use_vehicle_controller: bool | None = None,
         base_control_mode: str = BaseControlMode.CONTROLLER,
         optimizer: str = "auto",
         use_base_yaw_ik: bool = False,
@@ -1434,8 +1430,6 @@ class HSRBURDF(gs.morphs.URDF):
         object.__setattr__(self, "hsr_robot", robot)
         object.__setattr__(self, "hsr_base_mode", base_mode)
         object.__setattr__(self, "hsr_end_effector_frame", end_effector_frame)
-        if use_vehicle_controller is not None:
-            use_base_controller = bool(use_vehicle_controller)
         object.__setattr__(self, "hsr_use_base_controller", bool(use_base_controller))
         object.__setattr__(self, "hsr_base_control_mode", base_control_mode)
         object.__setattr__(self, "hsr_optimizer", optimizer)
