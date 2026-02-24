@@ -13,12 +13,10 @@ authors = [
     { name = "HSR Genesis Contributors" }
 ]
 dependencies = [
-    "gstaichi==4.6.0",
+    "genesis-world",
     "torch",
+    "PyYAML",
 ]
-
-[project.optional-dependencies]
-genesis = ["genesis-world"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
