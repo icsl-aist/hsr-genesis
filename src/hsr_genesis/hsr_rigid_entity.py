@@ -357,6 +357,8 @@ class HSRRigidEntity(RigidEntity):
         self._hsr_whole_body_time: torch.Tensor | None = None
         self._hsr_torso_dof_idx_local: int | None = None
         self._hsr_collision_disable_applied = False
+        self._hsr_passive_wheel_friction_applied = False
+        self._hsr_high_friction_applied = False
         self._hsr_head_hold_applied = False
         self._hsr_debug_log_counter = 0
         self._hsr_debug_log_every = 120
@@ -449,6 +451,40 @@ class HSRRigidEntity(RigidEntity):
             self._hsr_disable_collision_between_links(["base_l_passive_wheel_y_frame"], [link_name])
             self._hsr_disable_collision_between_links(["base_r_passive_wheel_y_frame"], [link_name])
         self._hsr_collision_disable_applied = True
+
+    def _hsr_apply_passive_wheel_friction(self) -> None:
+        if self._hsr_passive_wheel_friction_applied:
+            return
+        if self._scene is None or self._scene.sim is None:
+            return
+        for name in ("base_r_passive_wheel_z_link", "base_l_passive_wheel_z_link"):
+            try:
+                link = self.get_link(name)
+            except Exception:
+                continue
+            link.set_friction(0.01)
+        self._hsr_passive_wheel_friction_applied = True
+
+    def _hsr_apply_high_friction_links(self) -> None:
+        if self._hsr_high_friction_applied:
+            return
+        if self._scene is None or self._scene.sim is None:
+            return
+        high_friction = 2.0
+        for name in (
+            "base_r_drive_wheel_link",
+            "base_l_drive_wheel_link",
+            "hand_l_finger_tip_frame",
+            "hand_r_finger_tip_frame",
+            "hand_l_distal_link",
+            "hand_r_distal_link",
+        ):
+            try:
+                link = self.get_link(name)
+            except Exception:
+                continue
+            link.set_friction(high_friction)
+        self._hsr_high_friction_applied = True
 
     def _hsr_apply_default_gains(self) -> None:
         if self._hsr_default_gains_applied:
@@ -706,6 +742,8 @@ class HSRRigidEntity(RigidEntity):
         envs_idx,
     ) -> dict[str, torch.Tensor]:
         self._hsr_apply_default_collision_disable()
+        self._hsr_apply_passive_wheel_friction()
+        self._hsr_apply_high_friction_links()
         self._hsr_apply_default_gains()
         self._hsr_apply_head_hold()
         dt = float(dt)
@@ -900,6 +938,8 @@ class HSRRigidEntity(RigidEntity):
         envs_idx,
     ) -> dict[str, torch.Tensor]:
         self._hsr_apply_default_collision_disable()
+        self._hsr_apply_passive_wheel_friction()
+        self._hsr_apply_high_friction_links()
         self._hsr_apply_default_gains()
         self._hsr_apply_head_hold()
         dt = float(dt)
