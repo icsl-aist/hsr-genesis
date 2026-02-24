@@ -24,6 +24,7 @@ Clone the repository (includes required submodules):
 
 ```bash
 git clone https://github.com/icsl-aist/hsr-genesis.git
+cd hsr-genesis
 git submodule update --init --recursive
 ```
 
@@ -57,6 +58,7 @@ This example opens a viewer window and loads the HSR robot.
 From the repo root:
 
 ```bash
+cd hsr-genesis
 python -m venv .venv
 source .venv/bin/activate
 pip install -e .
