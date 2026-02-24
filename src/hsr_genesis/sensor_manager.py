@@ -261,6 +261,8 @@ class URDFSensorManager:
         self,
         spec: URDFSensorSpec,
     ) -> Any | None:
+        if not hasattr(gs.sensors, "ForceTorque"):
+            return None
         pos_offset = spec.pose_xyz
         euler_offset = _rpy_rad_to_euler_deg(spec.pose_rpy)
         link_idx_local = self._link_idx_local_from_reference(spec.reference)
