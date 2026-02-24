@@ -89,7 +89,7 @@ POSSIBILITY OF SUCH DAMAGE.
     <limit effort="34.46" velocity="2.5"/>
     <parent link="base_link"/>
     <child link="base_roll_link"/>
-    <dynamics damping="0.7"/>
+    <dynamics damping="0.7" friction="0.0"/>
   </joint>
   <link name="base_roll_link">
     <inertial>
@@ -104,7 +104,7 @@ POSSIBILITY OF SUCH DAMAGE.
     <limit effort="28.0" velocity="20.8"/>
     <parent link="base_roll_link"/>
     <child link="base_r_drive_wheel_link"/>
-    <dynamics damping="1.0"/>
+    <dynamics damping="1.0" friction="0.0"/>
   </joint>
   <link name="base_r_drive_wheel_link">
     <visual>
@@ -132,7 +132,7 @@ POSSIBILITY OF SUCH DAMAGE.
     <limit effort="28.0" velocity="20.8"/>
     <parent link="base_roll_link"/>
     <child link="base_l_drive_wheel_link"/>
-    <dynamics damping="1.0"/>
+    <dynamics damping="1.0" friction="0.0"/>
   </joint>
   <link name="base_l_drive_wheel_link">
     <visual>
@@ -160,7 +160,7 @@ POSSIBILITY OF SUCH DAMAGE.
     <limit effort="1.0" velocity="3.0"/>
     <parent link="base_roll_link"/>
     <child link="base_r_passive_wheel_x_frame"/>
-    <dynamics damping="1.0"/>
+    <dynamics damping="1.0" friction="0.0"/>
   </joint>
   <link name="base_r_passive_wheel_x_frame">
     <inertial>
@@ -212,7 +212,7 @@ POSSIBILITY OF SUCH DAMAGE.
     <limit effort="1.0" velocity="3.0"/>
     <parent link="base_roll_link"/>
     <child link="base_l_passive_wheel_x_frame"/>
-    <dynamics damping="1.0"/>
+    <dynamics damping="1.0" friction="0.0"/>
   </joint>
   <link name="base_l_passive_wheel_x_frame">
     <inertial>
@@ -519,7 +519,7 @@ POSSIBILITY OF SUCH DAMAGE.
     <parent link="base_link"/>
     <child link="torso_lift_link"/>
     <mimic joint="arm_lift_joint" multiplier="0.5"/>
-    <dynamics damping="500.0"/>
+    <dynamics damping="500.0" friction="0.0"/>
   </joint>
   <link name="torso_lift_link">
     <inertial>
@@ -559,7 +559,7 @@ POSSIBILITY OF SUCH DAMAGE.
     <limit effort="100.0" lower="-3.84" upper="1.75" velocity="1.0"/>
     <parent link="torso_lift_link"/>
     <child link="head_pan_link"/>
-    <dynamics damping="1.0"/>
+    <dynamics damping="1.0" friction="0.0"/>
   </joint>
   <link name="head_pan_link">
     <inertial>
@@ -584,7 +584,7 @@ POSSIBILITY OF SUCH DAMAGE.
     <limit effort="100.0" lower="-1.57" upper="0.52" velocity="1.0"/>
     <parent link="head_pan_link"/>
     <child link="head_tilt_link"/>
-    <dynamics damping="10.0"/>
+    <dynamics damping="10.0" friction="0.0"/>
   </joint>
   <link name="head_tilt_link">
     <inertial>
@@ -933,7 +933,7 @@ POSSIBILITY OF SUCH DAMAGE.
     <limit effort="300.0" lower="0.0" upper="0.69" velocity="0.2"/>
     <parent link="base_link"/>
     <child link="arm_lift_link"/>
-    <dynamics damping="1.0"/>
+    <dynamics damping="1.0" friction="0.0"/>
   </joint>
   <link name="arm_lift_link">
     <inertial>
@@ -958,7 +958,7 @@ POSSIBILITY OF SUCH DAMAGE.
     <limit effort="100.0" lower="-2.62" upper="0.0" velocity="1.2"/>
     <parent link="arm_lift_link"/>
     <child link="arm_flex_link"/>
-    <dynamics damping="1.0"/>
+    <dynamics damping="1.0" friction="0.0"/>
   </joint>
   <link name="arm_flex_link">
     <inertial>
@@ -983,7 +983,7 @@ POSSIBILITY OF SUCH DAMAGE.
     <limit effort="100.0" lower="-2.09" upper="3.84" velocity="2.0"/>
     <parent link="arm_flex_link"/>
     <child link="arm_roll_link"/>
-    <dynamics damping="0.1"/>
+    <dynamics damping="0.1" friction="0.0"/>
   </joint>
   <link name="arm_roll_link">
     <inertial>
@@ -1032,7 +1032,7 @@ POSSIBILITY OF SUCH DAMAGE.
     <limit effort="100.0" lower="-1.92" upper="1.22" velocity="1.5"/>
     <parent link="arm_roll_link"/>
     <child link="wrist_flex_link"/>
-    <dynamics damping="1.0"/>
+    <dynamics damping="1.0" friction="0.0"/>
   </joint>
   <link name="wrist_flex_link">
     <inertial>
@@ -1066,7 +1066,7 @@ POSSIBILITY OF SUCH DAMAGE.
     <limit effort="100.0" lower="-1.92" upper="3.67" velocity="1.5"/>
     <parent link="wrist_flex_link"/>
     <child link="wrist_ft_sensor_mount_link"/>
-    <dynamics damping="1.0"/>
+    <dynamics damping="1.0" friction="0.0"/>
   </joint>
   <!-- each link must have mass in URDF so we apply very small mass (10 gram) for this coupling link -->
   <link name="wrist_ft_sensor_mount_link">
@@ -1172,7 +1172,7 @@ POSSIBILITY OF SUCH DAMAGE.
     <limit effort="100.0" lower="-0.798" upper="1.24" velocity="1.0"/>
     <parent link="hand_palm_link"/>
     <child link="hand_motor_dummy_link"/>
-    <dynamics damping="0.0001"/>
+    <dynamics damping="0.0001" friction="0.0"/>
   </joint>
   <link name="hand_motor_dummy_link">
     <inertial>
@@ -1187,7 +1187,7 @@ POSSIBILITY OF SUCH DAMAGE.
     <parent link="hand_palm_link"/>
     <child link="hand_l_proximal_link"/>
     <mimic joint="hand_motor_joint"/>
-    <dynamics damping="0.0001"/>
+    <dynamics damping="0.0001" friction="0.0"/>
   </joint>
   <link name="hand_l_proximal_link">
     <inertial>
@@ -1200,7 +1200,7 @@ POSSIBILITY OF SUCH DAMAGE.
     <limit effort="10.0" lower="0.0" upper="0.698" velocity="1.0"/>
     <parent link="hand_l_proximal_link"/>
     <child link="hand_l_spring_proximal_link"/>
-    <dynamics damping="0.0001"/>
+    <dynamics damping="0.0001" friction="0.0"/>
   </joint>
   <link name="hand_l_spring_proximal_link">
     <inertial>
@@ -1226,7 +1226,7 @@ POSSIBILITY OF SUCH DAMAGE.
     <parent link="hand_l_spring_proximal_link"/>
     <child link="hand_l_mimic_distal_link"/>
     <mimic joint="hand_l_spring_proximal_joint" multiplier="-1.0"/>
-    <dynamics damping="0.0001"/>
+    <dynamics damping="0.0001" friction="0.0"/>
   </joint>
   <link name="hand_l_mimic_distal_link">
     <inertial>
@@ -1240,7 +1240,7 @@ POSSIBILITY OF SUCH DAMAGE.
     <parent link="hand_l_mimic_distal_link"/>
     <child link="hand_l_distal_link"/>
     <mimic joint="hand_motor_joint" multiplier="-1.0" offset="-0.087"/>
-    <dynamics damping="0.0001"/>
+    <dynamics damping="0.0001" friction="0.0"/>
   </joint>
   <link name="hand_l_distal_link">
     <inertial>
@@ -1263,7 +1263,7 @@ POSSIBILITY OF SUCH DAMAGE.
     <origin rpy="-1.5707963267948966 0.0 0.0" xyz="0.01675 0.01865 0.04289"/>
     <parent link="hand_l_distal_link"/>
     <child link="hand_l_finger_tip_frame"/>
-    <dynamics damping="0.0001"/>
+    <dynamics damping="0.0001" friction="0.0"/>
   </joint>
   <link name="hand_l_finger_tip_frame">
     <inertial>
@@ -1296,7 +1296,7 @@ POSSIBILITY OF SUCH DAMAGE.
     <parent link="hand_palm_link"/>
     <child link="hand_r_proximal_link"/>
     <mimic joint="hand_motor_joint"/>
-    <dynamics damping="0.0001"/>
+    <dynamics damping="0.0001" friction="0.0"/>
   </joint>
   <link name="hand_r_proximal_link">
     <inertial>
@@ -1309,7 +1309,7 @@ POSSIBILITY OF SUCH DAMAGE.
     <limit effort="10.0" lower="0.0" upper="0.698" velocity="1.0"/>
     <parent link="hand_r_proximal_link"/>
     <child link="hand_r_spring_proximal_link"/>
-    <dynamics damping="0.0001"/>
+    <dynamics damping="0.0001" friction="0.0"/>
   </joint>
   <link name="hand_r_spring_proximal_link">
     <inertial>
@@ -1335,7 +1335,7 @@ POSSIBILITY OF SUCH DAMAGE.
     <parent link="hand_r_spring_proximal_link"/>
     <child link="hand_r_mimic_distal_link"/>
     <mimic joint="hand_r_spring_proximal_joint" multiplier="-1.0"/>
-    <dynamics damping="0.0001"/>
+    <dynamics damping="0.0001" friction="0.0"/>
   </joint>
   <link name="hand_r_mimic_distal_link">
     <inertial>
@@ -1349,7 +1349,7 @@ POSSIBILITY OF SUCH DAMAGE.
     <parent link="hand_r_mimic_distal_link"/>
     <child link="hand_r_distal_link"/>
     <mimic joint="hand_motor_joint" multiplier="-1.0" offset="-0.087"/>
-    <dynamics damping="0.0001"/>
+    <dynamics damping="0.0001" friction="0.0"/>
   </joint>
   <link name="hand_r_distal_link">
     <inertial>
