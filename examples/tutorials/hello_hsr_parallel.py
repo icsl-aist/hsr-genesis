@@ -78,6 +78,7 @@ hsr = scene.add_entity(
         file=str(URDF_PATH),
         fixed=False,
         recompute_inertia=True,
+        links_to_keep=["hand_palm_link"],
         robot="hsrb",
         base_mode="planar",
         end_effector_frame="hand_palm_link",
