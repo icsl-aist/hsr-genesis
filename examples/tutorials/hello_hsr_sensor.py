@@ -9,9 +9,6 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from hsr_genesis.sensor_manager import URDFSensorManager  # noqa: E402
-from hsr_genesis.hsr_rigid_entity import HSRBURDF  # noqa: E402
-
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--steps", type=int, default=300)
@@ -49,6 +46,10 @@ try:
 except RuntimeError as exc:  # pragma: no cover - demo fallback
     print(f"[Genesis] GPU backend unavailable ({exc}); falling back to CPU.")
     gs.init(backend=gs.cpu)
+
+# Import after Genesis init; some genesis modules assert initialization at import time.
+from hsr_genesis.sensor_manager import URDFSensorManager  # noqa: E402
+from hsr_genesis.hsr_rigid_entity import HSRBURDF  # noqa: E402
 
 URDF_PATH = Path(__file__).resolve().parents[2] / "data" / "urdf" / "hsrb4s.urdf"
 

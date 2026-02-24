@@ -68,13 +68,12 @@ From the repo root:
 python -m venv .venv
 source .venv/bin/activate
 pip install -e .
-pip install -e hsr_genesis
-PYTHONPATH=hsr_genesis/src python hsr_genesis/examples/tutorials/hello_hsr_parallel.py
+PYTHONPATH=hsr_genesis/src python examples/tutorials/hello_hsr_parallel.py
 
 Sensor demo:
 
 ```bash
-PYTHONPATH=hsr_genesis/src python hsr_genesis/examples/tutorials/hello_hsr_sensor.py
+PYTHONPATH=hsr_genesis/src python examples/tutorials/hello_hsr_sensor.py
 ```
 ```
 

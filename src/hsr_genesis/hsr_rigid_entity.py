@@ -15,6 +15,7 @@ import torch
 
 from genesis.engine.entities.rigid_entity import RigidEntity
 
+from .genesis_patches import apply_entity_cls_override_patch, apply_raycaster_ignore_patch
 from .analytic_ik import AnalyticIK2, IKRequest, IKResult, JointState, JOINT_ORDER
 from .gripper_controller import HSRBGripperControllerBatch
 from .base_controller import (
@@ -24,6 +25,9 @@ from .base_controller import (
     Trajectory,
     to_torch,
 )
+
+apply_entity_cls_override_patch()
+apply_raycaster_ignore_patch()
 
 
 @dataclass(frozen=True)

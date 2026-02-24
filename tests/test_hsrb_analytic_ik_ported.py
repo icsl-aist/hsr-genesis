@@ -6,7 +6,7 @@ import pytest
 import torch
 
 def _import_analytic_ik():
-    import gstaichi as ti
+    import quadrants as ti
     import genesis as gs
 
     if not getattr(gs, "_initialized", False):

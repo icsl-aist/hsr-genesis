@@ -1,6 +1,6 @@
 import math
 
-import gstaichi as ti
+import quadrants as ti
 import torch
 
 

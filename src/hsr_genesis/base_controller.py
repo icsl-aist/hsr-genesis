@@ -14,7 +14,10 @@ import math
 from dataclasses import dataclass
 from typing import Sequence
 
-import gstaichi as ti
+try:
+    import gstaichi as ti
+except Exception:
+    import quadrants as ti
 import torch
 
 

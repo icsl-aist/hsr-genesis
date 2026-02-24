@@ -12,7 +12,10 @@ import math
 from dataclasses import dataclass
 from typing import Callable, List, Sequence, Tuple
 
-import gstaichi as ti
+try:
+    import gstaichi as ti
+except Exception:
+    import quadrants as ti
 import torch
 try:
     import taichi.math as tm
@@ -21,7 +24,10 @@ except ModuleNotFoundError:
 
 try:
     import genesis as gs
-    from genesis.utils.misc import ti_to_torch
+    try:
+        from genesis.utils.misc import ti_to_torch
+    except Exception:
+        from genesis.utils.misc import qd_to_torch as ti_to_torch
 except Exception:
     gs = None
     ti_to_torch = None
