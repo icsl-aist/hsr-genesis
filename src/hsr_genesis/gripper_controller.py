@@ -37,6 +37,12 @@ import genesis as gs
 from .base_controller import to_torch
 
 
+def _first_dof_index(dofs: int | Sequence[int]) -> int:
+    if isinstance(dofs, (list, tuple)):
+        return int(dofs[0]) if dofs else 0
+    return int(dofs)
+
+
 class ActionState(enum.IntEnum):
     """Simple state machine for the pseudo actions."""
 
@@ -184,13 +190,13 @@ class HSRBGenesisGripperInterface:
     ) -> None:
         self.entity = entity
         self.envs_idx = envs_idx
-        self.motor_idx = entity.get_joint(motor_joint).dof_idx_local
-        self.left_spring_idx = entity.get_joint(
-            left_spring_joint
-        ).dof_idx_local
-        self.right_spring_idx = entity.get_joint(
-            right_spring_joint
-        ).dof_idx_local
+        self.motor_idx = _first_dof_index(entity.get_joint(motor_joint).dofs_idx_local)
+        self.left_spring_idx = _first_dof_index(
+            entity.get_joint(left_spring_joint).dofs_idx_local
+        )
+        self.right_spring_idx = _first_dof_index(
+            entity.get_joint(right_spring_joint).dofs_idx_local
+        )
         self._commanded_grasp_torque = 0.0
         self._grasping_flag = False
         self._measured_torque = 0.0
@@ -259,7 +265,7 @@ class HSRBGenesisGripperInterface:
             idx = self._joint_name_to_idx.get(child.joint)
             if idx is None:
                 try:
-                    idx = self.entity.get_joint(child.joint).dof_idx_local
+                    idx = _first_dof_index(self.entity.get_joint(child.joint).dofs_idx_local)
                     self._joint_name_to_idx[child.joint] = idx
                 except Exception:  # pragma: no cover - joint missing in entity
                     continue
@@ -521,13 +527,13 @@ class HSRBGenesisGripperInterfaceBatch:
         right_spring_joint: str = "hand_r_spring_proximal_joint",
     ) -> None:
         self.entity = entity
-        self.motor_idx = entity.get_joint(motor_joint).dof_idx_local
-        self.left_spring_idx = entity.get_joint(
-            left_spring_joint
-        ).dof_idx_local
-        self.right_spring_idx = entity.get_joint(
-            right_spring_joint
-        ).dof_idx_local
+        self.motor_idx = _first_dof_index(entity.get_joint(motor_joint).dofs_idx_local)
+        self.left_spring_idx = _first_dof_index(
+            entity.get_joint(left_spring_joint).dofs_idx_local
+        )
+        self.right_spring_idx = _first_dof_index(
+            entity.get_joint(right_spring_joint).dofs_idx_local
+        )
 
         self._mimic_children = HSRBGenesisGripperInterface(
             entity
@@ -543,7 +549,7 @@ class HSRBGenesisGripperInterfaceBatch:
             self._mimic_multipliers.append(float(child.multiplier))
             self._mimic_offsets.append(float(child.offset))
 
-        dof_indices: list[int] = [int(self.motor_idx)]
+        dof_indices: list[int] = [self.motor_idx]
         valid_multipliers: list[float] = []
         valid_offsets: list[float] = []
         valid_mimic_joint_names: list[str] = []
@@ -553,7 +559,7 @@ class HSRBGenesisGripperInterfaceBatch:
             self._mimic_offsets,
         ):
             try:
-                idx = int(entity.get_joint(name).dof_idx_local)
+                idx = _first_dof_index(entity.get_joint(name).dofs_idx_local)
             except Exception:
                 continue
             dof_indices.append(idx)

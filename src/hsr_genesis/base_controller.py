@@ -262,12 +262,12 @@ class HSRBBaseControllersConfig:
     steer_command_velocity_filter_a: tuple[float, ...] = ()
     steer_command_velocity_filter_b: tuple[float, ...] = ()
 
-    kp_wheel: float = 4500.0
-    kv_wheel: float = 450.0
+    kp_wheel: float = 0.0
+    kv_wheel: float = 62.460087776184096
     wheel_force_limit: float = 87.0
 
-    kp_steer: float = 4500.0
-    kv_steer: float = 200.0
+    kp_steer: float = 10.0
+    kv_steer: float = 6.324555320336759
     steer_force_limit: float = 50.0
     base_control_mode: str = BaseControlMode.CONTROLLER
 
@@ -282,17 +282,25 @@ class HSRBBaseController:
         self.entity = entity
         self.config = config or HSRBBaseControllersConfig()
 
-        self.wheel_drive_dofs_idx_local = [
-            self.entity.get_joint(joint_name).dof_idx_local
-            for joint_name in self.config.wheel_drive_joints
-        ]
-        self.wheel_passive_dofs_idx_local = [
-            self.entity.get_joint(joint_name).dof_idx_local
-            for joint_name in self.config.wheel_passive_joints
-        ]
-        self.steer_dof_idx_local = self.entity.get_joint(
-            self.config.steer_joint
-        ).dof_idx_local
+        self.wheel_drive_dofs_idx_local = []
+        for joint_name in self.config.wheel_drive_joints:
+            dofs = self.entity.get_joint(joint_name).dofs_idx_local
+            if isinstance(dofs, (list, tuple)):
+                self.wheel_drive_dofs_idx_local.extend(int(idx) for idx in dofs)
+            else:
+                self.wheel_drive_dofs_idx_local.append(int(dofs))
+        self.wheel_passive_dofs_idx_local = []
+        for joint_name in self.config.wheel_passive_joints:
+            dofs = self.entity.get_joint(joint_name).dofs_idx_local
+            if isinstance(dofs, (list, tuple)):
+                self.wheel_passive_dofs_idx_local.extend(int(idx) for idx in dofs)
+            else:
+                self.wheel_passive_dofs_idx_local.append(int(dofs))
+        steer_dofs = self.entity.get_joint(self.config.steer_joint).dofs_idx_local
+        if isinstance(steer_dofs, (list, tuple)):
+            self.steer_dof_idx_local = int(steer_dofs[0]) if steer_dofs else 0
+        else:
+            self.steer_dof_idx_local = int(steer_dofs)
 
         self._time = 0.0
         self._wheel_filter_batch_r = None
@@ -303,7 +311,6 @@ class HSRBBaseController:
         self._last_cmd_time_batch = None
         self._desired_steer_pos_batch = None
         self._initialized_desired_steer_pos_batch = None
-
         self._initialize_joints()
 
     def _initialize_joints(self) -> None:
@@ -479,7 +486,7 @@ class HSRBBaseController:
 
         self.entity.control_dofs_velocity(
             out[:, :2],
-            self.wheel_drive_dofs_idx_local,
+            dofs_idx_local=self.wheel_drive_dofs_idx_local,
             envs_idx=envs_idx_arr,
         )
 

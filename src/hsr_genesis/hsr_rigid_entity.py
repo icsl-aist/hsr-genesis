@@ -340,9 +340,13 @@ class HSRRigidEntity(RigidEntity):
             self._hsr_torso_mimic_offset = torch.tensor(
                 offset, device=gs.device, dtype=gs.tc_float
             )
-        self._hsr_arm_dofs_idx_local = [
-            self.get_joint(name).dof_idx_local for name in self._hsr_use_joints
-        ]
+        self._hsr_arm_dofs_idx_local = []
+        for name in self._hsr_use_joints:
+            dofs = self.get_joint(name).dofs_idx_local
+            if isinstance(dofs, (list, tuple)):
+                self._hsr_arm_dofs_idx_local.extend(int(idx) for idx in dofs)
+            else:
+                self._hsr_arm_dofs_idx_local.append(int(dofs))
         self._hsr_default_gains_applied = False
 
         self._hsr_gripper_batch: HSRBGripperControllerBatch | None = None
@@ -359,7 +363,11 @@ class HSRRigidEntity(RigidEntity):
         self._hsr_head_dofs_idx_local = []
         for name in ("head_pan_joint", "head_tilt_joint"):
             try:
-                self._hsr_head_dofs_idx_local.append(self.get_joint(name).dof_idx_local)
+                dofs = self.get_joint(name).dofs_idx_local
+                if isinstance(dofs, (list, tuple)):
+                    self._hsr_head_dofs_idx_local.extend(int(idx) for idx in dofs)
+                else:
+                    self._hsr_head_dofs_idx_local.append(int(dofs))
             except Exception:
                 continue
         # Gains are applied lazily after build.
@@ -433,12 +441,13 @@ class HSRRigidEntity(RigidEntity):
         if solver is None or solver.collider is None:
             return
         self._hsr_disable_collision_between_links(["base_f_bumper_link"], ["base_b_bumper_link"])
-        self._hsr_disable_collision_between_links(["base_r_drive_wheel_link"], ["base_f_bumper_link"])
-        self._hsr_disable_collision_between_links(["base_l_drive_wheel_link"], ["base_f_bumper_link"])
-        self._hsr_disable_collision_between_links(["base_l_passive_wheel_z_link"], ["base_b_bumper_link"])
-        self._hsr_disable_collision_between_links(["base_r_passive_wheel_z_link"], ["base_b_bumper_link"])
-        self._hsr_disable_collision_between_links(["base_l_passive_wheel_y_frame"], ["base_b_bumper_link"])
-        self._hsr_disable_collision_between_links(["base_r_passive_wheel_y_frame"], ["base_b_bumper_link"])
+        for link_name in ["base", "base_f_bumper_link", "base_b_bumper_link"]:
+            self._hsr_disable_collision_between_links(["base_l_drive_wheel_link"], [link_name])
+            self._hsr_disable_collision_between_links(["base_r_drive_wheel_link"], [link_name])
+            self._hsr_disable_collision_between_links(["base_l_passive_wheel_z_link"], [link_name])
+            self._hsr_disable_collision_between_links(["base_r_passive_wheel_z_link"], [link_name])
+            self._hsr_disable_collision_between_links(["base_l_passive_wheel_y_frame"], [link_name])
+            self._hsr_disable_collision_between_links(["base_r_passive_wheel_y_frame"], [link_name])
         self._hsr_collision_disable_applied = True
 
     def _hsr_apply_default_gains(self) -> None:
@@ -446,36 +455,80 @@ class HSRRigidEntity(RigidEntity):
             return
         if self._scene is None or self._scene.sim is None:
             return
+        tuned_kp = {
+            "arm_lift_joint": 3558.077752590177,
+            "arm_flex_joint": 118.03121566772566,
+            "arm_roll_joint": 10.0,
+            "wrist_flex_joint": 10.0,
+            "wrist_roll_joint": 10.0,
+            "head_pan_joint": 10.0,
+            "head_tilt_joint": 10.0,
+            "hand_motor_joint": 10.0,
+        }
+        tuned_kv = {
+            "arm_lift_joint": 119.29924983150862,
+            "arm_flex_joint": 21.728434427516923,
+            "arm_roll_joint": 6.324555320336759,
+            "wrist_flex_joint": 6.324555320336759,
+            "wrist_roll_joint": 6.324555320336759,
+            "head_pan_joint": 6.324555320336759,
+            "head_tilt_joint": 6.324555320336759,
+            "hand_motor_joint": 6.324555320336759,
+        }
         if self._hsr_arm_dofs_idx_local:
-            arm_kp = torch.full(
-                (len(self._hsr_arm_dofs_idx_local),),
-                4500.0,
+            arm_kp = torch.tensor(
+                [tuned_kp.get(name, 4500.0) for name in self._hsr_use_joints],
                 device=gs.device,
                 dtype=gs.tc_float,
             )
-            arm_kv = torch.full(
-                (len(self._hsr_arm_dofs_idx_local),),
-                450.0,
+            arm_kv = torch.tensor(
+                [tuned_kv.get(name, 450.0) for name in self._hsr_use_joints],
                 device=gs.device,
                 dtype=gs.tc_float,
             )
             self.set_dofs_kp(arm_kp, dofs_idx_local=self._hsr_arm_dofs_idx_local)
             self.set_dofs_kv(arm_kv, dofs_idx_local=self._hsr_arm_dofs_idx_local)
         if self._hsr_head_dofs_idx_local:
-            head_kp = torch.full(
-                (len(self._hsr_head_dofs_idx_local),),
-                4500.0,
+            head_names = []
+            for name in ("head_pan_joint", "head_tilt_joint"):
+                try:
+                    self.get_joint(name)
+                except Exception:
+                    continue
+                head_names.append(name)
+            head_kp = torch.tensor(
+                [tuned_kp.get(name, 4500.0) for name in head_names],
                 device=gs.device,
                 dtype=gs.tc_float,
             )
-            head_kv = torch.full(
-                (len(self._hsr_head_dofs_idx_local),),
-                450.0,
+            head_kv = torch.tensor(
+                [tuned_kv.get(name, 450.0) for name in head_names],
                 device=gs.device,
                 dtype=gs.tc_float,
             )
             self.set_dofs_kp(head_kp, dofs_idx_local=self._hsr_head_dofs_idx_local)
             self.set_dofs_kv(head_kv, dofs_idx_local=self._hsr_head_dofs_idx_local)
+        try:
+            hand_joint = self.get_joint("hand_motor_joint")
+        except Exception:
+            hand_joint = None
+        if hand_joint is not None:
+            hand_dofs = hand_joint.dofs_idx_local
+            if isinstance(hand_dofs, (list, tuple)):
+                hand_idx = int(hand_dofs[0]) if hand_dofs else None
+            else:
+                hand_idx = int(hand_dofs)
+            if hand_idx is None:
+                self._hsr_default_gains_applied = True
+                return
+            self.set_dofs_kp(
+                torch.tensor([tuned_kp["hand_motor_joint"]], device=gs.device, dtype=gs.tc_float),
+                dofs_idx_local=[hand_idx],
+            )
+            self.set_dofs_kv(
+                torch.tensor([tuned_kv["hand_motor_joint"]], device=gs.device, dtype=gs.tc_float),
+                dofs_idx_local=[hand_idx],
+            )
         self._hsr_default_gains_applied = True
 
     def _hsr_apply_head_hold(self) -> None:
@@ -1065,7 +1118,11 @@ class HSRRigidEntity(RigidEntity):
             except Exception:
                 self._hsr_torso_dof_idx_local = None
                 return None
-            self._hsr_torso_dof_idx_local = int(joint.dof_idx_local)
+            dofs = joint.dofs_idx_local
+            if isinstance(dofs, (list, tuple)):
+                self._hsr_torso_dof_idx_local = int(dofs[0]) if dofs else None
+            else:
+                self._hsr_torso_dof_idx_local = int(dofs)
         return self._hsr_torso_dof_idx_local
 
     @gs.assert_built
