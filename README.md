@@ -49,15 +49,7 @@ Required assets live under `hsr_genesis/data`:
 
 - `data/hsrb_analytic_ik/joint_configs`: Reference joint configurations used by IK tests.
 - `data/urdf/hsrb4s.urdf`: Main HSR URDF file.
-- `data/urdf/hsrb_meshes` and `data/urdf/hsrb_description`: Mesh and description assets referenced by the URDF.
-
-## Development
-
-Install the package in editable mode:
-
-```bash
-pip install -e hsr_genesis
-```
+- `data/urdf/hsrb_meshes`: Mesh assets referenced by the URDF.
 
 ## Run Hello HSR (venv)
 
@@ -69,12 +61,12 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -e .
 PYTHONPATH=hsr_genesis/src python examples/tutorials/hello_hsr_parallel.py
+```
 
 Sensor demo:
 
 ```bash
 PYTHONPATH=hsr_genesis/src python examples/tutorials/hello_hsr_sensor.py
-```
 ```
 
 If you see a viewer window, the example is running correctly.
