@@ -2,7 +2,6 @@ import sys
 import math
 from pathlib import Path
 import argparse
-import xml.etree.ElementTree as ET
 
 import genesis as gs
 import torch
@@ -29,17 +28,6 @@ def _parse_res(value: str) -> tuple[int, int] | None:
         raise ValueError("--depth-res must be formatted like '320x240'")
     w_str, h_str = value.split("x", 1)
     return int(w_str), int(h_str)
-
-
-def _sensor_reference_links_from_urdf(urdf_path: str) -> list[str]:
-    tree = ET.parse(urdf_path)
-    root = tree.getroot()
-    refs: list[str] = []
-    for gazebo in root.findall("gazebo"):
-        ref = gazebo.attrib.get("reference")
-        if ref and ref not in refs:
-            refs.append(ref)
-    return refs
 
 
 depth_res_override = _parse_res(args.depth_res)
@@ -85,44 +73,11 @@ scene.add_entity(
     gs.morphs.Plane(),
 )
 
-if n_envs == 1:
-    scene.add_entity(
-        gs.morphs.Box(
-            pos=(0.9, 0.0, 0.15),
-            size=(0.2, 0.2, 0.3),
-            fixed=True,
-            collision=True,
-        ),
-        surface=gs.surfaces.Default(color=(0.2, 0.8, 0.2, 1.0)),
-    )
-
-    scene.add_entity(
-        gs.morphs.Box(
-            pos=(0.6, 0.6, 0.1),
-            size=(0.35, 0.15, 0.2),
-            fixed=True,
-            collision=True,
-        ),
-        surface=gs.surfaces.Default(color=(0.2, 0.2, 0.8, 1.0)),
-    )
-
-    scene.add_entity(
-        gs.morphs.Cylinder(
-            pos=(1.0, -0.5, 0.25),
-            radius=0.1,
-            height=0.4,
-            fixed=True,
-            collision=True,
-        ),
-        surface=gs.surfaces.Default(color=(0.8, 0.5, 0.2, 1.0)),
-    )
-
 hsr = scene.add_entity(
     HSRBURDF(
         file=str(URDF_PATH),
         fixed=False,
         recompute_inertia=True,
-        links_to_keep=_sensor_reference_links_from_urdf(URDF_PATH),
         robot="hsrb",
         base_mode="planar",
         end_effector_frame="hand_palm_link",
