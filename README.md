@@ -36,6 +36,34 @@ git submodule update --init --recursive
 - `hsr_genesis.gripper_controller`: Gripper control actions and interfaces (apply-force, grasp), ported from `hsrb_gripper_controller`.
 - `hsr_genesis.sensor_manager`: URDF-driven sensor attachment helpers for HSR.
 
+## HSR Rigid Entity Options
+
+`HSRBURDF` is a thin wrapper around `gs.morphs.URDF` that wires in HSR-specific behavior by setting attributes consumed by `HSRRigidEntity`. You can pass the options below when constructing `HSRBURDF`.
+
+- `file`: URDF path (required by `gs.morphs.URDF`).
+- `robot`: Robot variant, `"hsrb"` (default) or `"hsrc"`. Selects IK parameters.
+- `end_effector_frame`: Link name used as the IK end-effector frame. Default is `"hand_palm_link"`.
+- `base_mode`: Base kinematics model. `"planar"` (default) uses x/y + yaw. `"rotation_z"` enables yaw-only rotation.
+- `use_base_yaw_ik`: If `True`, include base yaw in IK solving for end-effector alignment.
+- `use_base_controller`: Enable the base controller behavior. Default is `True`.
+- `base_control_mode`: `"controller"` (default) uses the base controller, `"qpos"` drives the base by directly setting robot positions. Note: `"qpos"` is fast and precise, but it does not simulate real-robot base control error.
+- `optimizer`: IK optimizer selection, `"auto"` (default) or a specific backend recognized by Genesis.
+
+Minimal example:
+
+```python
+import genesis as gs
+from hsr_genesis.hsr_rigid_entity import HSRBURDF
+
+hsr = HSRBURDF(
+    file="data/urdf/hsrb4s.urdf",
+    robot="hsrb",
+    base_mode="planar",
+    base_control_mode="controller",
+    use_base_controller=True,
+)
+```
+
 ### GPU-accelerated modules
 
 The following modules include Taichi/Torch kernels and can run on GPU when
