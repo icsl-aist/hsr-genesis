@@ -90,13 +90,13 @@ cd hsr-genesis
 python -m venv .venv
 source .venv/bin/activate
 pip install -e .
-PYTHONPATH=hsr_genesis/src python examples/tutorials/hello_hsr_parallel.py
+PYTHONPATH=src python examples/tutorials/hello_hsr_parallel.py
 ```
 
 Sensor demo:
 
 ```bash
-PYTHONPATH=hsr_genesis/src python examples/tutorials/hello_hsr_sensor.py
+PYTHONPATH=src python examples/tutorials/hello_hsr_sensor.py
 ```
 
 If you see a viewer window, the example is running correctly.
