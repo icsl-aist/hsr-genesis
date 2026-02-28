@@ -16,6 +16,11 @@ __all__ = [
     "RobotOptimizer",
     "RobotOptimizerGPU",
     "URDFSensorManager",
+    "apply_runtime_patches",
+    "apply_raycast_filter_patch",
+    "set_raycast_ignore_list",
+    "update_raycast_ignore_list",
+    "clear_raycast_ignore_list",
 ]
 
 __version__ = "0.1.0"
@@ -40,6 +45,26 @@ def __getattr__(name: str):
         from .hsr_rigid_entity import HSRBURDF, HSRRigidEntity
 
         return HSRBURDF if name == "HSRBURDF" else HSRRigidEntity
+    if name == "apply_runtime_patches":
+        from .genesis_patches import apply_runtime_patches
+
+        return apply_runtime_patches
+    if name == "apply_raycast_filter_patch":
+        from .raycast_filter_patch import apply_raycast_filter_patch
+
+        return apply_raycast_filter_patch
+    if name == "set_raycast_ignore_list":
+        from .raycast_filter_patch import set_raycast_ignore_list
+
+        return set_raycast_ignore_list
+    if name == "update_raycast_ignore_list":
+        from .raycast_filter_patch import update_raycast_ignore_list
+
+        return update_raycast_ignore_list
+    if name == "clear_raycast_ignore_list":
+        from .raycast_filter_patch import clear_raycast_ignore_list
+
+        return clear_raycast_ignore_list
     raise AttributeError(name)
 
 

@@ -15,7 +15,7 @@ import torch
 
 from genesis.engine.entities.rigid_entity import RigidEntity
 
-from .genesis_patches import apply_entity_cls_override_patch
+from .genesis_patches import apply_entity_cls_override_patch, apply_runtime_patches
 from .analytic_ik import AnalyticIK2, IKRequest, IKResult, JointState, JOINT_ORDER
 from .gripper_controller import HSRBGripperControllerBatch
 from .base_controller import (
@@ -254,7 +254,9 @@ def _pose_error_torch(target: torch.Tensor, current: torch.Tensor) -> torch.Tens
         dim=0,
     )
     err_rot = axis * angle
-    err_rot = torch.where((torch.abs(angle) < eps).reshape(1), torch.zeros(3, device=target.device, dtype=target.dtype), err_rot)
+    err_rot = torch.where(
+        (torch.abs(angle) < eps).reshape(1), torch.zeros(3, device=target.device, dtype=target.dtype), err_rot
+    )
     return torch.cat([err_pos, err_rot], dim=0)
 
 
@@ -286,6 +288,7 @@ def _pose_error_torch_batch(target: torch.Tensor, current: torch.Tensor) -> torc
 class HSRRigidEntity(RigidEntity):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        apply_runtime_patches()
         morph = kwargs.get("morph", None)
         self._hsr_robot = getattr(morph, "hsr_robot", "hsrb")
         self._hsr_base_mode = getattr(morph, "hsr_base_mode", "planar")
@@ -311,14 +314,10 @@ class HSRRigidEntity(RigidEntity):
                 torch.tensor([1.0, 0.0, 0.0], device=gs.device, dtype=gs.tc_float),
                 torch.tensor([0.0, 1.0, 0.0], device=gs.device, dtype=gs.tc_float),
             ]
-            self._hsr_rotational_base = [
-                torch.tensor([0.0, 0.0, 1.0], device=gs.device, dtype=gs.tc_float)
-            ]
+            self._hsr_rotational_base = [torch.tensor([0.0, 0.0, 1.0], device=gs.device, dtype=gs.tc_float)]
         elif self._hsr_base_mode == "rotation_z":
             self._hsr_linear_base = []
-            self._hsr_rotational_base = [
-                torch.tensor([0.0, 0.0, 1.0], device=gs.device, dtype=gs.tc_float)
-            ]
+            self._hsr_rotational_base = [torch.tensor([0.0, 0.0, 1.0], device=gs.device, dtype=gs.tc_float)]
         else:
             raise ValueError(f"Unknown base_mode: {self._hsr_base_mode}")
         self._hsr_use_joints = list(JOINT_ORDER)
@@ -330,12 +329,8 @@ class HSRRigidEntity(RigidEntity):
         mimic_params = _read_torso_mimic_params(getattr(morph, "file", None))
         if mimic_params is not None:
             mult, offset = mimic_params
-            self._hsr_torso_mimic_multiplier = torch.tensor(
-                mult, device=gs.device, dtype=gs.tc_float
-            )
-            self._hsr_torso_mimic_offset = torch.tensor(
-                offset, device=gs.device, dtype=gs.tc_float
-            )
+            self._hsr_torso_mimic_multiplier = torch.tensor(mult, device=gs.device, dtype=gs.tc_float)
+            self._hsr_torso_mimic_offset = torch.tensor(offset, device=gs.device, dtype=gs.tc_float)
         self._hsr_arm_dofs_idx_local = []
         for name in self._hsr_use_joints:
             dofs = self.get_joint(name).dofs_idx_local
@@ -873,8 +868,14 @@ class HSRRigidEntity(RigidEntity):
             traj = arm_trajs[i]
             positions = to_torch(traj.positions).to(device=gs.device, dtype=gs.tc_float)
             time_from_start = to_torch(traj.time_from_start).to(device=gs.device, dtype=gs.tc_float)
-            velocities = None if traj.velocities is None else to_torch(traj.velocities).to(device=gs.device, dtype=gs.tc_float)
-            accelerations = None if traj.accelerations is None else to_torch(traj.accelerations).to(device=gs.device, dtype=gs.tc_float)
+            velocities = (
+                None if traj.velocities is None else to_torch(traj.velocities).to(device=gs.device, dtype=gs.tc_float)
+            )
+            accelerations = (
+                None
+                if traj.accelerations is None
+                else to_torch(traj.accelerations).to(device=gs.device, dtype=gs.tc_float)
+            )
 
             if positions.ndim != 2 or time_from_start.ndim != 1:
                 raise ValueError("arm_trajectory positions must be (T, N) and time_from_start (T,)")
@@ -1030,7 +1031,9 @@ class HSRRigidEntity(RigidEntity):
 
         return {
             "active": active,
-            "base": base_status.get("command", torch.zeros((envs_idx_arr.numel(), 3), device=gs.device, dtype=gs.tc_float)),
+            "base": base_status.get(
+                "command", torch.zeros((envs_idx_arr.numel(), 3), device=gs.device, dtype=gs.tc_float)
+            ),
             "arm": desired_arm,
         }
 
@@ -1098,8 +1101,10 @@ class HSRRigidEntity(RigidEntity):
     def _build_request(self, *, target_origin_to_end: torch.Tensor, envs_idx=None) -> IKRequest:
         origin_to_base = self._current_base_origin_to_base(envs_idx=envs_idx)
         initial_angle = self._current_arm_joint_state(envs_idx=envs_idx)
-        target_origin_to_end = target_origin_to_end if torch.is_tensor(target_origin_to_end) else torch.as_tensor(
-            target_origin_to_end, device=gs.device, dtype=gs.tc_float
+        target_origin_to_end = (
+            target_origin_to_end
+            if torch.is_tensor(target_origin_to_end)
+            else torch.as_tensor(target_origin_to_end, device=gs.device, dtype=gs.tc_float)
         )
         return IKRequest(
             frame_name=self._hsr_end_effector_frame,
@@ -1197,9 +1202,7 @@ class HSRRigidEntity(RigidEntity):
         else:
             pos_arr = torch.as_tensor(pos, device=device, dtype=dtype)
         if quat is None:
-            quat_arr = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device, dtype=dtype).repeat(
-                pos_arr.shape[0], 1
-            )
+            quat_arr = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device, dtype=dtype).repeat(pos_arr.shape[0], 1)
         else:
             quat_arr = torch.as_tensor(quat, device=device, dtype=dtype)
 
@@ -1218,7 +1221,9 @@ class HSRRigidEntity(RigidEntity):
         use_base_yaw = self._hsr_use_base_yaw_ik or self._hsr_base_mode == "rotation_z"
         use_base_yaw_effective = use_base_yaw
         if use_base_yaw and n_envs == 1:
-            requests = [self._build_request(target_origin_to_end=targets[i], envs_idx=e) for i, e in enumerate(envs_idx)]
+            requests = [
+                self._build_request(target_origin_to_end=targets[i], envs_idx=e) for i, e in enumerate(envs_idx)
+            ]
             results = []
             sol = []
             o2b = []
@@ -1306,8 +1311,10 @@ class HSRRigidEntity(RigidEntity):
             for i, (res, s, b, e) in enumerate(zip(results, sol, o2b, o2e)):
                 if res == IKResult.SUCCESS:
                     for q_idx, val in zip(qs_idx_local, s.position):
-                        qpos[i, q_idx] = val if torch.is_tensor(val) else torch.tensor(
-                            float(val), device=qpos.device, dtype=qpos.dtype
+                        qpos[i, q_idx] = (
+                            val
+                            if torch.is_tensor(val)
+                            else torch.tensor(float(val), device=qpos.device, dtype=qpos.dtype)
                         )
                     if (
                         torso_qs_idx_local is not None
@@ -1317,7 +1324,9 @@ class HSRRigidEntity(RigidEntity):
                         arm_lift = s.position[self._hsr_arm_lift_order_idx]
                         if not torch.is_tensor(arm_lift):
                             arm_lift = torch.tensor(float(arm_lift), device=qpos.device, dtype=qpos.dtype)
-                        qpos[i, torso_qs_idx_local] = arm_lift * self._hsr_torso_mimic_multiplier + self._hsr_torso_mimic_offset
+                        qpos[i, torso_qs_idx_local] = (
+                            arm_lift * self._hsr_torso_mimic_multiplier + self._hsr_torso_mimic_offset
+                        )
                     if base_qs_idx_local:
                         base = b
                         if not torch.is_tensor(base):
@@ -1398,8 +1407,10 @@ class HSRRigidEntity(RigidEntity):
             else:
                 if bool(success_mask[0].item()):
                     if use_base_yaw:
-                        cur_end = o2e[0] if torch.is_tensor(o2e[0]) else torch.as_tensor(
-                            o2e[0], device=qpos.device, dtype=qpos.dtype
+                        cur_end = (
+                            o2e[0]
+                            if torch.is_tensor(o2e[0])
+                            else torch.as_tensor(o2e[0], device=qpos.device, dtype=qpos.dtype)
                         )
                     else:
                         cur_end = o2e[0].to(device=qpos.device, dtype=qpos.dtype)
