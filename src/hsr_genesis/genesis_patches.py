@@ -149,6 +149,14 @@ def apply_raycaster_ignore_patch() -> None:
 
 def apply_runtime_patches() -> None:
     """Apply HSR runtime patches after ``gs.init()``."""
+    import genesis as gs
+
+    gs_version = getattr(gs, "__version__", None)
+    if gs_version != "0.4.0":
+        raise RuntimeError(
+            f"genesis-world version mismatch: expected 0.4.0, found {gs_version}. Please install genesis-world==0.4.0."
+        )
+
     apply_entity_cls_override_patch()
     apply_raycaster_ignore_patch()
 

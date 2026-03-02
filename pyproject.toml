@@ -13,7 +13,7 @@ authors = [
     { name = "HSR Genesis Contributors" }
 ]
 dependencies = [
-    "genesis-world",
+    "genesis-world==0.4.0",
     "torch",
     "PyYAML",
 ]
@@ -24,3 +24,5 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["hsr_genesis", "hsr_genesis.*"]
+
+
