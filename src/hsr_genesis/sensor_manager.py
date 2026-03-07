@@ -9,11 +9,13 @@ import math
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Collection
 
 import numpy as np
 
 import genesis as gs
+
+from . import force_torque as _force_torque  # noqa: F401
 
 
 @dataclass(frozen=True)
@@ -24,6 +26,31 @@ class URDFSensorSpec:
     pose_xyz: tuple[float, float, float]
     pose_rpy: tuple[float, float, float]
     params: dict[str, Any]
+
+
+class _RasterizerCameraSensorProxy:
+    def __init__(self, sensor: Any, scene: gs.Scene):
+        self._sensor = sensor
+        self._scene = scene
+        self._frustum_disabled = False
+
+    def _disable_viewer_camera_frustum_once(self) -> None:
+        if self._frustum_disabled:
+            return
+        # Genesis 0.4 rasterizer cameras can fail on first RGB read when the
+        # viewer frustum overlay is active, so disable that overlay lazily.
+        viewer_context = getattr(getattr(self._scene, "visualizer", None), "context", None)
+        off_camera_frustum = getattr(viewer_context, "off_camera_frustum", None)
+        if callable(off_camera_frustum):
+            off_camera_frustum()
+        self._frustum_disabled = True
+
+    def read(self, *args, **kwargs):
+        self._disable_viewer_camera_frustum_once()
+        return self._sensor.read(*args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._sensor, name)
 
 
 def _parse_float(text: str | None, default: float) -> float:
@@ -53,9 +80,7 @@ def _pose_from_text(
 def _rpy_rad_to_euler_deg(
     rpy: tuple[float, float, float],
 ) -> tuple[float, float, float]:
-    return tuple(
-        float(v) * 180.0 / math.pi for v in rpy
-    )  # type: ignore[return-value]
+    return tuple(float(v) * 180.0 / math.pi for v in rpy)  # type: ignore[return-value]
 
 
 def _rpy_xyz_to_t(
@@ -111,9 +136,7 @@ def _vertical_fov_from_horizontal(
 ) -> float:
     if width <= 0 or height <= 0:
         return float(fov_h_rad)
-    return 2.0 * math.atan(
-        (float(height) / float(width)) * math.tan(0.5 * float(fov_h_rad))
-    )
+    return 2.0 * math.atan((float(height) / float(width)) * math.tan(0.5 * float(fov_h_rad)))
 
 
 class URDFSensorManager:
@@ -151,14 +174,22 @@ class URDFSensorManager:
         camera_backend: str = "rasterizer",
         depth_res_override: tuple[int, int] | None = None,
         draw_debug: bool = False,
+        enabled_sensor_names: Collection[str] | None = None,
+        disabled_sensor_names: Collection[str] | None = None,
     ) -> dict[str, Any]:
         specs = parse_gazebo_sensors(urdf_path)
+        enabled_names = set(enabled_sensor_names or ())
+        disabled_names = set(disabled_sensor_names or ())
 
         camera_res_override: tuple[int, int] | None = None
         if create_cameras and camera_backend == "batch_renderer":
             cam_resolutions: list[tuple[int, int]] = []
             for spec in specs:
-                if spec.type != "camera":
+                if spec.type != "camera" or not self._is_sensor_enabled(
+                    spec.name,
+                    enabled_names=enabled_names,
+                    disabled_names=disabled_names,
+                ):
                     continue
                 width = int(spec.params.get("width", 320))
                 height = int(spec.params.get("height", 240))
@@ -170,38 +201,82 @@ class URDFSensorManager:
                 )
 
         for spec in specs:
-            if spec.type == "ray" and create_lidar:
+            if (
+                spec.type == "ray"
+                and create_lidar
+                and self._is_sensor_enabled(
+                    spec.name,
+                    enabled_names=enabled_names,
+                    disabled_names=disabled_names,
+                )
+            ):
                 sensor = self._create_lidar(spec, draw_debug=draw_debug)
                 if sensor is not None:
                     self._add(spec.name, sensor)
-            elif spec.type == "camera" and create_cameras:
-                rgb = self._create_camera(
-                    spec,
-                    backend=camera_backend,
-                    override_res=camera_res_override,
-                )
-                if rgb is not None:
-                    self._add(spec.name, rgb)
-                if create_depth_cameras:
+            elif spec.type == "camera":
+                if create_cameras and self._is_sensor_enabled(
+                    spec.name,
+                    enabled_names=enabled_names,
+                    disabled_names=disabled_names,
+                ):
+                    rgb = self._create_camera(
+                        spec,
+                        backend=camera_backend,
+                        override_res=camera_res_override,
+                    )
+                    if rgb is not None:
+                        self._add(spec.name, rgb)
+                depth_name = f"{spec.name}_depth"
+                if create_depth_cameras and self._is_sensor_enabled(
+                    depth_name,
+                    enabled_names=enabled_names,
+                    disabled_names=disabled_names,
+                ):
                     depth = self._create_depth_camera(
                         spec,
                         draw_debug=draw_debug,
                         override_res=depth_res_override,
                     )
                     if depth is not None:
-                        self._add(
-                            f"{spec.name}_depth",
-                            depth,
-                        )
-            elif spec.type == "force_torque" and create_force_torque:
+                        self._add(depth_name, depth)
+            elif (
+                spec.type == "force_torque"
+                and create_force_torque
+                and self._is_sensor_enabled(
+                    spec.name,
+                    enabled_names=enabled_names,
+                    disabled_names=disabled_names,
+                )
+            ):
                 ft = self._create_force_torque(spec)
                 if ft is not None:
                     self._add(spec.name, ft)
-            elif spec.type == "imu" and create_imu:
+            elif (
+                spec.type == "imu"
+                and create_imu
+                and self._is_sensor_enabled(
+                    spec.name,
+                    enabled_names=enabled_names,
+                    disabled_names=disabled_names,
+                )
+            ):
                 imu = self._create_imu(spec)
                 if imu is not None:
                     self._add(spec.name, imu)
         return dict(self._sensors)
+
+    @staticmethod
+    def _is_sensor_enabled(
+        name: str,
+        *,
+        enabled_names: set[str],
+        disabled_names: set[str],
+    ) -> bool:
+        if enabled_names and name not in enabled_names:
+            return False
+        if name in disabled_names:
+            return False
+        return True
 
     def _link_idx_local_from_reference(self, reference: str) -> int:
         link = self.entity.get_link(name=reference)
@@ -229,13 +304,9 @@ class URDFSensorManager:
         )
 
         pos_offset = spec.pose_xyz
-        euler_offset = _rpy_rad_to_euler_deg(
-            spec.pose_rpy
-        )
+        euler_offset = _rpy_rad_to_euler_deg(spec.pose_rpy)
 
-        link_idx_local = self._link_idx_local_from_reference(
-            spec.reference
-        )
+        link_idx_local = self._link_idx_local_from_reference(spec.reference)
 
         is_head_sensor = isinstance(spec.reference, str) and spec.reference.startswith("head_")
         ignore_parent_link = bool(is_head_sensor)
@@ -308,14 +379,8 @@ class URDFSensorManager:
         else:
             width = int(params.get("width", 320))
             height = int(params.get("height", 240))
-        fov_h_rad = float(
-            params.get("horizontal_fov", math.radians(90.0))
-        )
-        fov_v_deg = (
-            _vertical_fov_from_horizontal(fov_h_rad, width, height)
-            * 180.0
-            / math.pi
-        )
+        fov_h_rad = float(params.get("horizontal_fov", math.radians(90.0)))
+        fov_v_deg = _vertical_fov_from_horizontal(fov_h_rad, width, height) * 180.0 / math.pi
 
         offset_t = _rpy_xyz_to_t(spec.pose_xyz, spec.pose_rpy)
 
@@ -324,9 +389,7 @@ class URDFSensorManager:
         else:
             options_cls = gs.sensors.BatchRendererCameraOptions
 
-        link_idx_local = self._link_idx_local_from_reference(
-            spec.reference
-        )
+        link_idx_local = self._link_idx_local_from_reference(spec.reference)
         entity_idx = int(self.entity.idx)
         sensor_options = options_cls(
             res=(width, height),
@@ -335,7 +398,10 @@ class URDFSensorManager:
             link_idx_local=link_idx_local,
             offset_T=offset_t,
         )
-        return self.scene.add_sensor(sensor_options)
+        sensor = self.scene.add_sensor(sensor_options)
+        if backend == "rasterizer":
+            return _RasterizerCameraSensorProxy(sensor, self.scene)
+        return sensor
 
     def _create_depth_camera(
         self,
@@ -350,17 +416,11 @@ class URDFSensorManager:
         else:
             width = int(params.get("width", 320))
             height = int(params.get("height", 240))
-        fov_h_rad = float(
-            params.get("horizontal_fov", math.radians(90.0))
-        )
+        fov_h_rad = float(params.get("horizontal_fov", math.radians(90.0)))
         near = float(params.get("near", 0.05))
         far = float(params.get("far", 20.0))
 
-        fov_horizontal_deg = float(
-            fov_h_rad
-            * 180.0
-            / math.pi
-        )
+        fov_horizontal_deg = float(fov_h_rad * 180.0 / math.pi)
 
         pattern = gs.sensors.raycaster.DepthCameraPattern(
             res=(width, height),
@@ -368,13 +428,9 @@ class URDFSensorManager:
         )
 
         pos_offset = spec.pose_xyz
-        euler_offset = _rpy_rad_to_euler_deg(
-            spec.pose_rpy
-        )
+        euler_offset = _rpy_rad_to_euler_deg(spec.pose_rpy)
 
-        link_idx_local = self._link_idx_local_from_reference(
-            spec.reference
-        )
+        link_idx_local = self._link_idx_local_from_reference(spec.reference)
 
         return self.scene.add_sensor(
             gs.sensors.DepthCamera(
@@ -446,9 +502,7 @@ def parse_gazebo_sensors(urdf_path: str | Path) -> list[URDFSensorSpec]:
             if not sensor_name or not sensor_type:
                 continue
 
-            pose_xyz, pose_rpy = _pose_from_text(
-                (sensor.findtext("pose") or "").strip()
-            )
+            pose_xyz, pose_rpy = _pose_from_text((sensor.findtext("pose") or "").strip())
 
             params: dict[str, Any] = {}
 
@@ -479,7 +533,7 @@ def parse_gazebo_sensors(urdf_path: str | Path) -> list[URDFSensorSpec]:
                         20.0,
                     )
 
-            elif sensor_type == "camera":
+            elif sensor_type in ("camera", "depth"):
                 cam = sensor.find("camera")
                 if cam is not None:
                     params["horizontal_fov"] = _parse_float(
@@ -509,7 +563,7 @@ def parse_gazebo_sensors(urdf_path: str | Path) -> list[URDFSensorSpec]:
             specs.append(
                 URDFSensorSpec(
                     name=sensor_name,
-                    type=sensor_type,
+                    type="camera" if sensor_type == "depth" else sensor_type,
                     reference=reference,
                     pose_xyz=pose_xyz,
                     pose_rpy=pose_rpy,
