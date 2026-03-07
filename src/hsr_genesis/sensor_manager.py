@@ -185,7 +185,7 @@ class URDFSensorManager:
         if create_cameras and camera_backend == "batch_renderer":
             cam_resolutions: list[tuple[int, int]] = []
             for spec in specs:
-                if spec.type != "camera" or not self._is_sensor_enabled(
+                if spec.type not in ("camera", "depth") or not self._is_sensor_enabled(
                     spec.name,
                     enabled_names=enabled_names,
                     disabled_names=disabled_names,
@@ -214,6 +214,19 @@ class URDFSensorManager:
                 if sensor is not None:
                     self._add(spec.name, sensor)
             elif spec.type == "camera":
+                if create_cameras and self._is_sensor_enabled(
+                    spec.name,
+                    enabled_names=enabled_names,
+                    disabled_names=disabled_names,
+                ):
+                    rgb = self._create_camera(
+                        spec,
+                        backend=camera_backend,
+                        override_res=camera_res_override,
+                    )
+                    if rgb is not None:
+                        self._add(spec.name, rgb)
+            elif spec.type == "depth":
                 if create_cameras and self._is_sensor_enabled(
                     spec.name,
                     enabled_names=enabled_names,
@@ -563,7 +576,7 @@ def parse_gazebo_sensors(urdf_path: str | Path) -> list[URDFSensorSpec]:
             specs.append(
                 URDFSensorSpec(
                     name=sensor_name,
-                    type="camera" if sensor_type == "depth" else sensor_type,
+                    type=sensor_type,
                     reference=reference,
                     pose_xyz=pose_xyz,
                     pose_rpy=pose_rpy,
