@@ -28,6 +28,51 @@ class URDFSensorSpec:
     params: dict[str, Any]
 
 
+class _RateLimitedSensorProxy:
+    def __init__(self, sensor: Any, scene: gs.Scene, *, update_rate_hz: float):
+        self._sensor = sensor
+        self._scene = scene
+        self._update_period = 1.0 / float(update_rate_hz)
+        self._cache: dict[Any, tuple[float, Any]] = {}
+
+    def _scene_time(self) -> float:
+        return float(getattr(self._scene, "t", 0.0))
+
+    def _make_cache_key(self, method_name: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+        try:
+            return (method_name, args, tuple(sorted(kwargs.items())))
+        except TypeError:
+            return None
+
+    def _call_with_rate_limit(self, method_name: str, *args, **kwargs):
+        method = getattr(self._sensor, method_name)
+        cache_key = self._make_cache_key(method_name, args, kwargs)
+        if cache_key is None:
+            return method(*args, **kwargs)
+
+        now = self._scene_time()
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            last_time, last_value = cached
+            if now < last_time:
+                self._cache.pop(cache_key, None)
+            elif now - last_time < self._update_period:
+                return last_value
+
+        value = method(*args, **kwargs)
+        self._cache[cache_key] = (now, value)
+        return value
+
+    def read(self, *args, **kwargs):
+        return self._call_with_rate_limit("read", *args, **kwargs)
+
+    def read_image(self, *args, **kwargs):
+        return self._call_with_rate_limit("read_image", *args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._sensor, name)
+
+
 class _RasterizerCameraSensorProxy:
     def __init__(self, sensor: Any, scene: gs.Scene):
         self._sensor = sensor
@@ -63,6 +108,15 @@ def _parse_int(text: str | None, default: int) -> int:
     if text is None:
         return int(default)
     return int(text.strip())
+
+
+def _parse_positive_float(text: str | None) -> float | None:
+    if text is None:
+        return None
+    value = float(text.strip())
+    if value <= 0.0 or not math.isfinite(value):
+        return None
+    return value
 
 
 def _pose_from_text(
@@ -162,6 +216,16 @@ class URDFSensorManager:
             name = f"{name}_{len(self._sensors)}"
         self._sensors[name] = sensor
 
+    def _wrap_sensor_with_update_rate(self, spec: URDFSensorSpec, sensor: Any) -> Any:
+        update_rate_hz = spec.params.get("update_rate_hz")
+        if update_rate_hz is None:
+            return sensor
+        return _RateLimitedSensorProxy(
+            sensor,
+            self.scene,
+            update_rate_hz=float(update_rate_hz),
+        )
+
     def create_from_urdf(
         self,
         urdf_path: str | Path,
@@ -212,7 +276,7 @@ class URDFSensorManager:
             ):
                 sensor = self._create_lidar(spec, draw_debug=draw_debug)
                 if sensor is not None:
-                    self._add(spec.name, sensor)
+                    self._add(spec.name, self._wrap_sensor_with_update_rate(spec, sensor))
             elif spec.type == "camera":
                 if create_cameras and self._is_sensor_enabled(
                     spec.name,
@@ -225,7 +289,7 @@ class URDFSensorManager:
                         override_res=camera_res_override,
                     )
                     if rgb is not None:
-                        self._add(spec.name, rgb)
+                        self._add(spec.name, self._wrap_sensor_with_update_rate(spec, rgb))
             elif spec.type == "depth":
                 if create_cameras and self._is_sensor_enabled(
                     spec.name,
@@ -238,7 +302,7 @@ class URDFSensorManager:
                         override_res=camera_res_override,
                     )
                     if rgb is not None:
-                        self._add(spec.name, rgb)
+                        self._add(spec.name, self._wrap_sensor_with_update_rate(spec, rgb))
                 depth_name = f"{spec.name}_depth"
                 if create_depth_cameras and self._is_sensor_enabled(
                     depth_name,
@@ -251,7 +315,7 @@ class URDFSensorManager:
                         override_res=depth_res_override,
                     )
                     if depth is not None:
-                        self._add(depth_name, depth)
+                        self._add(depth_name, self._wrap_sensor_with_update_rate(spec, depth))
             elif (
                 spec.type == "force_torque"
                 and create_force_torque
@@ -263,7 +327,7 @@ class URDFSensorManager:
             ):
                 ft = self._create_force_torque(spec)
                 if ft is not None:
-                    self._add(spec.name, ft)
+                    self._add(spec.name, self._wrap_sensor_with_update_rate(spec, ft))
             elif (
                 spec.type == "imu"
                 and create_imu
@@ -275,7 +339,7 @@ class URDFSensorManager:
             ):
                 imu = self._create_imu(spec)
                 if imu is not None:
-                    self._add(spec.name, imu)
+                    self._add(spec.name, self._wrap_sensor_with_update_rate(spec, imu))
         return dict(self._sensors)
 
     @staticmethod
@@ -518,6 +582,9 @@ def parse_gazebo_sensors(urdf_path: str | Path) -> list[URDFSensorSpec]:
             pose_xyz, pose_rpy = _pose_from_text((sensor.findtext("pose") or "").strip())
 
             params: dict[str, Any] = {}
+            update_rate_hz = _parse_positive_float(sensor.findtext("update_rate"))
+            if update_rate_hz is not None:
+                params["update_rate_hz"] = update_rate_hz
 
             if sensor_type == "ray":
                 horiz = sensor.find("ray/scan/horizontal")
