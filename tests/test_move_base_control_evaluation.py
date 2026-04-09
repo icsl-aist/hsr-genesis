@@ -102,7 +102,7 @@ def _create_scene(
             use_base_controller=True,
             base_control_mode="controller",
             fixed=False,
-            recompute_inertia=True,
+            recompute_inertia=False,
             pos=(0.0, 0.0, 0.05),
         ),
     )
@@ -165,6 +165,11 @@ def _execute_base_movement(
 
     initial_yaw = _yaw_from_quat(initial_quat)
 
+    # Get initial arm joint positions to hold them during base movement
+    arm_pos = robot.get_dofs_position(dofs_idx_local=robot._hsr_arm_dofs_idx_local, envs_idx=[0])
+    if arm_pos.ndim > 1:
+        arm_pos = arm_pos[0]
+
     # Create trajectory from current to target position
     positions = torch.tensor(
         [
@@ -183,6 +188,8 @@ def _execute_base_movement(
     steps = int(math.ceil(duration / dt)) + 20  # Extra steps to ensure completion
     for _ in range(steps):
         robot.step_base_trajectory_batched(dt, envs_idx=[0])
+        # Hold arm joints in initial position to prevent arm from falling
+        robot.control_dofs_position(arm_pos, dofs_idx_local=robot._hsr_arm_dofs_idx_local, envs_idx=[0])
         scene.step()
 
     # Get final state
@@ -258,6 +265,11 @@ def _execute_base_movement_with_wheel_monitoring(
     initial_yaw = _yaw_from_quat(initial_quat)
     prev_yaw = initial_yaw
 
+    # Get initial arm joint positions to hold them during base movement
+    arm_pos = robot.get_dofs_position(dofs_idx_local=robot._hsr_arm_dofs_idx_local, envs_idx=[0])
+    if arm_pos.ndim > 1:
+        arm_pos = arm_pos[0]
+
     # Create trajectory
     positions = torch.tensor(
         [[float(target_x), float(target_y), float(target_yaw)]],
@@ -308,6 +320,8 @@ def _execute_base_movement_with_wheel_monitoring(
 
         # Step the simulation
         robot.step_base_trajectory_batched(dt, envs_idx=[0])
+        # Hold arm joints in initial position to prevent arm from falling
+        robot.control_dofs_position(arm_pos, dofs_idx_local=robot._hsr_arm_dofs_idx_local, envs_idx=[0])
         scene.step()
         current_time += dt
 
