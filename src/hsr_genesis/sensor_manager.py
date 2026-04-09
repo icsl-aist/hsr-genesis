@@ -15,8 +15,6 @@ import numpy as np
 
 import genesis as gs
 
-from . import force_torque as _force_torque  # noqa: F401
-
 
 @dataclass(frozen=True)
 class URDFSensorSpec:

@@ -157,9 +157,20 @@ def apply_runtime_patches() -> None:
             f"genesis-world version mismatch: expected 0.4.0, found {gs_version}. Please install genesis-world==0.4.0."
         )
 
+    # Compatibility shim for Genesis 0.4.0 which doesn't have tc_int/tc_float
+    if not hasattr(gs, "tc_int"):
+        import torch
+        gs.tc_int = torch.int32
+    if not hasattr(gs, "tc_float"):
+        import torch
+        gs.tc_float = torch.float32
+
     apply_entity_cls_override_patch()
     apply_raycaster_ignore_patch()
 
     from .raycast_filter_patch import apply_raycast_filter_patch
 
     apply_raycast_filter_patch()
+
+    # Import force_torque to register the custom sensor (requires gs.init())
+    from . import force_torque as _force_torque  # noqa: F401
