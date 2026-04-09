@@ -461,7 +461,7 @@ class HSRRigidEntity(RigidEntity):
             return
         if self._scene is None or self._scene.sim is None:
             return
-        high_friction = 2.0
+        high_friction = 1.0
         for name in (
             "base_r_drive_wheel_link",
             "base_l_drive_wheel_link",
@@ -788,7 +788,7 @@ class HSRRigidEntity(RigidEntity):
                 desired_pos[i] = desired.positions
                 out[i] = desired.positions
             else:
-                out[i] = ctrl.get_output_velocity(current_positions[i], desired)
+                out[i] = ctrl.get_output_velocity(current_positions[i], desired, dt=dt, current_velocities=current_velocities[i])
             active[i] = True
             ctrl.terminate_control_if_stopped(time_now, current_velocities[i])
 

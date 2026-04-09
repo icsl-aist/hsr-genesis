@@ -262,11 +262,11 @@ class HSRBBaseControllersConfig:
     steer_command_velocity_filter_a: tuple[float, ...] = ()
     steer_command_velocity_filter_b: tuple[float, ...] = ()
 
-    kp_wheel: float = 0.0
+    kp_wheel: float = 100.0
     kv_wheel: float = 62.460087776184096
     wheel_force_limit: float = 87.0
 
-    kp_steer: float = 10.0
+    kp_steer: float = 50.0
     kv_steer: float = 6.324555320336759
     steer_force_limit: float = 50.0
     base_control_mode: str = BaseControlMode.CONTROLLER
@@ -602,8 +602,12 @@ class OmniBaseTrajectoryControl:
 
         positions = to_torch(traj.positions).to(device=gs.device, dtype=TORCH_FLOAT)
         time_from_start = to_torch(traj.time_from_start).to(device=gs.device, dtype=TORCH_FLOAT)
-        velocities = None if traj.velocities is None else to_torch(traj.velocities).to(device=gs.device, dtype=TORCH_FLOAT)
-        accelerations = None if traj.accelerations is None else to_torch(traj.accelerations).to(device=gs.device, dtype=TORCH_FLOAT)
+        velocities = (
+            None if traj.velocities is None else to_torch(traj.velocities).to(device=gs.device, dtype=TORCH_FLOAT)
+        )
+        accelerations = (
+            None if traj.accelerations is None else to_torch(traj.accelerations).to(device=gs.device, dtype=TORCH_FLOAT)
+        )
 
         if traj.joint_names is not None:
             perm = self._make_permutation_vector(self.coordinate_names, traj.joint_names)
@@ -729,7 +733,9 @@ class OmniBaseTrajectoryControl:
         time_from_point = t - t0
         return True, desired, before_last, time_from_point
 
-    def get_output_velocity(self, actual_positions: torch.Tensor, desired_state: DesiredState) -> torch.Tensor:
+    def get_output_velocity(
+        self, actual_positions: torch.Tensor, desired_state: DesiredState, dt: float = 0.01, current_velocities: torch.Tensor | None = None
+    ) -> torch.Tensor:
         actual_positions = to_torch(actual_positions).to(device=gs.device, dtype=TORCH_FLOAT).reshape(3)
 
         error_pos = desired_state.positions - actual_positions
@@ -738,7 +744,14 @@ class OmniBaseTrajectoryControl:
 
         output_velocity = desired_state.velocities + self.feedback_gain * error_pos
 
+        # Runge-Kutta 2nd order integration in heading frame (from hsr.py fix)
+        # Use midpoint angle for better accuracy
         yaw = actual_positions[2]
+        if current_velocities is not None:
+            current_velocities = to_torch(current_velocities).to(device=gs.device, dtype=TORCH_FLOAT).reshape(3)
+            diff_r = current_velocities[2] * dt
+            yaw = yaw + 0.5 * diff_r
+
         c = torch.cos(yaw)
         s = torch.sin(yaw)
         rot = torch.stack(
