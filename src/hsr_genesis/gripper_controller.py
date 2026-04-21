@@ -583,7 +583,7 @@ class HSRBGenesisGripperInterfaceBatch:
     def get_motor_position(
         self,
         *,
-        envs_idx: torch.Tensor,
+        envs_idx: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         return to_torch(
             self.entity.get_dofs_position(
@@ -598,7 +598,7 @@ class HSRBGenesisGripperInterfaceBatch:
     def get_motor_velocity(
         self,
         *,
-        envs_idx: torch.Tensor,
+        envs_idx: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         return to_torch(
             self.entity.get_dofs_velocity(
@@ -613,7 +613,7 @@ class HSRBGenesisGripperInterfaceBatch:
     def get_left_spring_position(
         self,
         *,
-        envs_idx: torch.Tensor,
+        envs_idx: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         out = to_torch(
             self.entity.get_dofs_position(
@@ -630,7 +630,7 @@ class HSRBGenesisGripperInterfaceBatch:
     def get_right_spring_position(
         self,
         *,
-        envs_idx: torch.Tensor,
+        envs_idx: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         out = to_torch(
             self.entity.get_dofs_position(
