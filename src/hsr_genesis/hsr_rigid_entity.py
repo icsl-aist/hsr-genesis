@@ -434,7 +434,7 @@ class HSRRigidEntity(RigidEntity):
         if solver is None or solver.collider is None:
             return
         self._hsr_disable_collision_between_links(["base_f_bumper_link"], ["base_b_bumper_link"])
-        for link_name in ["base", "base_f_bumper_link", "base_b_bumper_link"]:
+        for link_name in ["base_link", "base_footprint", "base_f_bumper_link", "base_b_bumper_link"]:
             self._hsr_disable_collision_between_links(["base_l_drive_wheel_link"], [link_name])
             self._hsr_disable_collision_between_links(["base_r_drive_wheel_link"], [link_name])
             self._hsr_disable_collision_between_links(["base_l_passive_wheel_z_link"], [link_name])
@@ -442,6 +442,95 @@ class HSRRigidEntity(RigidEntity):
             self._hsr_disable_collision_between_links(["base_l_passive_wheel_y_frame"], [link_name])
             self._hsr_disable_collision_between_links(["base_r_passive_wheel_y_frame"], [link_name])
         self._hsr_collision_disable_applied = True
+
+    def _hsr_check_collisions(self, envs_idx=None) -> dict:
+        """Check and return collision events between body links, floor, and other objects.
+        
+        Returns a dictionary with:
+        - 'self_collisions': list of (link_a, link_b) tuples for self-collisions
+        - 'floor_collisions': list of link names colliding with floor
+        - 'object_collisions': list of (link, object) tuples for collisions with other objects
+        """
+        if self._scene is None or self._scene.sim is None:
+            return {'self_collisions': [], 'floor_collisions': [], 'object_collisions': []}
+        solver = self._scene.sim.rigid_solver
+        if solver is None or solver.collider is None:
+            return {'self_collisions': [], 'floor_collisions': [], 'object_collisions': []}
+        
+        try:
+            contacts = solver.collider.get_contacts(as_tensor=True, to_torch=True)
+        except Exception:
+            return {'self_collisions': [], 'floor_collisions': [], 'object_collisions': []}
+        
+        if contacts is None or len(contacts) == 0:
+            return {'self_collisions': [], 'floor_collisions': [], 'object_collisions': []}
+        
+        # Extract collision information
+        link_a = contacts.get("link_a", None)
+        link_b = contacts.get("link_b", None)
+        
+        if link_a is None or link_b is None:
+            return {'self_collisions': [], 'floor_collisions': [], 'object_collisions': []}
+        
+        # Get link indices for this entity
+        link_indices = {link.name: link.idx for link in self.links}
+        
+        # Wheel link names
+        wheel_links = {
+            "base_l_drive_wheel_link",
+            "base_r_drive_wheel_link",
+            "base_l_passive_wheel_z_link",
+            "base_r_passive_wheel_z_link",
+        }
+        
+        # Categorize collisions
+        self_collisions = []
+        floor_collisions = []
+        object_collisions = []
+        
+        # Convert to numpy for easier processing
+        link_a_np = link_a.cpu().numpy()
+        link_b_np = link_b.cpu().numpy()
+        
+        for i in range(len(link_a_np)):
+            idx_a = int(link_a_np[i])
+            idx_b = int(link_b_np[i])
+            
+            # Check if both links belong to this entity
+            a_in_entity = idx_a in link_indices.values()
+            b_in_entity = idx_b in link_indices.values()
+            
+            if a_in_entity and b_in_entity:
+                # Self-collision
+                name_a = None
+                name_b = None
+                for name, idx in link_indices.items():
+                    if idx == idx_a:
+                        name_a = name
+                    if idx == idx_b:
+                        name_b = name
+                
+                if name_a and name_b:
+                    self_collisions.append((name_a, name_b))
+            
+            elif a_in_entity or b_in_entity:
+                # Collision with floor or other object
+                entity_link_idx = idx_a if a_in_entity else idx_b
+                entity_link_name = None
+                for name, idx in link_indices.items():
+                    if idx == entity_link_idx:
+                        entity_link_name = name
+                        break
+                
+                if entity_link_name:
+                    # Assume collision with floor if one link is not in entity
+                    floor_collisions.append(entity_link_name)
+        
+        return {
+            'self_collisions': self_collisions,
+            'floor_collisions': floor_collisions,
+            'object_collisions': object_collisions,
+        }
 
     def _hsr_apply_passive_wheel_friction(self) -> None:
         if self._hsr_passive_wheel_friction_applied:
@@ -579,7 +668,9 @@ class HSRRigidEntity(RigidEntity):
             self._hsr_base_traj_ctrls = []
         if len(self._hsr_base_traj_ctrls) < n_envs:
             for _ in range(len(self._hsr_base_traj_ctrls), n_envs):
-                self._hsr_base_traj_ctrls.append(OmniBaseTrajectoryControl())
+                # Higher feedback gain for yaw (index 2) to improve yaw control
+                feedback_gain = torch.tensor([1.0, 1.0, 5.0], device=gs.device, dtype=gs.tc_float)
+                self._hsr_base_traj_ctrls.append(OmniBaseTrajectoryControl(feedback_gain=feedback_gain))
         if self._hsr_base_traj_time is None or self._hsr_base_traj_time.numel() < n_envs:
             old = self._hsr_base_traj_time
             self._hsr_base_traj_time = torch.zeros((n_envs,), device=gs.device, dtype=gs.tc_float)
