@@ -38,7 +38,7 @@ def kernel_cast_rays_ignore(
 ):
     n_points = ray_starts.shape[0]
     n_triangles = faces_info.verts_idx.shape[0]
-    for i_b, i_p in qd.ndrange(output_hits.shape[0], n_points):
+    for i_p, i_b in qd.ndrange(n_points, output_hits.shape[-1]):
         i_s = points_to_sensor_idx[i_p]
 
         link_pos = qd.math.vec3(links_pos[i_b, i_s, 0], links_pos[i_b, i_s, 1], links_pos[i_b, i_s, 2])
@@ -135,25 +135,25 @@ def kernel_cast_rays_ignore(
 
         if hit_face >= 0:
             dist = closest_distance
-            output_hits[i_b, i_p_dist] = dist
+            output_hits[i_p_dist, i_b] = dist
 
             if is_world_frame[i_s]:
                 hit_point = ray_start_world + dist * ray_direction_world
-                output_hits[i_b, i_p_offset + i_p_sensor * 3 + 0] = hit_point.x
-                output_hits[i_b, i_p_offset + i_p_sensor * 3 + 1] = hit_point.y
-                output_hits[i_b, i_p_offset + i_p_sensor * 3 + 2] = hit_point.z
+                output_hits[i_p_offset + i_p_sensor * 3 + 0, i_b] = hit_point.x
+                output_hits[i_p_offset + i_p_sensor * 3 + 1, i_b] = hit_point.y
+                output_hits[i_p_offset + i_p_sensor * 3 + 2, i_b] = hit_point.z
             else:
                 hit_point = dist * qd_normalize(
                     qd.math.vec3(ray_directions[i_p, 0], ray_directions[i_p, 1], ray_directions[i_p, 2]), gs.EPS
                 )
-                output_hits[i_b, i_p_offset + i_p_sensor * 3 + 0] = hit_point.x
-                output_hits[i_b, i_p_offset + i_p_sensor * 3 + 1] = hit_point.y
-                output_hits[i_b, i_p_offset + i_p_sensor * 3 + 2] = hit_point.z
+                output_hits[i_p_offset + i_p_sensor * 3 + 0, i_b] = hit_point.x
+                output_hits[i_p_offset + i_p_sensor * 3 + 1, i_b] = hit_point.y
+                output_hits[i_p_offset + i_p_sensor * 3 + 2, i_b] = hit_point.z
         else:
-            output_hits[i_b, i_p_offset + i_p_sensor * 3 + 0] = 0.0
-            output_hits[i_b, i_p_offset + i_p_sensor * 3 + 1] = 0.0
-            output_hits[i_b, i_p_offset + i_p_sensor * 3 + 2] = 0.0
-            output_hits[i_b, i_p_dist] = no_hit_values[i_s]
+            output_hits[i_p_offset + i_p_sensor * 3 + 0, i_b] = 0.0
+            output_hits[i_p_offset + i_p_sensor * 3 + 1, i_b] = 0.0
+            output_hits[i_p_offset + i_p_sensor * 3 + 2, i_b] = 0.0
+            output_hits[i_p_dist, i_b] = no_hit_values[i_s]
 
 
 @qd.func
@@ -312,7 +312,7 @@ def kernel_cast_rays_ignore_geom(
 ):
     n_points = ray_starts.shape[0]
     n_triangles = faces_info.verts_idx.shape[0]
-    for i_b, i_p in qd.ndrange(output_hits.shape[0], n_points):
+    for i_p, i_b in qd.ndrange(n_points, output_hits.shape[-1]):
         i_s = points_to_sensor_idx[i_p]
 
         link_pos = qd.math.vec3(links_pos[i_b, i_s, 0], links_pos[i_b, i_s, 1], links_pos[i_b, i_s, 2])
@@ -412,22 +412,22 @@ def kernel_cast_rays_ignore_geom(
 
         if hit_face >= 0:
             dist = closest_distance
-            output_hits[i_b, i_p_dist] = dist
+            output_hits[i_p_dist, i_b] = dist
 
             if is_world_frame[i_s]:
                 hit_point = ray_start_world + dist * ray_direction_world
-                output_hits[i_b, i_p_offset + i_p_sensor * 3 + 0] = hit_point.x
-                output_hits[i_b, i_p_offset + i_p_sensor * 3 + 1] = hit_point.y
-                output_hits[i_b, i_p_offset + i_p_sensor * 3 + 2] = hit_point.z
+                output_hits[i_p_offset + i_p_sensor * 3 + 0, i_b] = hit_point.x
+                output_hits[i_p_offset + i_p_sensor * 3 + 1, i_b] = hit_point.y
+                output_hits[i_p_offset + i_p_sensor * 3 + 2, i_b] = hit_point.z
             else:
                 hit_point = dist * qd_normalize(
                     qd.math.vec3(ray_directions[i_p, 0], ray_directions[i_p, 1], ray_directions[i_p, 2]), gs.EPS
                 )
-                output_hits[i_b, i_p_offset + i_p_sensor * 3 + 0] = hit_point.x
-                output_hits[i_b, i_p_offset + i_p_sensor * 3 + 1] = hit_point.y
-                output_hits[i_b, i_p_offset + i_p_sensor * 3 + 2] = hit_point.z
+                output_hits[i_p_offset + i_p_sensor * 3 + 0, i_b] = hit_point.x
+                output_hits[i_p_offset + i_p_sensor * 3 + 1, i_b] = hit_point.y
+                output_hits[i_p_offset + i_p_sensor * 3 + 2, i_b] = hit_point.z
         else:
-            output_hits[i_b, i_p_offset + i_p_sensor * 3 + 0] = 0.0
-            output_hits[i_b, i_p_offset + i_p_sensor * 3 + 1] = 0.0
-            output_hits[i_b, i_p_offset + i_p_sensor * 3 + 2] = 0.0
-            output_hits[i_b, i_p_dist] = no_hit_values[i_s]
+            output_hits[i_p_offset + i_p_sensor * 3 + 0, i_b] = 0.0
+            output_hits[i_p_offset + i_p_sensor * 3 + 1, i_b] = 0.0
+            output_hits[i_p_offset + i_p_sensor * 3 + 2, i_b] = 0.0
+            output_hits[i_p_dist, i_b] = no_hit_values[i_s]

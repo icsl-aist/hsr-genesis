@@ -15,7 +15,6 @@ from genesis.engine.sensors.base_sensor import (
     Sensor,
     SharedSensorMetadata,
 )
-from genesis.engine.sensors.sensor_manager import register_sensor
 
 try:
     from genesis.options.sensors import ForceTorque as ForceTorqueSensorOptions
@@ -36,7 +35,6 @@ if ForceTorqueSensorOptions is not None:
     class ForceTorqueSensorMetadata(RigidSensorMetadataMixin, SharedSensorMetadata):
         pass
 
-    @register_sensor(ForceTorqueSensorOptions, ForceTorqueSensorMetadata, tuple)
     @ti.data_oriented
     class ForceTorqueSensor(RigidSensorMixin[ForceTorqueSensorMetadata], Sensor[ForceTorqueSensorMetadata]):
         def __init__(
@@ -147,3 +145,10 @@ if ForceTorqueSensorOptions is not None:
                 vec=np.array(torque_world, dtype=float),
                 color=self._options.debug_torque_color,
             )
+
+    # Register sensor manually for Genesis 0.4.6 (register_sensor decorator removed)
+    from genesis.engine.sensors.sensor_manager import SensorManager
+    SensorManager.SENSOR_TYPES_MAP[ForceTorqueSensorOptions] = (
+        ForceTorqueSensorMetadata,
+        tuple,
+    )

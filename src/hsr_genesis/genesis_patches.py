@@ -152,12 +152,12 @@ def apply_runtime_patches() -> None:
     import genesis as gs
 
     gs_version = getattr(gs, "__version__", None)
-    if gs_version != "0.4.0":
+    if gs_version != "0.4.6":
         raise RuntimeError(
-            f"genesis-world version mismatch: expected 0.4.0, found {gs_version}. Please install genesis-world==0.4.0."
+            f"genesis-world version mismatch: expected 0.4.6, found {gs_version}. Please install genesis-world==0.4.6."
         )
 
-    # Compatibility shim for Genesis 0.4.0 which doesn't have tc_int/tc_float
+    # Compatibility shim for Genesis 0.4.6 which doesn't have tc_int/tc_float
     if not hasattr(gs, "tc_int"):
         import torch
         gs.tc_int = torch.int32

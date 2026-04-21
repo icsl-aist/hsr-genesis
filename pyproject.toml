@@ -13,7 +13,7 @@ authors = [
     { name = "HSR Genesis Contributors" }
 ]
 dependencies = [
-    "genesis-world==0.4.0",
+    "genesis-world==0.4.6",
     "torch",
     "PyYAML",
 ]
