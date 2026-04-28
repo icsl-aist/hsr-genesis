@@ -102,6 +102,8 @@ class Environment:
         self._base_goal = torch.zeros((self.num_envs, 3), device=gs.device)
         self._arm_start = torch.zeros((self.num_envs, self._hsr.arm_dofs_num), device=gs.device)
         self._base_start = torch.zeros((self.num_envs, 3), device=gs.device)
+        self._last_arm_command = torch.zeros((self.num_envs, self._hsr.arm_dofs_num), device=gs.device)
+        self._last_base_command = torch.zeros((self.num_envs, 3), device=gs.device)
         self._motion_base_episode = torch.zeros((self.num_envs,), device=gs.device, dtype=gs.tc_int)
         self._movement_time = torch.zeros((self.num_envs,), device=gs.device)
 
@@ -151,6 +153,8 @@ class Environment:
         self._base_goal[envs_idx] = torch.zeros((num_reset, 3), device=gs.device)
         self._arm_start[envs_idx] = torch.zeros((num_reset, self._hsr.arm_dofs_num), device=gs.device)
         self._base_start[envs_idx] = torch.zeros((num_reset, 3), device=gs.device)
+        self._last_arm_command[envs_idx] = torch.zeros((num_reset, self._hsr.arm_dofs_num), device=gs.device)
+        self._last_base_command[envs_idx] = torch.zeros((num_reset, 3), device=gs.device)
         self._motion_base_episode[envs_idx] = torch.zeros((num_reset,), device=gs.device, dtype=gs.tc_int)
         self._movement_time[envs_idx] = torch.zeros((num_reset,), device=gs.device)
 
@@ -167,9 +171,7 @@ class Environment:
     def step(self, actions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict]:
         envs_idx = torch.arange(self.num_envs, device=gs.device)
 
-        # TODO(Takeshita) recalcの周期をあげると，動きがゆっくりになる，計算時間とかではなさそう，要調査
-        # recalculate_idx = envs_idx[~self._pick_done_buf & (self.episode_length_buf % 100 == 0)]
-        recalculate_idx = envs_idx[~self._pick_done_buf & (self.episode_length_buf == 0)]
+        recalculate_idx = envs_idx[~self._pick_done_buf & (self.episode_length_buf % 40 == 0)]
         if len(recalculate_idx) > 0:
             object_pos = self._object.get_pos()
             object_pos[:, 2] += 0.09
@@ -196,11 +198,11 @@ class Environment:
             self._arm_goal[recalculate_idx] = arm_goal
             self._base_goal[recalculate_idx] = base_goal_xyt
 
-            self._arm_start[recalculate_idx] = self._hsr.arm_positions[recalculate_idx]
-            self._base_start[recalculate_idx] = self._hsr.base_positions[recalculate_idx]
+            # 動きをなめらかにするためには，commandの連続性が大事
+            self._arm_start[recalculate_idx] = self._last_arm_command[recalculate_idx]
+            self._base_start[recalculate_idx] = self._last_base_command[recalculate_idx]
 
-            # TODO(Takeshita) なぞの-10，これがないと動きがなめらかにならない，要調査
-            self._motion_base_episode[recalculate_idx] = self.episode_length_buf[recalculate_idx].clone() - 10
+            self._motion_base_episode[recalculate_idx] = self.episode_length_buf[recalculate_idx].clone()
             self._movement_time[recalculate_idx] = torch.max(arm_time, base_time)
 
         self.episode_length_buf += 1
@@ -234,7 +236,7 @@ class Environment:
             hand_pos, hand_quat = self._hsr.hand_pose
             pos_distance = torch.norm(hand_pos - self._target_pos, dim=-1)
 
-            timeout = time_since_motion_start > self._movement_time + 1.0
+            timeout = time_since_motion_start > self._movement_time + self._dt
 
             quat_distance = 1.0 - torch.abs(torch.sum(hand_quat * self._target_quat, dim=-1))
             done_idx = envs_idx[((pos_distance < 0.02) & (quat_distance < 0.01) & (~self._pick_done_buf)) | timeout]
@@ -250,14 +252,18 @@ class Environment:
                                       self._base_goal[done_idx],
                                       v_max=self._hsr.base_vmax)
             self._movement_time[done_idx] = torch.max(arm_time, base_time)
-            self._arm_start[done_idx] = self._hsr.arm_positions[done_idx]
-            self._base_start[done_idx] = self._hsr.base_positions[done_idx]
+            self._arm_start[done_idx] = self._last_arm_command[done_idx]
+            self._base_start[done_idx] = self._last_base_command[done_idx]
             self._motion_base_episode[done_idx] = self.episode_length_buf[done_idx].clone()
 
+        time_since_motion_start = (self.episode_length_buf - self._motion_base_episode) * self._dt
         arm_command = _compute_command(self._arm_start, self._arm_goal, self._movement_time, time_since_motion_start)
         base_command = _compute_command(self._base_start, self._base_goal, self._movement_time, time_since_motion_start)
         self._hsr.control_arm_positions(arm_command, envs_idx=envs_idx)
         self._hsr.control_base_positions(base_command, envs_idx=envs_idx)
+
+        self._last_arm_command = arm_command
+        self._last_base_command = base_command
 
         self._scene.step()
 
