@@ -588,21 +588,25 @@ class HSRRigidEntity(RigidEntity):
         if self._scene is None or self._scene.sim is None:
             return
         tuned_kp = {
-            "arm_lift_joint": 3558.077752590177,
-            "arm_flex_joint": 118.03121566772566,
-            "arm_roll_joint": 10.0,
-            "wrist_flex_joint": 10.0,
-            "wrist_roll_joint": 10.0,
+            # arm_lift: kp=10000 -> gravity error ~0.007 m (limited by 300 N effort cap)
+            "arm_lift_joint": 10000.0,
+            # arm_flex: kp=300 -> gravity error ~0.025 rad < 2 deg (grav load ~7.6 Nm)
+            "arm_flex_joint": 300.0,
+            # arm_roll / wrist: grav loads are small; raised from 10 for better tracking
+            "arm_roll_joint": 40.0,
+            "wrist_flex_joint": 60.0,
+            "wrist_roll_joint": 40.0,
             "head_pan_joint": 10.0,
             "head_tilt_joint": 10.0,
             "hand_motor_joint": 10.0,
         }
         tuned_kv = {
-            "arm_lift_joint": 119.29924983150862,
-            "arm_flex_joint": 21.728434427516923,
-            "arm_roll_joint": 6.324555320336759,
-            "wrist_flex_joint": 6.324555320336759,
-            "wrist_roll_joint": 6.324555320336759,
+            # kv = 2 * sqrt(kp)  (critically damped)
+            "arm_lift_joint": 200.0,
+            "arm_flex_joint": 34.641,
+            "arm_roll_joint": 12.649,
+            "wrist_flex_joint": 15.492,
+            "wrist_roll_joint": 12.649,
             "head_pan_joint": 6.324555320336759,
             "head_tilt_joint": 6.324555320336759,
             "hand_motor_joint": 6.324555320336759,
