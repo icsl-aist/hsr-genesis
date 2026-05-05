@@ -234,6 +234,9 @@ def _test_cases() -> Iterator[tuple[str, float]]:
 def scene_and_robot(request) -> Iterator[tuple[gs.Scene, HSRBURDF]]:
     show = request.config.getoption("--visualize", default=False)
     scene, robot = _build_scene(show_viewer=show)
+    # Ensure the tuned arm PD gains are applied (normally done lazily in
+    # step_base_trajectory_batched, but we use control_dofs_position directly).
+    robot._hsr_apply_default_gains()
     yield scene, robot
 
 
