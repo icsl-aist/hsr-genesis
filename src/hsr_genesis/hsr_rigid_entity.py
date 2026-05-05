@@ -559,6 +559,34 @@ class HSRRigidEntity(RigidEntity):
                     entity.set_friction(caster_friction)
         except Exception:
             pass
+        # Make all caster joints free-spinning: zero out PD gains and reduce
+        # damping so the caster swivels and rolls freely.
+        caster_joint_names = (
+            "base_r_passive_wheel_x_frame_joint",
+            "base_r_passive_wheel_y_frame_joint",
+            "base_r_passive_wheel_z_joint",
+            "base_l_passive_wheel_x_frame_joint",
+            "base_l_passive_wheel_y_frame_joint",
+            "base_l_passive_wheel_z_joint",
+        )
+        caster_dof_indices: list[int] = []
+        for jname in caster_joint_names:
+            try:
+                jnt = self.get_joint(jname)
+            except Exception:
+                continue
+            dofs = jnt.dofs_idx_local
+            if isinstance(dofs, (list, tuple)):
+                caster_dof_indices.extend(int(d) for d in dofs)
+            else:
+                caster_dof_indices.append(int(dofs))
+        if caster_dof_indices:
+            zeros = torch.zeros(len(caster_dof_indices), device=gs.device, dtype=gs.tc_float)
+            small_damping = torch.full_like(zeros, 0.01)
+            self.set_dofs_kp(zeros, dofs_idx_local=caster_dof_indices)
+            self.set_dofs_kv(zeros, dofs_idx_local=caster_dof_indices)
+            self.set_dofs_damping(small_damping, dofs_idx_local=caster_dof_indices)
+            self.set_dofs_frictionloss(zeros, dofs_idx_local=caster_dof_indices)
         self._hsr_passive_wheel_friction_applied = True
 
     def _hsr_apply_high_friction_links(self) -> None:
