@@ -131,28 +131,32 @@ def _quat_wxyz_from_mat3_torch(R: torch.Tensor) -> torch.Tensor:
     trace = m00 + m11 + m22
     eps = torch.tensor(1e-12, device=R.device, dtype=R.dtype)
 
-    s0 = torch.sqrt(trace + 1.0) * 2.0
+    s0 = torch.sqrt(torch.clamp(trace + 1.0, min=0.0)) * 2.0
+    s0_safe = torch.where(s0.abs() < eps, torch.ones_like(s0), s0)
     w0 = 0.25 * s0
-    x0 = (R[2, 1] - R[1, 2]) / s0
-    y0 = (R[0, 2] - R[2, 0]) / s0
-    z0 = (R[1, 0] - R[0, 1]) / s0
+    x0 = (R[2, 1] - R[1, 2]) / s0_safe
+    y0 = (R[0, 2] - R[2, 0]) / s0_safe
+    z0 = (R[1, 0] - R[0, 1]) / s0_safe
 
-    s1 = torch.sqrt(1.0 + m00 - m11 - m22) * 2.0
-    w1 = (R[2, 1] - R[1, 2]) / s1
+    s1 = torch.sqrt(torch.clamp(1.0 + m00 - m11 - m22, min=0.0)) * 2.0
+    s1_safe = torch.where(s1.abs() < eps, torch.ones_like(s1), s1)
+    w1 = (R[2, 1] - R[1, 2]) / s1_safe
     x1 = 0.25 * s1
-    y1 = (R[0, 1] + R[1, 0]) / s1
-    z1 = (R[0, 2] + R[2, 0]) / s1
+    y1 = (R[0, 1] + R[1, 0]) / s1_safe
+    z1 = (R[0, 2] + R[2, 0]) / s1_safe
 
-    s2 = torch.sqrt(1.0 + m11 - m00 - m22) * 2.0
-    w2 = (R[0, 2] - R[2, 0]) / s2
-    x2 = (R[0, 1] + R[1, 0]) / s2
+    s2 = torch.sqrt(torch.clamp(1.0 + m11 - m00 - m22, min=0.0)) * 2.0
+    s2_safe = torch.where(s2.abs() < eps, torch.ones_like(s2), s2)
+    w2 = (R[0, 2] - R[2, 0]) / s2_safe
+    x2 = (R[0, 1] + R[1, 0]) / s2_safe
     y2 = 0.25 * s2
-    z2 = (R[1, 2] + R[2, 1]) / s2
+    z2 = (R[1, 2] + R[2, 1]) / s2_safe
 
-    s3 = torch.sqrt(1.0 + m22 - m00 - m11) * 2.0
-    w3 = (R[1, 0] - R[0, 1]) / s3
-    x3 = (R[0, 2] + R[2, 0]) / s3
-    y3 = (R[1, 2] + R[2, 1]) / s3
+    s3 = torch.sqrt(torch.clamp(1.0 + m22 - m00 - m11, min=0.0)) * 2.0
+    s3_safe = torch.where(s3.abs() < eps, torch.ones_like(s3), s3)
+    w3 = (R[1, 0] - R[0, 1]) / s3_safe
+    x3 = (R[0, 2] + R[2, 0]) / s3_safe
+    y3 = (R[1, 2] + R[2, 1]) / s3_safe
     z3 = 0.25 * s3
 
     use0 = trace > 0.0
@@ -165,10 +169,8 @@ def _quat_wxyz_from_mat3_torch(R: torch.Tensor) -> torch.Tensor:
     y = torch.where(use0, y0, torch.where(use1, y1, torch.where(use2, y2, y3)))
     z = torch.where(use0, z0, torch.where(use1, z1, torch.where(use2, z2, z3)))
 
-    denom = torch.where(use0, s0, torch.where(use1, s1, torch.where(use2, s2, s3)))
-    denom = torch.where(denom.abs() < eps, torch.ones_like(denom), denom)
-
-    return torch.stack([w, x, y, z], dim=0) / denom
+    q = torch.stack([w, x, y, z], dim=0)
+    return q / torch.norm(q).clamp(min=1e-12)
 
 
 def _quat_wxyz_from_mat3_torch_batch(R: torch.Tensor) -> torch.Tensor:
@@ -178,28 +180,32 @@ def _quat_wxyz_from_mat3_torch_batch(R: torch.Tensor) -> torch.Tensor:
     trace = m00 + m11 + m22
     eps = torch.tensor(1e-12, device=R.device, dtype=R.dtype)
 
-    s0 = torch.sqrt(trace + 1.0) * 2.0
+    s0 = torch.sqrt(torch.clamp(trace + 1.0, min=0.0)) * 2.0
+    s0_safe = torch.where(s0.abs() < eps, torch.ones_like(s0), s0)
     w0 = 0.25 * s0
-    x0 = (R[:, 2, 1] - R[:, 1, 2]) / s0
-    y0 = (R[:, 0, 2] - R[:, 2, 0]) / s0
-    z0 = (R[:, 1, 0] - R[:, 0, 1]) / s0
+    x0 = (R[:, 2, 1] - R[:, 1, 2]) / s0_safe
+    y0 = (R[:, 0, 2] - R[:, 2, 0]) / s0_safe
+    z0 = (R[:, 1, 0] - R[:, 0, 1]) / s0_safe
 
-    s1 = torch.sqrt(1.0 + m00 - m11 - m22) * 2.0
-    w1 = (R[:, 2, 1] - R[:, 1, 2]) / s1
+    s1 = torch.sqrt(torch.clamp(1.0 + m00 - m11 - m22, min=0.0)) * 2.0
+    s1_safe = torch.where(s1.abs() < eps, torch.ones_like(s1), s1)
+    w1 = (R[:, 2, 1] - R[:, 1, 2]) / s1_safe
     x1 = 0.25 * s1
-    y1 = (R[:, 0, 1] + R[:, 1, 0]) / s1
-    z1 = (R[:, 0, 2] + R[:, 2, 0]) / s1
+    y1 = (R[:, 0, 1] + R[:, 1, 0]) / s1_safe
+    z1 = (R[:, 0, 2] + R[:, 2, 0]) / s1_safe
 
-    s2 = torch.sqrt(1.0 + m11 - m00 - m22) * 2.0
-    w2 = (R[:, 0, 2] - R[:, 2, 0]) / s2
-    x2 = (R[:, 0, 1] + R[:, 1, 0]) / s2
+    s2 = torch.sqrt(torch.clamp(1.0 + m11 - m00 - m22, min=0.0)) * 2.0
+    s2_safe = torch.where(s2.abs() < eps, torch.ones_like(s2), s2)
+    w2 = (R[:, 0, 2] - R[:, 2, 0]) / s2_safe
+    x2 = (R[:, 0, 1] + R[:, 1, 0]) / s2_safe
     y2 = 0.25 * s2
-    z2 = (R[:, 1, 2] + R[:, 2, 1]) / s2
+    z2 = (R[:, 1, 2] + R[:, 2, 1]) / s2_safe
 
-    s3 = torch.sqrt(1.0 + m22 - m00 - m11) * 2.0
-    w3 = (R[:, 1, 0] - R[:, 0, 1]) / s3
-    x3 = (R[:, 0, 2] + R[:, 2, 0]) / s3
-    y3 = (R[:, 1, 2] + R[:, 2, 1]) / s3
+    s3 = torch.sqrt(torch.clamp(1.0 + m22 - m00 - m11, min=0.0)) * 2.0
+    s3_safe = torch.where(s3.abs() < eps, torch.ones_like(s3), s3)
+    w3 = (R[:, 1, 0] - R[:, 0, 1]) / s3_safe
+    x3 = (R[:, 0, 2] + R[:, 2, 0]) / s3_safe
+    y3 = (R[:, 1, 2] + R[:, 2, 1]) / s3_safe
     z3 = 0.25 * s3
 
     use0 = trace > 0.0
@@ -212,10 +218,9 @@ def _quat_wxyz_from_mat3_torch_batch(R: torch.Tensor) -> torch.Tensor:
     y = torch.where(use0, y0, torch.where(use1, y1, torch.where(use2, y2, y3)))
     z = torch.where(use0, z0, torch.where(use1, z1, torch.where(use2, z2, z3)))
 
-    denom = torch.where(use0, s0, torch.where(use1, s1, torch.where(use2, s2, s3)))
-    denom = torch.where(denom.abs() < eps, torch.ones_like(denom), denom)
-
-    return torch.stack([w, x, y, z], dim=-1) / denom.unsqueeze(-1)
+    q = torch.stack([w, x, y, z], dim=-1)
+    norms = torch.norm(q, dim=-1, keepdim=True).clamp(min=1e-12)
+    return q / norms
 
 
 def _yaw_from_quat_wxyz_batch(quat_wxyz: torch.Tensor) -> torch.Tensor:
@@ -876,7 +881,6 @@ class HSRRigidEntity(RigidEntity):
         self._hsr_apply_high_friction_links()
         self._hsr_apply_default_gains()
         self._hsr_apply_head_hold()
-        dt = float(dt)
         if self._solver.n_envs > 0:
             envs_idx = self._scene._sanitize_envs_idx(envs_idx)
         envs_idx_arr = torch.as_tensor(envs_idx, device=gs.device, dtype=gs.tc_int).reshape(-1)
@@ -1078,7 +1082,6 @@ class HSRRigidEntity(RigidEntity):
         self._hsr_apply_high_friction_links()
         self._hsr_apply_default_gains()
         self._hsr_apply_head_hold()
-        dt = float(dt)
         if self._solver.n_envs > 0:
             envs_idx = self._scene._sanitize_envs_idx(envs_idx)
         envs_idx_arr = torch.as_tensor(envs_idx, device=gs.device, dtype=gs.tc_int).reshape(-1)
@@ -1107,7 +1110,14 @@ class HSRRigidEntity(RigidEntity):
 
         for i, env in enumerate(envs_idx_arr.tolist()):
             state = self._hsr_arm_traj_states[int(env)]
-            if state.traj is None or state.done:
+            if state.traj is None:
+                continue
+
+            # When trajectory is done, keep commanding the final position
+            # so the arm holds steady while the base may still be moving.
+            if state.done:
+                desired_arm[i] = state.traj.positions[-1]
+                active[i] = True
                 continue
 
             time_now = float(self._hsr_whole_body_time[int(env)].item())
@@ -1367,47 +1377,75 @@ class HSRRigidEntity(RigidEntity):
             sol = []
             o2b = []
             o2e = []
-            for req in requests:
+            fallback_indices = []
+            for req_i, req in enumerate(requests):
                 if self._hsr_robot == "hsrb":
                     r, responses = self._hsr_ik.solve_base_yaw_ik(req)
                 else:
                     r, responses = self._hsr_ik.solve_hsrc_base_yaw_ik(req)
                 if r != IKResult.SUCCESS or not responses:
+                    fallback_indices.append(req_i)
                     results.append(IKResult.FAIL)
-                    sol.append(
-                        JointState(
-                            name=list(self._hsr_use_joints),
-                            position=torch.zeros(
-                                len(self._hsr_use_joints),
-                                device=gs.device,
-                                dtype=gs.tc_float,
-                            ),
-                        )
-                    )
-                    o2b.append(torch.eye(4, device=gs.device, dtype=gs.tc_float))
-                    o2e.append(torch.eye(4, device=gs.device, dtype=gs.tc_float))
+                    sol.append(None)
+                    o2b.append(None)
+                    o2e.append(None)
                     continue
                 idx = self._hsr_ik.select_closest_solution(req, responses)
                 if idx < 0:
+                    fallback_indices.append(req_i)
                     results.append(IKResult.FAIL)
-                    sol.append(
-                        JointState(
-                            name=list(self._hsr_use_joints),
-                            position=torch.zeros(
-                                len(self._hsr_use_joints),
-                                device=gs.device,
-                                dtype=gs.tc_float,
-                            ),
-                        )
-                    )
-                    o2b.append(torch.eye(4, device=gs.device, dtype=gs.tc_float))
-                    o2e.append(torch.eye(4, device=gs.device, dtype=gs.tc_float))
+                    sol.append(None)
+                    o2b.append(None)
+                    o2e.append(None)
                     continue
                 chosen = responses[idx]
                 results.append(IKResult.SUCCESS)
                 sol.append(chosen.solution_angle)
                 o2b.append(chosen.origin_to_base)
                 o2e.append(chosen.origin_to_end)
+            # Fallback: retry failed environments with the optimizer-based solver.
+            # The analytic base-yaw solver only searches over yaw + arm joints
+            # with the base x,y fixed, so it can fail when the target is outside
+            # the arm's workspace.  The optimizer can also move the base.
+            if fallback_indices:
+                fb_targets = torch.stack([targets[i] for i in fallback_indices], dim=0)
+                fb_o2b_in = torch.stack(
+                    [requests[i].origin_to_base for i in fallback_indices], dim=0
+                )
+                fb_init = torch.stack(
+                    [requests[i].initial_angle.position for i in fallback_indices], dim=0
+                )
+                fb_res, fb_sol, fb_o2b_out, fb_o2e = self._hsr_ik.solve_ik_batch_tensors(
+                    ref_origin_to_end=fb_targets,
+                    origin_to_base=fb_o2b_in,
+                    init_angles=fb_init,
+                    weight=self._hsr_weight,
+                    robot=self._hsr_robot,
+                    to_torch=True,
+                )
+                for fb_j, orig_i in enumerate(fallback_indices):
+                    fb_ok = bool(fb_res[fb_j].item() > 0) if torch.is_tensor(fb_res) else fb_res[fb_j] == IKResult.SUCCESS
+                    if fb_ok:
+                        results[orig_i] = IKResult.SUCCESS
+                        sol[orig_i] = JointState(
+                            name=list(self._hsr_use_joints),
+                            position=fb_sol[fb_j],
+                        )
+                        o2b[orig_i] = fb_o2b_out[fb_j]
+                        o2e[orig_i] = fb_o2e[fb_j]
+            # Fill remaining failures with zero placeholders
+            for i in range(len(results)):
+                if sol[i] is None:
+                    sol[i] = JointState(
+                        name=list(self._hsr_use_joints),
+                        position=torch.zeros(
+                            len(self._hsr_use_joints),
+                            device=gs.device,
+                            dtype=gs.tc_float,
+                        ),
+                    )
+                    o2b[i] = torch.eye(4, device=gs.device, dtype=gs.tc_float)
+                    o2e[i] = torch.eye(4, device=gs.device, dtype=gs.tc_float)
         else:
             origin_to_base = self._current_base_origin_to_base_batch(envs_idx=envs_idx)
             init_angles = self._current_arm_joint_state_batch(envs_idx=envs_idx)
@@ -1419,6 +1457,44 @@ class HSRRigidEntity(RigidEntity):
                     weight=self._hsr_weight,
                     robot=self._hsr_robot,
                 )
+                # Fallback: retry failed environments with the optimizer-based solver
+                if torch.is_tensor(results):
+                    fail_mask = results <= 0
+                else:
+                    fail_mask = torch.tensor(
+                        [r != IKResult.SUCCESS for r in results],
+                        device=gs.device,
+                        dtype=torch.bool,
+                    )
+                if fail_mask.any():
+                    fail_idx = fail_mask.nonzero(as_tuple=True)[0]
+                    fb_targets = targets[fail_idx]
+                    fb_o2b_in = origin_to_base[fail_idx]
+                    fb_init = init_angles[fail_idx]
+                    fb_res, fb_sol, fb_o2b_out, fb_o2e = self._hsr_ik.solve_ik_batch_tensors(
+                        ref_origin_to_end=fb_targets,
+                        origin_to_base=fb_o2b_in,
+                        init_angles=fb_init,
+                        weight=self._hsr_weight,
+                        robot=self._hsr_robot,
+                        to_torch=True,
+                    )
+                    if torch.is_tensor(results):
+                        results[fail_idx] = fb_res
+                        sol[fail_idx] = fb_sol
+                        o2b[fail_idx] = fb_o2b_out
+                        o2e[fail_idx] = fb_o2e
+                    else:
+                        for fb_j, orig_i in enumerate(fail_idx.tolist()):
+                            fb_ok = bool(fb_res[fb_j].item() > 0) if torch.is_tensor(fb_res) else fb_res[fb_j] == IKResult.SUCCESS
+                            if fb_ok:
+                                results[orig_i] = IKResult.SUCCESS
+                                sol[orig_i] = JointState(
+                                    name=list(self._hsr_use_joints),
+                                    position=fb_sol[fb_j],
+                                )
+                                o2b[orig_i] = fb_o2b_out[fb_j]
+                                o2e[orig_i] = fb_o2e[fb_j]
             else:
                 results, sol, o2b, o2e = self._hsr_ik.solve_ik_batch_tensors(
                     ref_origin_to_end=targets,
