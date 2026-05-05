@@ -537,12 +537,28 @@ class HSRRigidEntity(RigidEntity):
             return
         if self._scene is None or self._scene.sim is None:
             return
+        # Genesis blends contact friction as max(friction_a, friction_b), so setting
+        # only the caster-wheel link friction to a low value is insufficient when the
+        # floor has the default friction of 1.0 (Genesis never reads <gazebo> mu tags
+        # from URDF).  We therefore also lower the friction on every floor-plane entity
+        # so that the combined contact friction reflects the intended near-frictionless
+        # caster behaviour.
+        caster_friction = 0.01
         for name in ("base_r_passive_wheel_z_link", "base_l_passive_wheel_z_link"):
             try:
                 link = self.get_link(name)
             except Exception:
                 continue
-            link.set_friction(0.01)
+            link.set_friction(caster_friction)
+        # Lower the friction of any Plane (floor) entity in the scene so the
+        # max-blended contact friction stays small for the caster wheels.
+        try:
+            for entity in self._scene.entities:
+                morph = getattr(entity, "_morph", None)
+                if morph is not None and isinstance(morph, gs.morphs.Plane):
+                    entity.set_friction(caster_friction)
+        except Exception:
+            pass
         self._hsr_passive_wheel_friction_applied = True
 
     def _hsr_apply_high_friction_links(self) -> None:
