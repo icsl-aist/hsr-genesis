@@ -1882,7 +1882,7 @@ class RobotOptimizerGPU:
             return
         self._capacity = n_envs
         self._init_field = ti.Vector.field(2, dtype=TI_FLOAT, shape=(n_envs,))
-        self._init_buffer = torch.zeros((n_envs, 2), dtype=torch.float32, device="cuda")
+        self._init_buffer = torch.zeros((n_envs, 2), dtype=_torch_dtype(), device=_torch_device())
         self._solution_field = ti.Vector.field(2, dtype=TI_FLOAT, shape=(n_envs,))
         self._result_field = ti.field(dtype=ti.i32, shape=(n_envs,))
         self._iteration_field = ti.field(dtype=ti.i32, shape=(n_envs,))
@@ -1905,7 +1905,9 @@ class RobotOptimizerGPU:
             dtype=_torch_dtype(),
         )
         assert self._init_field is not None
-        self._init_field.from_torch(init_t)
+        assert self._init_buffer is not None
+        self._init_buffer[:1].copy_(init_t)
+        self._init_field.from_torch(self._init_buffer)
         assert self._solution_field is not None
         assert self._result_field is not None
         assert self._iteration_field is not None
@@ -1924,7 +1926,7 @@ class RobotOptimizerGPU:
             self._iteration_field,
         )
         solution = ti_to_torch(self._solution_field, copy=True)[0]
-        result = int(ti_to_torch(self._result_field, copy=True).item())
+        result = int(ti_to_torch(self._result_field, copy=True)[0].item())
         if result == self.RESULT_SUCCESS:
             status = OptResult.SUCCESS
         elif result == self.RESULT_MAX_ITER:
@@ -1944,12 +1946,14 @@ class RobotOptimizerGPU:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         n_envs = len(init)
         self._ensure_capacity(n_envs)
+        assert self._init_buffer is not None
         init_t = torch.zeros((n_envs, 2), device=_torch_device(), dtype=_torch_dtype())
         for i, item in enumerate(init):
             init_t[i, 0] = float(item.v1)
             init_t[i, 1] = float(item.v2)
         assert self._init_field is not None
-        self._init_field.from_torch(init_t)
+        self._init_buffer[:n_envs].copy_(init_t)
+        self._init_field.from_torch(self._init_buffer)
         assert self._solution_field is not None
         assert self._result_field is not None
         assert self._iteration_field is not None
@@ -1967,7 +1971,7 @@ class RobotOptimizerGPU:
             self._result_field,
             self._iteration_field,
         )
-        return ti_to_torch(self._solution_field, copy=True), ti_to_torch(self._result_field, copy=True)
+        return ti_to_torch(self._solution_field, copy=True)[:n_envs], ti_to_torch(self._result_field, copy=True)[:n_envs]
 
     def optimize_batch_tensors(
         self,
@@ -1986,7 +1990,6 @@ class RobotOptimizerGPU:
         assert self._result_field is not None
         assert self._iteration_field is not None
 
-        self._init_buffer.zero_()
         self._init_buffer[: init_t.shape[0]].copy_(init_t)
         self._init_field.from_torch(self._init_buffer)
 
@@ -2004,7 +2007,7 @@ class RobotOptimizerGPU:
             self._result_field,
             self._iteration_field,
         )
-        return ti_to_torch(self._solution_field, copy=True), ti_to_torch(self._result_field, copy=True)
+        return ti_to_torch(self._solution_field, copy=True)[:n_envs], ti_to_torch(self._result_field, copy=True)[:n_envs]
 
 
 @ti.kernel
