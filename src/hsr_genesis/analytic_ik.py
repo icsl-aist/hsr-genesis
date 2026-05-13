@@ -1868,6 +1868,7 @@ class RobotOptimizerGPU:
         self.epsilon = float(epsilon)
         self.line_epsilon = float(line_epsilon)
         self._capacity = 0
+        self._init_buffer = None
         self._init_field = None
         self._solution_field = None
         self._result_field = None
@@ -1881,6 +1882,7 @@ class RobotOptimizerGPU:
             return
         self._capacity = n_envs
         self._init_field = ti.Vector.field(2, dtype=TI_FLOAT, shape=(n_envs,))
+        self._init_buffer = torch.zeros((n_envs, 2), dtype=torch.float32, device="cuda")
         self._solution_field = ti.Vector.field(2, dtype=TI_FLOAT, shape=(n_envs,))
         self._result_field = ti.field(dtype=ti.i32, shape=(n_envs,))
         self._iteration_field = ti.field(dtype=ti.i32, shape=(n_envs,))
@@ -1979,10 +1981,15 @@ class RobotOptimizerGPU:
         n_envs = int(init_t.shape[0])
         self._ensure_capacity(n_envs)
         assert self._init_field is not None
+        assert self._init_buffer is not None
         assert self._solution_field is not None
         assert self._result_field is not None
         assert self._iteration_field is not None
-        self._init_field.from_torch(init_t)
+
+        self._init_buffer.zero_()
+        self._init_buffer[: init_t.shape[0]].copy_(init_t)
+        self._init_field.from_torch(self._init_buffer)
+
         _hooke_jeeves_kernel(
             int(n_envs),
             req_field,
