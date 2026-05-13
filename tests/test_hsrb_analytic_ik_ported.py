@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 import torch
 
+
 def _import_analytic_ik():
     import quadrants as ti
     import genesis as gs
@@ -358,3 +359,62 @@ def test_robot_optimizer_gpu_matches_cpu_ported():
 
     assert torch.isfinite(torch.tensor(gpu_sol.v1))
     assert torch.isfinite(torch.tensor(gpu_sol.v2))
+
+
+def test_robot_optimizer_gpu_reuses_capacity_after_growth_ported():
+    if os.environ.get("RUN_GPU_OPTIMIZER_TEST") != "1":
+        pytest.skip("Set RUN_GPU_OPTIMIZER_TEST=1 to run GPU optimizer test.")
+
+    aik = AnalyticIK2()
+    param = aik.hsrb_param()
+
+    config = torch.tensor([0.0, 0.0, 0.0, 0.2, -1.0, 0.5, 0.1, 0.3], dtype=torch.float32)
+    target = _fk(param, config)
+    request = _make_request(target, config)
+    func_req = aik._build_function_req(request)
+
+    func = _ik.RobotFunction2(func_req, param)
+    func.set_penalty_coeff(1e7)
+
+    max_iter = 1
+    gpu_optimizer = RobotOptimizerGPU(max_iteration=max_iter)
+
+    req_field_2 = _ik.RobotFunction2Request.field(shape=(2,))
+    req_field_2[0] = func_req
+    req_field_2[1] = func_req
+    param_field = _ik.RobotFunction2Parameter.field(shape=())
+    param_field[None] = param
+
+    batch_sol, batch_result = gpu_optimizer.optimize_batch(
+        req_field_2,
+        param_field,
+        [Vector2(0.0, 0.0), Vector2(0.1, -0.1)],
+        step=1.0,
+        penalty_coeff=1e7,
+    )
+    assert batch_sol.shape == (2, 2)
+    assert batch_result.shape == (2,)
+
+    status_single, single_sol = gpu_optimizer.optimize_single(
+        func_req,
+        param,
+        Vector2(0.0, 0.0),
+        step=1.0,
+        penalty_coeff=1e7,
+    )
+    assert status_single in (OptResult.SUCCESS, OptResult.MAX_ITERATION)
+    assert torch.isfinite(torch.tensor(single_sol.v1))
+    assert torch.isfinite(torch.tensor(single_sol.v2))
+
+    req_field_1 = _ik.RobotFunction2Request.field(shape=(1,))
+    req_field_1[0] = func_req
+    small_batch_sol, small_batch_result = gpu_optimizer.optimize_batch(
+        req_field_1,
+        param_field,
+        [Vector2(0.0, 0.0)],
+        step=1.0,
+        penalty_coeff=1e7,
+    )
+    assert small_batch_sol.shape == (1, 2)
+    assert small_batch_result.shape == (1,)
+    assert torch.isfinite(small_batch_sol).all()
