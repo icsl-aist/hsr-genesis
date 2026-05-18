@@ -23,9 +23,9 @@ except Exception:
 
 
 class _FakeJoint:
-    def __init__(self, name: str, dof_idx_local: int) -> None:
+    def __init__(self, name: str, dofs_idx_local: int) -> None:
         self.name = name
-        self.dof_idx_local = dof_idx_local
+        self.dofs_idx_local = dofs_idx_local
 
 
 class _FakeEntity:
@@ -109,7 +109,7 @@ class _FakeEntity:
         resolved = []
         for key in dofs_idx_local:
             if isinstance(key, str):
-                resolved.append(self.get_joint(key).dof_idx_local)
+                resolved.append(self.get_joint(key).dofs_idx_local)
             else:
                 resolved.append(int(key))
         if envs_idx is None:
