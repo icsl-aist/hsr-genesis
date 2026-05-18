@@ -223,6 +223,13 @@ def _quat_wxyz_from_mat3_torch_batch(R: torch.Tensor) -> torch.Tensor:
     return q / norms
 
 
+def _yaw_quat_wxyz_from_mat3_torch_batch(R: torch.Tensor) -> torch.Tensor:
+    c = R[:, 0, 0]  # cosθ
+    s = R[:, 1, 0]  # sinθ
+    yaw = torch.atan2(s, c)
+    return _quat_wxyz_from_yaw_batch(yaw, device=R.device, dtype=R.dtype)
+
+
 def _yaw_from_quat_wxyz_batch(quat_wxyz: torch.Tensor) -> torch.Tensor:
     if quat_wxyz.ndim == 1:
         quat_wxyz = quat_wxyz.unsqueeze(0)
@@ -1556,8 +1563,12 @@ class HSRRigidEntity(RigidEntity):
                             qpos[i, base_qs_idx_local[0:3]] = pos
                             qpos[i, base_qs_idx_local[3:7]] = quat
         else:
+            results = results[:n_envs]
+            o2b = o2b[:n_envs]
+            o2e = o2e[:n_envs]
             success_mask = results > 0
             if success_mask.any():
+                sol = sol[:n_envs]
                 qpos[:, qs_idx_local] = torch.where(
                     success_mask.unsqueeze(1),
                     sol.to(qpos.dtype),
@@ -1576,8 +1587,8 @@ class HSRRigidEntity(RigidEntity):
                         qpos[:, torso_qs_idx_local],
                     )
                 if base_qs_idx_local and len(base_qs_idx_local) >= 7:
-                    pos = o2b[:, :3, 3]
-                    quat = _quat_wxyz_from_mat3_torch_batch(o2b[:, :3, :3])
+                    pos = o2b[:n_envs, :3, 3]
+                    quat = _yaw_quat_wxyz_from_mat3_torch_batch(o2b[:n_envs, :3, :3])
                     pos = pos.clone()
                     pos[:, 2] = cur_pos_all[:, 2]
                     qpos[:, base_qs_idx_local[0:3]] = torch.where(
