@@ -636,8 +636,10 @@ class HSRRigidEntity(RigidEntity):
             "arm_roll_joint": 40.0,
             "wrist_flex_joint": 60.0,
             "wrist_roll_joint": 40.0,
-            "head_pan_joint": 10.0,
-            "head_tilt_joint": 10.0,
+            # head: kp=100 to hold tilt against gravity (~1.6 Nm) and track
+            # accurately during sweeps (issue #3)
+            "head_pan_joint": 100.0,
+            "head_tilt_joint": 100.0,
             "hand_motor_joint": 10.0,
         }
         tuned_kv = {
@@ -647,8 +649,8 @@ class HSRRigidEntity(RigidEntity):
             "arm_roll_joint": 12.649,
             "wrist_flex_joint": 15.492,
             "wrist_roll_joint": 12.649,
-            "head_pan_joint": 6.324555320336759,
-            "head_tilt_joint": 6.324555320336759,
+            "head_pan_joint": 20.0,
+            "head_tilt_joint": 20.0,
             "hand_motor_joint": 6.324555320336759,
         }
         if self._hsr_arm_dofs_idx_local:
