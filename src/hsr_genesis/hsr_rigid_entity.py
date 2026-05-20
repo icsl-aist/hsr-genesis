@@ -730,9 +730,21 @@ class HSRRigidEntity(RigidEntity):
             self._hsr_base_traj_ctrls = []
         if len(self._hsr_base_traj_ctrls) < n_envs:
             for _ in range(len(self._hsr_base_traj_ctrls), n_envs):
-                # Higher feedback gain for yaw (index 2) to improve yaw control
-                feedback_gain = torch.tensor([1.0, 1.0, 5.0], device=gs.device, dtype=gs.tc_float)
-                self._hsr_base_traj_ctrls.append(OmniBaseTrajectoryControl(feedback_gain=feedback_gain))
+                # Feedback gains: xy=1.0, yaw=1.5.
+                # Yaw gain was previously 5.0, which caused overshoot because the
+                # outer P term drives the inner velocity controller too aggressively
+                # without any derivative damping.  1.5 keeps tracking tight while
+                # staying well below the nested loop's saturation threshold.
+                # The derivative gains add damping proportional to current velocity,
+                # suppressing the residual overshoot after the trajectory ends.
+                feedback_gain = torch.tensor([1.0, 1.0, 1.5], device=gs.device, dtype=gs.tc_float)
+                self._hsr_base_traj_ctrls.append(
+                    OmniBaseTrajectoryControl(
+                        feedback_gain=feedback_gain,
+                        yaw_derivative_gain=0.3,
+                        xy_derivative_gain=0.1,
+                    )
+                )
         if self._hsr_base_traj_time is None or self._hsr_base_traj_time.numel() < n_envs:
             old = self._hsr_base_traj_time
             self._hsr_base_traj_time = torch.zeros((n_envs,), device=gs.device, dtype=gs.tc_float)

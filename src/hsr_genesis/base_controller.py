@@ -500,25 +500,84 @@ class HSRBBaseController:
 
 @dataclass(frozen=True)
 class Trajectory:
-    positions: torch.Tensor  # (T, 3)
+    """Base trajectory waypoints in the world/odom frame.
+
+    All fields use world-frame (odom) coordinates:
+      positions[:, 0]  – world X [m]
+      positions[:, 1]  – world Y [m]
+      positions[:, 2]  – world yaw [rad]
+
+    Frame contract for optional velocities
+    ----------------------------------------
+    When ``velocities`` is provided it **must** be expressed in the world/odom
+    frame (same frame as ``positions``), i.e. [ẋ_world, ẏ_world, ω_z].
+
+    Rationale: ``OmniBaseTrajectoryControl`` keeps the internal ``_point_before``
+    state in world frame (seeded from ``get_vel`` / ``get_ang`` which are world-
+    frame Genesis outputs). The interpolated feed-forward velocity is therefore
+    also world-frame. ``get_output_velocity`` rotates the combined feed-forward +
+    P-error term into body frame as its final step, so callers never need to
+    supply body-frame velocities here.
+
+    If ``velocities`` is None the controller falls back to finite-difference
+    (``(p[i+1] - p[i]) / dt``), which is automatically world-frame because the
+    positions are world-frame.
+    """
+
+    positions: torch.Tensor  # (T, 3) – world frame [x, y, yaw]
     time_from_start: torch.Tensor  # (T,)
-    velocities: torch.Tensor | None = None  # (T, 3) or None
+    velocities: torch.Tensor | None = None  # (T, 3) – world frame, see docstring
     accelerations: torch.Tensor | None = None  # (T, 3) or None
     joint_names: Sequence[str] | None = None
 
 
 @dataclass(frozen=True)
 class DesiredState:
-    positions: torch.Tensor  # (3,)
-    velocities: torch.Tensor  # (3,)
-    accelerations: torch.Tensor  # (3,)
+    """Desired trajectory state — all quantities in the world/odom frame.
+
+    positions    – [x_world, y_world, yaw]
+    velocities   – [ẋ_world, ẏ_world, ω_z]   (world frame)
+    accelerations – [ẍ_world, ÿ_world, α_z]  (world frame)
+    """
+
+    positions: torch.Tensor  # (3,) world frame
+    velocities: torch.Tensor  # (3,) world frame
+    accelerations: torch.Tensor  # (3,) world frame
 
 
 class OmniBaseTrajectoryControl:
+    """Trajectory following controller for the HSR omnidirectional base.
+
+    Frame convention (important)
+    ----------------------------
+    All positions and velocities handled by this class are in the **world/odom
+    frame**: [x_world, y_world, yaw].
+
+    ``sample_desired_state`` receives ``current_velocities`` as
+    [ẋ_world, ẏ_world, ω_z_world] (from Genesis ``get_vel`` / ``get_ang``).
+    The initial ``_point_before`` velocity seed is therefore world-frame.
+    Trajectory waypoint velocities (``Trajectory.velocities``) must also be
+    world-frame for interpolation to be consistent — see ``Trajectory`` docstring.
+
+    ``get_output_velocity`` converts the combined world-frame output velocity into
+    the robot body frame (via R(−yaw)) before returning it to the base joint
+    controller.  Callers must not pre-rotate velocities into body frame.
+
+    Derivative damping
+    ------------------
+    ``yaw_derivative_gain`` adds a D-term on the yaw channel:
+        output_yaw_rate -= kd * current_ω_z
+    This damps overshoot from the P term without requiring explicit velocity
+    trajectory waypoints.  ``xy_derivative_gain`` does the same for the linear
+    axes.  Both default to 0 (pure P+FF behaviour).
+    """
+
     def __init__(
         self,
         coordinate_names: Sequence[str] = ("odom_x", "odom_y", "odom_t"),
         feedback_gain: torch.Tensor | None = None,
+        yaw_derivative_gain: float = 0.0,
+        xy_derivative_gain: float = 0.0,
         stop_velocity_threshold: float = 0.001,
         stop_time_margin: float = 0.2,
     ) -> None:
@@ -528,6 +587,8 @@ class OmniBaseTrajectoryControl:
 
         self.stop_velocity_threshold = float(stop_velocity_threshold)
         self.stop_time_margin = float(stop_time_margin)
+        self.yaw_derivative_gain = float(yaw_derivative_gain)
+        self.xy_derivative_gain = float(xy_derivative_gain)
 
         if feedback_gain is None:
             feedback_gain = torch.tensor([1.0, 1.0, 1.0], device=gs.device, dtype=TORCH_FLOAT)
@@ -676,9 +737,16 @@ class OmniBaseTrajectoryControl:
         accelerations = traj.accelerations
 
         if not self._sampled_already:
+            # Seed the pre-trajectory state with the current world-frame
+            # position and velocity.  cur_vel is [ẋ_world, ẏ_world, ω_z_world]
+            # as supplied by step_base_trajectory_batched (Genesis get_vel /
+            # get_ang outputs are world-frame).  Storing world-frame velocity
+            # here keeps the interpolation frame consistent with Trajectory
+            # waypoints and the finite-difference fall-back (p1-p0)/dt which
+            # is inherently world-frame.
             self._point_before = DesiredState(
                 positions=cur_pos.clone(),
-                velocities=cur_vel.clone(),
+                velocities=cur_vel.clone(),  # world-frame [ẋ, ẏ, ω_z]
                 accelerations=torch.zeros_like(cur_pos),
             )
             self._sampled_already = True
@@ -734,24 +802,63 @@ class OmniBaseTrajectoryControl:
         return True, desired, before_last, time_from_point
 
     def get_output_velocity(
-        self, actual_positions: torch.Tensor, desired_state: DesiredState, dt: float = 0.01, current_velocities: torch.Tensor | None = None
+        self,
+        actual_positions: torch.Tensor,
+        desired_state: DesiredState,
+        dt: float = 0.01,
+        current_velocities: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        """Compute the body-frame velocity command for the base joint controller.
+
+        Inputs are all in world/odom frame:
+          actual_positions  – [x_world, y_world, yaw]
+          desired_state     – world-frame (see DesiredState docstring)
+          current_velocities – [ẋ_world, ẏ_world, ω_z_world]  (optional, for RK2)
+
+        Steps
+        -----
+        1. Compute world-frame positional error (yaw component wrapped to [-π, π]).
+        2. Build world-frame output velocity = ff_velocity + gain * error.
+        3. RK2 midpoint: advance yaw by half a step using current ω_z so the
+           rotation is evaluated at the midpoint heading rather than the current
+           heading, reducing discretisation error during turning.
+        4. Rotate the world-frame output into body frame via R(−yaw):
+               [[cos, sin, 0], [−sin, cos, 0], [0, 0, 1]]
+           The yaw channel (index 2) passes through unchanged because world ω_z
+           equals body ω_z for planar motion.
+
+        Returns body-frame velocity [dot_x_body, dot_y_body, dot_r].
+        """
         actual_positions = to_torch(actual_positions).to(device=gs.device, dtype=TORCH_FLOAT).reshape(3)
 
+        # Step 1 – world-frame position error
         error_pos = desired_state.positions - actual_positions
         error_pos = error_pos.clone()
         error_pos[2] = self._wrap_to_pi(error_pos[2])
 
+        # Step 2 – world-frame output velocity (feed-forward + proportional)
         output_velocity = desired_state.velocities + self.feedback_gain * error_pos
 
-        # Runge-Kutta 2nd order integration in heading frame (from hsr.py fix)
-        # Use midpoint angle for better accuracy
+        # Step 3 – RK2 midpoint yaw for the world→body rotation
+        # current_velocities[2] is world-frame ω_z (== body yaw rate for planar)
         yaw = actual_positions[2]
         if current_velocities is not None:
             current_velocities = to_torch(current_velocities).to(device=gs.device, dtype=TORCH_FLOAT).reshape(3)
             diff_r = current_velocities[2] * dt
             yaw = yaw + 0.5 * diff_r
 
+            # Derivative damping: subtract kd * current_rate to damp overshoot.
+            # Applied in world frame before the rotation; for planar motion ω_z is
+            # the same in world and body frame so the direction is unambiguous.
+            if self.yaw_derivative_gain != 0.0:
+                output_velocity = output_velocity.clone()
+                output_velocity[2] = output_velocity[2] - self.yaw_derivative_gain * current_velocities[2]
+            if self.xy_derivative_gain != 0.0:
+                output_velocity = output_velocity.clone()
+                output_velocity[0] = output_velocity[0] - self.xy_derivative_gain * current_velocities[0]
+                output_velocity[1] = output_velocity[1] - self.xy_derivative_gain * current_velocities[1]
+
+        # Step 4 – rotate world → body:  R(−yaw) = [[c, s, 0], [−s, c, 0], [0, 0, 1]]
         c = torch.cos(yaw)
         s = torch.sin(yaw)
         rot = torch.stack(
