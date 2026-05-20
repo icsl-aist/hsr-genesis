@@ -100,3 +100,42 @@ PYTHONPATH=src python examples/tutorials/hello_hsr_sensor.py
 ```
 
 If you see a viewer window, the example is running correctly.
+
+## Performance Tips
+
+### Disable visualization for maximum throughput
+
+Running the Genesis viewer has a significant overhead. For training, data
+collection, or any headless workload, disable the viewer:
+
+```python
+gs.init(backend=gs.cuda)
+
+scene = gs.Scene(
+    show_viewer=False,   # disables the interactive viewer
+)
+```
+
+Disabling the viewer typically gives a **large speedup** (often 5–10× or more
+depending on the scene) because Genesis no longer needs to synchronize
+simulation state with the GUI or render frames.
+
+### Increase parallelism to saturate the GPU
+
+Genesis supports batched simulation: multiple independent environments run
+simultaneously on the same GPU. Increasing the number of parallel environments
+(`n_envs`) amortizes kernel-launch overhead and keeps the GPU fully utilized.
+
+```python
+scene.build(n_envs=512)   # tune to your GPU VRAM
+```
+
+Practical guidance:
+
+- Start with a power-of-two value (e.g. 64, 128, 256, 512) and increase until
+  VRAM is nearly full or throughput stops scaling.
+- Monitor VRAM usage with `nvidia-smi` and back off if you see OOM errors.
+- Very large batch sizes (≥ 1024) can saturate memory bandwidth instead of
+  compute; profile with `nvitop` or `nsys` to find the sweet spot.
+- Combining `show_viewer=False` with a high `n_envs` is the recommended setup
+  for RL training and large-scale data collection.
