@@ -69,7 +69,7 @@ def main() -> None:
 
     scene.add_entity(gs.morphs.Plane(), visualize_contact=True)
 
-    cube_pos = np.array([0.35, 0.0, 0.02], dtype=np.float32)
+    cube_pos = np.array([0.45, 0.0, 0.02], dtype=np.float32)
     scene.add_entity(
         gs.morphs.Box(
             size=(0.04, 0.04, 0.04),
@@ -97,7 +97,10 @@ def main() -> None:
     scene.build()
 
     end_effector = hsr.get_link("hand_palm_link")
-    hand_target = cube_pos + np.array([0.05, -0.3, 0.1], dtype=np.float32)
+    # Position the palm above the cube for a top-down grasp.
+    # The finger distal links sit ~4 cm below the palm origin when the
+    # hand points downward, so a +4 cm Z offset places them at cube height.
+    hand_target = cube_pos + np.array([0.0, 0.0, 0.04], dtype=np.float32)
     hand_quat = np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32)
 
     qpos = hsr.inverse_kinematics(
@@ -141,6 +144,7 @@ def main() -> None:
     hand_open = torch.tensor([[1.0]], device=gs.device, dtype=gs.tc_float)
     close_cmd = torch.tensor([[-0.6]], device=gs.device, dtype=gs.tc_float)
 
+    # --- Approach: move arm to pre-grasp pose with hand open ---
     max_steps = int(duration / dt) + 50
     for step in range(max_steps):
         hsr.step_whole_body_trajectory_batched(dt, envs_idx=[0])
@@ -148,8 +152,10 @@ def main() -> None:
             hsr.control_dofs_position(hand_open, dofs_idx_local=[motor_idx])
         scene.step()
 
-    for _ in range(40):
-        hsr.control_dofs_position(close_cmd, dofs_idx_local=[motor_idx])
+    # --- Close the gripper while the trajectory controller holds the arm ---
+    hsr.control_dofs_position(close_cmd, dofs_idx_local=[motor_idx])
+    for _ in range(200):
+        hsr.step_whole_body_trajectory_batched(dt, envs_idx=[0])
         scene.step()
 
 
