@@ -93,7 +93,7 @@ pip install -e .
 PYTHONPATH=src python examples/tutorials/hello_hsr_parallel.py
 ```
 
-Sensor demo:
+Sensor demo (whole-body PD control + base controller + URDF sensors):
 
 ```bash
 PYTHONPATH=src python examples/tutorials/hello_hsr_sensor.py
