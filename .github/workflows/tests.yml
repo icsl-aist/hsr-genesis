@@ -7,7 +7,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
@@ -31,9 +31,34 @@ jobs:
           pip install -e .
           pip install pytest pytest-timeout
 
+      - name: Pre-warm quadrants JIT
+        timeout-minutes: 8
+        run: |
+          PYTHONPATH=src xvfb-run --auto-servernum python -c "
+import genesis as gs
+gs.init(backend=gs.cpu, precision='32', logging_level='error')
+scene = gs.Scene(
+    sim_options=gs.options.SimOptions(dt=0.02, substeps=4),
+    show_viewer=False,
+)
+scene.add_entity(gs.morphs.Plane())
+robot = scene.add_entity(
+    gs.morphs.URDF(
+        file='data/urdf/hsrb4s.urdf',
+        base_mode='planar',
+        fixed=False,
+    )
+)
+scene.build()
+# Step to trigger quadrants JIT kernel compilation
+for _ in range(10):
+    scene.step()
+print('JIT warm-up done')
+"
+
       - name: Run tests
         run: |
-          PYTHONPATH=src xvfb-run --auto-servernum pytest -v --timeout=300 \
+          PYTHONPATH=src xvfb-run --auto-servernum pytest -v --timeout=120 \
             --ignore=tests/test_move_base_control_evaluation.py \
             --ignore=tests/test_hsrb_analytic_ik_solver_ported.py \
             --ignore=tests/test_arm_joint_tracking.py \
