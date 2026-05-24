@@ -500,42 +500,37 @@ class HSRRigidEntity(RigidEntity):
         floor_collisions = []
         object_collisions = []
         
-        # Convert to numpy for easier processing
-        link_a_np = link_a.cpu().numpy()
-        link_b_np = link_b.cpu().numpy()
+        # Build index-to-name mapping and GPU-side link-index tensor
+        index_to_name = {v: k for k, v in link_indices.items()}
+        entity_link_indices = torch.tensor(
+            list(link_indices.values()),
+            device=link_a.device,
+            dtype=link_a.dtype,
+        )
         
-        for i in range(len(link_a_np)):
-            idx_a = int(link_a_np[i])
-            idx_b = int(link_b_np[i])
-            
-            # Check if both links belong to this entity
-            a_in_entity = idx_a in link_indices.values()
-            b_in_entity = idx_b in link_indices.values()
-            
-            if a_in_entity and b_in_entity:
-                # Self-collision
-                name_a = None
-                name_b = None
-                for name, idx in link_indices.items():
-                    if idx == idx_a:
-                        name_a = name
-                    if idx == idx_b:
-                        name_b = name
-                
+        # GPU-side membership tests — no CPU-GPU data copy for the full contact list
+        a_in_entity = torch.isin(link_a, entity_link_indices)
+        b_in_entity = torch.isin(link_b, entity_link_indices)
+        
+        # Self-collisions: both links belong to this entity
+        self_mask = a_in_entity & b_in_entity
+        if self_mask.any():
+            self_link_a = link_a[self_mask].cpu().tolist()
+            self_link_b = link_b[self_mask].cpu().tolist()
+            for idx_a, idx_b in zip(self_link_a, self_link_b):
+                name_a = index_to_name.get(idx_a)
+                name_b = index_to_name.get(idx_b)
                 if name_a and name_b:
                     self_collisions.append((name_a, name_b))
-            
-            elif a_in_entity or b_in_entity:
-                # Collision with floor or other object
-                entity_link_idx = idx_a if a_in_entity else idx_b
-                entity_link_name = None
-                for name, idx in link_indices.items():
-                    if idx == entity_link_idx:
-                        entity_link_name = name
-                        break
-                
+        
+        # Floor/object collisions: exactly one link belongs to this entity
+        floor_mask = a_in_entity ^ b_in_entity
+        if floor_mask.any():
+            floor_indices = torch.where(floor_mask)[0].cpu().tolist()
+            for i in floor_indices:
+                entity_link_idx = int(link_a[i].item()) if bool(a_in_entity[i]) else int(link_b[i].item())
+                entity_link_name = index_to_name.get(entity_link_idx)
                 if entity_link_name:
-                    # Assume collision with floor if one link is not in entity
                     floor_collisions.append(entity_link_name)
         
         return {
