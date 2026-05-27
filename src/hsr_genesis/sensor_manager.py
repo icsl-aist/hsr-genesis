@@ -201,7 +201,6 @@ class URDFSensorManager:
         self.scene = scene
         self.entity = entity
         self._sensors: dict[str, Any] = {}
-        self._batch_renderer_default_light_added = False
 
     @property
     def sensors(self) -> dict[str, Any]:
@@ -246,18 +245,6 @@ class URDFSensorManager:
 
         camera_res_override: tuple[int, int] | None = None
         if create_cameras and camera_backend == "batch_renderer":
-            if not self._batch_renderer_default_light_added:
-                # batch_renderer ignores gs.options.VisOptions.lights defaults;
-                # rasterizer PBR shaders receive a default DirectionalLight
-                # (dir=(-1,-1,-1), color=(1,1,1), intensity=5.0) automatically,
-                # so replicate that here to avoid dark camera images.
-                self.scene.add_light(
-                    dir=(-1.0, -1.0, -1.0),
-                    color=(1.0, 1.0, 1.0),
-                    intensity=5.0,
-                    directional=True,
-                )
-                self._batch_renderer_default_light_added = True
             cam_resolutions: list[tuple[int, int]] = []
             for spec in specs:
                 if spec.type not in ("camera", "depth") or not self._is_sensor_enabled(
@@ -479,12 +466,27 @@ class URDFSensorManager:
 
         link_idx_local = self._link_idx_local_from_reference(spec.reference)
         entity_idx = int(self.entity.idx)
+
+        # batch_renderer ignores gs.options.VisOptions.lights defaults;
+        # rasterizer PBR shaders receive a default DirectionalLight
+        # (dir=(-1,-1,-1), color=(1,1,1), intensity=5.0) automatically,
+        # so replicate that as a per-camera light to avoid dark images.
+        camera_lights = []
+        if backend == "batch_renderer":
+            camera_lights.append({
+                "type": "directional",
+                "dir": (-1.0, -1.0, -1.0),
+                "color": (1.0, 1.0, 1.0),
+                "intensity": 5.0,
+            })
+
         sensor_options = options_cls(
             res=(width, height),
             fov=float(fov_v_deg),
             entity_idx=entity_idx,
             link_idx_local=link_idx_local,
             offset_T=offset_t,
+            lights=camera_lights,
         )
         sensor = self.scene.add_sensor(sensor_options)
         if backend == "rasterizer":

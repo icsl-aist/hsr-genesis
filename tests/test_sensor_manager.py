@@ -2,6 +2,7 @@ import importlib.util
 import sys
 import types
 from pathlib import Path
+from unittest.mock import MagicMock
 
 
 def _load_sensor_manager_module():
@@ -12,13 +13,26 @@ def _load_sensor_manager_module():
     genesis_stub = types.ModuleType("genesis")
     genesis_stub.Scene = type("Scene", (), {})
 
+    _sensors_stub = types.ModuleType("genesis.sensors")
+    _sensors_stub.RasterizerCameraOptions = type(
+        "RasterizerCameraOptions", (),
+        {"__init__": lambda self, **kw: self.__dict__.update(kw)},
+    )
+    _sensors_stub.BatchRendererCameraOptions = type(
+        "BatchRendererCameraOptions", (),
+        {"__init__": lambda self, **kw: self.__dict__.update(kw)},
+    )
+    genesis_stub.sensors = _sensors_stub
+
+    sys.modules.setdefault("genesis", genesis_stub)
+    sys.modules.setdefault("genesis.sensors", _sensors_stub)
+
     hsr_pkg = types.ModuleType("hsr_genesis")
     hsr_pkg.__path__ = [
         str(Path(__file__).resolve().parents[1] / "src" / "hsr_genesis"),
     ]
     force_torque_stub = types.ModuleType("hsr_genesis.force_torque")
 
-    sys.modules.setdefault("genesis", genesis_stub)
     sys.modules.setdefault("hsr_genesis", hsr_pkg)
     sys.modules.setdefault("hsr_genesis.force_torque", force_torque_stub)
 
@@ -167,3 +181,114 @@ def test_rate_limited_sensor_proxy_invalidates_cache_when_time_rewinds() -> None
 
     assert third != second
     assert sensor.read_calls == 3
+
+
+# ---------------------------------------------------------------------------
+# batch_renderer default-light regression tests (mock-based)
+# ---------------------------------------------------------------------------
+
+
+class _TrackingScene:
+    def __init__(self):
+        self.t = 0.0
+        self.add_sensor_calls: list[Any] = []
+
+    def add_sensor(self, options):
+        self.add_sensor_calls.append(options)
+        return MagicMock()
+
+
+class _FakeLink:
+    def __init__(self, idx_local=0):
+        self.idx_local = idx_local
+
+
+class _FakeEntity:
+    def __init__(self, idx=0):
+        self.idx = idx
+        self._links: dict[str, _FakeLink] = {}
+
+    def get_link(self, *, name):
+        if name not in self._links:
+            self._links[name] = _FakeLink()
+        return self._links[name]
+
+
+_MINIMAL_CAMERA_URDF = """\
+<robot name="test_robot">
+  <link name="camera_link"/>
+  <gazebo reference="camera_link">
+    <sensor name="front_camera" type="camera">
+      <camera>
+        <horizontal_fov>1.0</horizontal_fov>
+        <image>
+          <width>64</width>
+          <height>48</height>
+        </image>
+      </camera>
+    </sensor>
+  </gazebo>
+</robot>
+"""
+
+
+def test_batch_renderer_adds_default_light_to_camera_options(tmp_path):
+    """Every batch_renderer camera gets the default DirectionalLight."""
+    URDFSensorManager = sensor_manager.URDFSensorManager
+
+    scene = _TrackingScene()
+    entity = _FakeEntity(idx=0)
+    mgr = URDFSensorManager(scene=scene, entity=entity)
+
+    urdf = tmp_path / "sensor.urdf"
+    urdf.write_text(_MINIMAL_CAMERA_URDF, encoding="ascii")
+
+    mgr.create_from_urdf(urdf, create_cameras=True, camera_backend="batch_renderer")
+
+    assert len(scene.add_sensor_calls) >= 1
+    options = scene.add_sensor_calls[0]
+    assert hasattr(options, "lights"), "camera options must have lights field"
+    assert len(options.lights) == 1
+    light = options.lights[0]
+    assert light["type"] == "directional"
+    assert light["dir"] == (-1.0, -1.0, -1.0)
+    assert light["color"] == (1.0, 1.0, 1.0)
+    assert light["intensity"] == 5.0
+
+
+def test_rasterizer_does_not_add_extra_per_camera_light(tmp_path):
+    """Rasterizer gets lighting from VisOptions; no extra per-camera light."""
+    URDFSensorManager = sensor_manager.URDFSensorManager
+
+    scene = _TrackingScene()
+    entity = _FakeEntity(idx=0)
+    mgr = URDFSensorManager(scene=scene, entity=entity)
+
+    urdf = tmp_path / "sensor.urdf"
+    urdf.write_text(_MINIMAL_CAMERA_URDF, encoding="ascii")
+
+    mgr.create_from_urdf(urdf, create_cameras=True, camera_backend="rasterizer")
+
+    assert len(scene.add_sensor_calls) >= 1
+    options = scene.add_sensor_calls[0]
+    assert options.lights == [], (
+        "rasterizer cameras must not receive extra per-camera lights"
+    )
+
+
+def test_batch_renderer_no_camera_when_cameras_disabled(tmp_path):
+    """No cameras created when create_cameras=False (no lights added)."""
+    URDFSensorManager = sensor_manager.URDFSensorManager
+
+    scene = _TrackingScene()
+    entity = _FakeEntity(idx=0)
+    mgr = URDFSensorManager(scene=scene, entity=entity)
+
+    urdf = tmp_path / "sensor.urdf"
+    urdf.write_text(_MINIMAL_CAMERA_URDF, encoding="ascii")
+
+    mgr.create_from_urdf(urdf, create_cameras=False, camera_backend="batch_renderer")
+
+    assert len(scene.add_sensor_calls) == 0, (
+        "no camera sensors should be created when create_cameras=False"
+    )
