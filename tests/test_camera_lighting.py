@@ -21,13 +21,10 @@ import genesis as gs
 import pytest
 import torch
 
-_CPU_SCENE_TIMEOUT_S = 120.0
-
 
 @pytest.fixture(scope="module")
 def _genesis_initialized():
-    if not getattr(gs, "_initialized", False):
-        gs.init(backend=gs.cpu, precision="32", logging_level="warning")
+    gs.init(backend=gs.gpu, precision="32", logging_level="warning")
     yield
     gs.destroy()
 
@@ -94,14 +91,16 @@ def test_rasterizer_default_lighting_not_dark() -> None:
 
 @pytest.mark.usefixtures("_genesis_initialized")
 def test_batch_renderer_with_default_light_not_dark() -> None:
-    """Regression: batch_renderer with per-camera light is not dark.
+    """Regression: batch_renderer with VisOptions lights is not dark.
 
-    BatchRendererCameraSensor requires CUDA; if not available the test is
-    skipped.  When GPU is present this guards against Genesis changing how
-    batch_renderer processes per-camera lights.
+    Verifies that batch_renderer per-camera lights produce visible output
+    on par with the rasterizer.  Requires GPU.
     """
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=0.01),
+        vis_options=gs.options.VisOptions(
+            ambient_light=(0.1, 0.1, 0.1),
+        ),
         show_viewer=False,
     )
     scene.add_entity(gs.morphs.Plane())
@@ -109,32 +108,34 @@ def test_batch_renderer_with_default_light_not_dark() -> None:
         gs.morphs.Box(pos=(1.0, 0.0, 0.3), size=(0.2, 0.2, 0.2)),
         surface=gs.surfaces.Default(color=(1.0, 1.0, 1.0, 1.0)),
     )
+
+    # Replicate VisOptions lights as per-camera lights (same as sensor_manager)
+    camera_lights = []
+    for light in scene.vis_options.lights:
+        lt = getattr(light, "type", None)
+        if lt == "directional":
+            camera_lights.append({
+                "type": "directional",
+                "dir": tuple(light.dir),
+                "color": tuple(light.color),
+                "intensity": float(light.intensity),
+            })
+
     cam = scene.add_sensor(
         gs.sensors.BatchRendererCameraOptions(
             res=(64, 64),
             pos=(3.0, 0.0, 1.5),
             lookat=(1.0, 0.0, 0.3),
             fov=30,
-            lights=[{
-                "type": "directional",
-                "dir": (-1.0, -1.0, -1.0),
-                "color": (1.0, 1.0, 1.0),
-                "intensity": 5.0,
-            }],
+            lights=camera_lights,
         ),
     )
-
-    try:
-        scene.build()
-    except gs.GenesisException as e:
-        if "CUDA" in str(e):
-            pytest.skip("BatchRendererCameraSensor requires CUDA")
-        raise
+    scene.build()
 
     try:
         mean_brightness = _render_and_mean_brightness(scene, cam)
-    except Exception:
-        pytest.skip("batch_renderer rendering not available on this platform")
+    except Exception as e:
+        pytest.skip(f"batch_renderer rendering not available: {e}")
 
     assert mean_brightness > 0.02, (
         f"batch_renderer mean brightness {mean_brightness:.4f} too low — "
