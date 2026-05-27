@@ -189,13 +189,37 @@ def test_rate_limited_sensor_proxy_invalidates_cache_when_time_rewinds() -> None
 
 
 class _TrackingScene:
-    def __init__(self):
+    def __init__(self, lights=None):
         self.t = 0.0
         self.add_sensor_calls: list[Any] = []
+        self.vis_options = _FakeVisOptions(lights)
 
     def add_sensor(self, options):
         self.add_sensor_calls.append(options)
         return MagicMock()
+
+
+class _FakeVisOptions:
+    def __init__(self, lights=None):
+        self.lights = lights if lights is not None else [
+            _StubDirectionalLight(dir=(-1.0, -1.0, -1.0), color=(1.0, 1.0, 1.0), intensity=5.0),
+        ]
+
+
+class _StubDirectionalLight:
+    def __init__(self, *, dir, color, intensity):
+        self.type = "directional"
+        self.dir = dir
+        self.color = color
+        self.intensity = intensity
+
+
+class _StubPointLight:
+    def __init__(self, *, pos, color, intensity):
+        self.type = "point"
+        self.pos = pos
+        self.color = color
+        self.intensity = intensity
 
 
 class _FakeLink:
@@ -232,8 +256,8 @@ _MINIMAL_CAMERA_URDF = """\
 """
 
 
-def test_batch_renderer_adds_default_light_to_camera_options(tmp_path):
-    """Every batch_renderer camera gets the default DirectionalLight."""
+def test_batch_renderer_applies_vis_options_lights_to_camera(tmp_path):
+    """Default VisOptions lights are replicated as per-camera lights."""
     URDFSensorManager = sensor_manager.URDFSensorManager
 
     scene = _TrackingScene()
@@ -247,13 +271,46 @@ def test_batch_renderer_adds_default_light_to_camera_options(tmp_path):
 
     assert len(scene.add_sensor_calls) >= 1
     options = scene.add_sensor_calls[0]
-    assert hasattr(options, "lights"), "camera options must have lights field"
     assert len(options.lights) == 1
     light = options.lights[0]
     assert light["type"] == "directional"
     assert light["dir"] == (-1.0, -1.0, -1.0)
     assert light["color"] == (1.0, 1.0, 1.0)
     assert light["intensity"] == 5.0
+
+
+def test_batch_renderer_honors_custom_vis_options_lights(tmp_path):
+    """When user sets custom VisOptions lights, those are used for batch_renderer."""
+    URDFSensorManager = sensor_manager.URDFSensorManager
+
+    custom_lights = [
+        _StubDirectionalLight(dir=(0.0, -1.0, 0.0), color=(0.8, 0.5, 0.3), intensity=3.0),
+        _StubPointLight(pos=(2.0, 1.0, 3.0), color=(1.0, 0.0, 0.0), intensity=10.0),
+    ]
+    scene = _TrackingScene(lights=custom_lights)
+    entity = _FakeEntity(idx=0)
+    mgr = URDFSensorManager(scene=scene, entity=entity)
+
+    urdf = tmp_path / "sensor.urdf"
+    urdf.write_text(_MINIMAL_CAMERA_URDF, encoding="ascii")
+
+    mgr.create_from_urdf(urdf, create_cameras=True, camera_backend="batch_renderer")
+
+    assert len(scene.add_sensor_calls) >= 1
+    options = scene.add_sensor_calls[0]
+    assert len(options.lights) == 2
+
+    dl = options.lights[0]
+    assert dl["type"] == "directional"
+    assert dl["dir"] == (0.0, -1.0, 0.0)
+    assert dl["color"] == (0.8, 0.5, 0.3)
+    assert dl["intensity"] == 3.0
+
+    pl = options.lights[1]
+    assert pl["type"] == "point"
+    assert pl["pos"] == (2.0, 1.0, 3.0)
+    assert pl["color"] == (1.0, 0.0, 0.0)
+    assert pl["intensity"] == 10.0
 
 
 def test_rasterizer_does_not_add_extra_per_camera_light(tmp_path):
