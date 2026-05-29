@@ -7,6 +7,7 @@ import xml.etree.ElementTree as ET
 import numpy as np
 import genesis as gs
 import torch
+import cv2
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -203,7 +204,7 @@ if n_envs == 1:
             except Exception:
                 pass
 
-ik_target_marker = scene.add_entity(
+    ik_target_marker = scene.add_entity(
     gs.morphs.Sphere(
         pos=(0.0, 0.0, 0.0),
         radius=0.04,
@@ -358,6 +359,15 @@ while True:
 
     scene.step()
     sim_time[0] += dt
+
+    if IS_DEBUG:
+        for cam_name in ("hand_camera", "head_center_camera"):
+            cam = sensors.get(cam_name)
+            if cam is not None:
+                rgb_hwc = cam.read().rgb.detach().cpu().numpy()[0]
+                cv2.imshow(cam_name, rgb_hwc[..., ::-1])
+        cv2.waitKey(30)
+
     if ik_target_marker is not None and current_target_pos is not None:
         ik_target_marker.set_pos(
             current_target_pos,
