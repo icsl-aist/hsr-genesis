@@ -181,6 +181,27 @@ def _rpy_xyz_to_t(
     return T
 
 
+_GAZEBO_TO_GENESIS_CAMERA_RPY = (math.pi / 2.0, 0.0, -math.pi / 2.0)
+"""Rotation that maps Gazebo camera convention (+X forward) to Genesis (-Z forward; OpenGL)."""
+
+
+def _rotation_to_rpy_rad(R: np.ndarray) -> tuple[float, float, float]:
+    """Extract extrinsic ZYX RPY (roll, pitch, yaw) in radians from a 3x3 rotation matrix."""
+    if abs(float(R[2, 0])) < 1.0 - 1e-6:
+        pitch = math.asin(-float(R[2, 0]))
+        roll = math.atan2(float(R[2, 1]), float(R[2, 2]))
+        yaw = math.atan2(float(R[1, 0]), float(R[0, 0]))
+    else:
+        yaw = 0.0
+        if R[2, 0] <= -1.0:
+            pitch = math.pi / 2.0
+            roll = math.atan2(float(-R[0, 1]), float(R[0, 2]))
+        else:
+            pitch = -math.pi / 2.0
+            roll = math.atan2(float(R[0, 1]), float(-R[0, 2]))
+    return (roll, pitch, yaw)
+
+
 def _vertical_fov_from_horizontal(
     fov_h_rad: float,
     width: int,
@@ -458,6 +479,8 @@ class URDFSensorManager:
         fov_v_deg = _vertical_fov_from_horizontal(fov_h_rad, width, height) * 180.0 / math.pi
 
         offset_t = _rpy_xyz_to_t(spec.pose_xyz, spec.pose_rpy)
+        correction = _rpy_xyz_to_t((0.0, 0.0, 0.0), _GAZEBO_TO_GENESIS_CAMERA_RPY)
+        offset_t = offset_t @ correction
 
         if backend == "rasterizer":
             options_cls = gs.sensors.RasterizerCameraOptions
