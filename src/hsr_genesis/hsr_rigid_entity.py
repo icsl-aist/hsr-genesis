@@ -1385,6 +1385,7 @@ class HSRRigidEntity(RigidEntity):
         link,
         pos=None,
         quat=None,
+        local_point=None,
         init_qpos=None,
         respect_joint_limit=True,
         max_samples=50,
@@ -1428,11 +1429,14 @@ class HSRRigidEntity(RigidEntity):
 
         targets = _mat4_from_pos_quat_wxyz_batch(pos_arr, quat_arr)
 
-        if self._hsr_local_point is not None:
+        local_point_eff = self._hsr_local_point
+        if local_point is not None:
+            local_point_eff = torch.as_tensor(local_point, device=gs.device, dtype=gs.tc_float)
+        if local_point_eff is not None:
             T_offset = torch.eye(4, device=gs.device, dtype=gs.tc_float)
-            T_offset[0, 3] = self._hsr_local_point[0]
-            T_offset[1, 3] = self._hsr_local_point[1]
-            T_offset[2, 3] = self._hsr_local_point[2]
+            T_offset[0, 3] = local_point_eff[0]
+            T_offset[1, 3] = local_point_eff[1]
+            T_offset[2, 3] = local_point_eff[2]
             offset = self._hsr_frame_to_end @ T_offset
             inv_offset = torch.linalg.inv(offset)
             targets = targets @ inv_offset
