@@ -321,6 +321,7 @@ class HSRRigidEntity(RigidEntity):
         )
         self._hsr_arm_lift_order_idx = JOINT_ORDER.index("arm_lift_joint")
         self._hsr_frame_to_end = torch.eye(4, device=gs.device, dtype=gs.tc_float)
+        self._hsr_local_point: torch.Tensor | None = None
         if self._hsr_base_mode == "planar":
             self._hsr_linear_base = [
                 torch.tensor([1.0, 0.0, 0.0], device=gs.device, dtype=gs.tc_float),
@@ -351,6 +352,22 @@ class HSRRigidEntity(RigidEntity):
             else:
                 self._hsr_arm_dofs_idx_local.append(int(dofs))
         self._hsr_default_gains_applied = False
+
+    @property
+    def end_effector_offset(self) -> list[float] | None:
+        if self._hsr_local_point is None:
+            return None
+        return self._hsr_local_point.tolist()
+
+    @end_effector_offset.setter
+    def end_effector_offset(self, value: list[float] | None) -> None:
+        if value is None:
+            self._hsr_local_point = None
+        else:
+            x, y, z = float(value[0]), float(value[1]), float(value[2])
+            self._hsr_local_point = torch.tensor(
+                [x, y, z], device=gs.device, dtype=gs.tc_float
+            )
 
         self._hsr_gripper_batch: HSRBGripperControllerBatch | None = None
         self._hsr_base_controller: HSRBBaseController | None = None
