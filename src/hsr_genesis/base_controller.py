@@ -254,8 +254,8 @@ class HSRBBaseControllersConfig:
     wheel_offset: float = 0.11
 
     command_timeout: float = 0.5
-    yaw_velocity_limit: float = 1.8
-    wheel_velocity_limit: float = 8.5
+    yaw_velocity_limit: float = 2.5
+    wheel_velocity_limit: float = 12.0
 
     wheel_command_velocity_filter_a: tuple[float, ...] = ()
     wheel_command_velocity_filter_b: tuple[float, ...] = ()
