@@ -212,6 +212,38 @@ def _vertical_fov_from_horizontal(
     return 2.0 * math.atan((float(height) / float(width)) * math.tan(0.5 * float(fov_h_rad)))
 
 
+def _vis_lights_to_camera_dicts(lights: Any) -> list[dict[str, Any]]:
+    """Convert VisOptions light objects to camera option dicts.
+
+    Genesis VisOptions.lights are typed ``DirectionalLight`` / ``PointLight``
+    objects; camera options expect ``{"type": ..., ...}`` dicts.  The rasterizer
+    applies ``VisOptions.lights`` to its PBR shaders automatically, but
+    ``batch_renderer`` cameras ignore scene-level lights, so we replicate them
+    as per-camera ``lights=`` entries here.
+    """
+    result: list[dict[str, Any]] = []
+    for light in lights:
+        try:
+            lt = getattr(light, "type", None)
+        except Exception:
+            continue
+        if lt == "directional":
+            result.append({
+                "type": "directional",
+                "dir": tuple(light.dir),
+                "color": tuple(light.color),
+                "intensity": float(light.intensity),
+            })
+        elif lt == "point":
+            result.append({
+                "type": "point",
+                "pos": tuple(light.pos),
+                "color": tuple(light.color),
+                "intensity": float(light.intensity),
+            })
+    return result
+
+
 class URDFSensorManager:
     def __init__(
         self,
@@ -489,12 +521,23 @@ class URDFSensorManager:
 
         link_idx_local = self._link_idx_local_from_reference(spec.reference)
         entity_idx = int(self.entity.idx)
+
+        # batch_renderer ignores gs.options.VisOptions.lights defaults;
+        # rasterizer PBR shaders receive them automatically, so replicate
+        # scene-level lights as per-camera options to avoid dark images.
+        camera_lights: list[dict[str, Any]] = []
+        if backend == "batch_renderer":
+            camera_lights = _vis_lights_to_camera_dicts(
+                self.scene.vis_options.lights,
+            )
+
         sensor_options = options_cls(
             res=(width, height),
             fov=float(fov_v_deg),
             entity_idx=entity_idx,
             link_idx_local=link_idx_local,
             offset_T=offset_t,
+            lights=camera_lights,
         )
         sensor = self.scene.add_sensor(sensor_options)
         if backend == "rasterizer":

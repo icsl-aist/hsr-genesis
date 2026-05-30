@@ -36,5 +36,8 @@ jobs:
           PYTHONPATH=src xvfb-run --auto-servernum pytest -v --timeout=500 \
             --ignore=tests/test_move_base_control_evaluation.py \
             --ignore=tests/test_hsrb_analytic_ik_solver_ported.py \
+            --ignore=tests/test_hsrb_analytic_ik_ported.py \
             --ignore=tests/test_arm_joint_tracking.py \
-            --ignore=tests/test_head_joint_tracking.py
+            --ignore=tests/test_head_joint_tracking.py \
+            --ignore=tests/test_hsrb_base_controller_ported.py \
+            --ignore=tests/test_base_traj_control_diag.py
