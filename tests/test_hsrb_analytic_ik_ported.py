@@ -166,6 +166,11 @@ def test_end_effector_offset_transforms_target_ported():
     assert sol_with_off[0] is not None
     assert not torch.allclose(sol_no_off[0].solution_angle.position, sol_with_off[0].solution_angle.position, atol=1e-4)
 
+    # Verify correctness: o2e_with_off @ T_offset should recover the original target
+    o2e_with_off = sol_with_off[0].origin_to_end
+    recomposed = o2e_with_off @ T_offset
+    assert torch.allclose(recomposed[:3, 3], target[:3, 3], atol=1e-3)
+
 
 def test_vector2_ported():
     v = Vector2(3.0, 4.0)
