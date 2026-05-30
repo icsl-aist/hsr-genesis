@@ -1332,6 +1332,37 @@ class HSRRigidEntity(RigidEntity):
         return self._hsr_torso_dof_idx_local
 
     @gs.assert_built
+    def forward_kinematics(
+        self,
+        qpos,
+        qs_idx_local=None,
+        links_idx_local=None,
+        envs_idx=None,
+        base_xyyaw=None,
+    ):
+        if base_xyyaw is not None:
+            if not torch.is_tensor(qpos):
+                qpos = torch.as_tensor(qpos, dtype=gs.tc_float)
+            base_qs_idx = self._ensure_base_qs_idx()
+            if len(base_qs_idx) >= 7:
+                bx, by, byaw = base_xyyaw
+                hc = math.cos(byaw * 0.5)
+                hs = math.sin(byaw * 0.5)
+                qpos[..., base_qs_idx[0]] = bx
+                qpos[..., base_qs_idx[1]] = by
+                qpos[..., base_qs_idx[2]] = 0.0
+                qpos[..., base_qs_idx[3]] = hc
+                qpos[..., base_qs_idx[4]] = 0.0
+                qpos[..., base_qs_idx[5]] = 0.0
+                qpos[..., base_qs_idx[6]] = hs
+        return super().forward_kinematics(
+            qpos,
+            qs_idx_local=qs_idx_local,
+            links_idx_local=links_idx_local,
+            envs_idx=envs_idx,
+        )
+
+    @gs.assert_built
     def inverse_kinematics(
         self,
         link,
