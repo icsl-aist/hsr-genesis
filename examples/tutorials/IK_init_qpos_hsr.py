@@ -27,7 +27,7 @@ def _quat_wxyz_to_yaw(quat: torch.Tensor | np.ndarray) -> float:
 
 
 def _arm_dofs_idx_local(entity) -> list[int]:
-    from hsr_genesis.analytic_ik import JOINT_ORDER  # noqa: E402
+    from hsr_genesis.analytic_ik import JOINT_ORDER
 
     dofs: list[int] = []
     for name in JOINT_ORDER:
@@ -53,8 +53,8 @@ def _qpos_to_arm_dofs(entity, qpos: torch.Tensor, arm_dofs_idx_local: list[int])
 
 def main() -> None:
     gs.init(backend=gs.gpu)
-    from hsr_genesis.hsr_rigid_entity import HSRBURDF, JointTrajectory  # noqa: E402
-    from hsr_genesis.base_controller import Trajectory  # noqa: E402
+    from hsr_genesis.hsr_rigid_entity import HSRBURDF, JointTrajectory
+    from hsr_genesis.base_controller import Trajectory
 
     scene = gs.Scene(
         viewer_options=gs.options.ViewerOptions(
@@ -97,12 +97,11 @@ def main() -> None:
     scene.build()
 
     end_effector = hsr.get_link("hand_palm_link")
-    # The finger distal links sit ~4 cm below the palm origin when the
-    # hand points downward, so a +4 cm Z offset places them at cube height.
     hsr.end_effector_offset = [0.0, 0.0, 0.04]
     hand_quat = np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32)
 
-    qpos = hsr.inverse_kinematics(
+    # --- Solve IK from the default (current) pose ---
+    qpos_default = hsr.inverse_kinematics(
         link=end_effector,
         pos=cube_pos,
         quat=hand_quat,
@@ -113,10 +112,33 @@ def main() -> None:
     )
 
     arm_dofs_idx_local = _arm_dofs_idx_local(hsr)
-    arm_dofs = _qpos_to_arm_dofs(hsr, qpos, arm_dofs_idx_local)
+    print(f"Default IK solution: {_qpos_to_arm_dofs(hsr, qpos_default, arm_dofs_idx_local)}")
 
-    target_pos = (float(qpos[0]), float(qpos[1]), float(qpos[2]))
-    target_yaw = _quat_wxyz_to_yaw(qpos[3:7])
+    current_qpos = hsr.get_qpos().clone()
+
+    # --- Solve the same target with a custom init_qpos ---
+    # Start with the arm_flex_joint retracted to get a different arm pose.
+    init_qpos = current_qpos.clone()
+    init_qpos[..., 3:6] = torch.tensor([0.5, 0.3, -0.3], device=gs.device, dtype=gs.tc_float)
+
+    qpos_custom = hsr.inverse_kinematics(
+        link=end_effector,
+        pos=cube_pos,
+        quat=hand_quat,
+        init_qpos=init_qpos,
+        max_samples=200,
+        max_solver_iters=150,
+        max_step_size=0.7,
+        respect_joint_limit=False,
+    )
+
+    print(f"Custom init IK solution: {_qpos_to_arm_dofs(hsr, qpos_custom, arm_dofs_idx_local)}")
+
+    # --- Execute the custom-init trajectory ---
+    arm_dofs = _qpos_to_arm_dofs(hsr, qpos_custom, arm_dofs_idx_local)
+
+    target_pos = (float(qpos_custom[0]), float(qpos_custom[1]), float(qpos_custom[2]))
+    target_yaw = _quat_wxyz_to_yaw(qpos_custom[3:7])
 
     dt = float(scene.sim_options.dt)
     duration = 3.0
@@ -143,7 +165,6 @@ def main() -> None:
     hand_open = torch.tensor([[1.0]], device=gs.device, dtype=gs.tc_float)
     close_cmd = torch.tensor([[-0.6]], device=gs.device, dtype=gs.tc_float)
 
-    # --- Approach: move arm to pre-grasp pose with hand open ---
     max_steps = int(duration / dt) + 50
     for step in range(max_steps):
         hsr.step_whole_body_trajectory_batched(dt, envs_idx=[0])
@@ -151,7 +172,6 @@ def main() -> None:
             hsr.control_dofs_position(hand_open, dofs_idx_local=[motor_idx])
         scene.step()
 
-    # --- Close the gripper while the trajectory controller holds the arm ---
     hsr.control_dofs_position(close_cmd, dofs_idx_local=[motor_idx])
     for _ in range(200):
         hsr.step_whole_body_trajectory_batched(dt, envs_idx=[0])
@@ -159,7 +179,7 @@ def main() -> None:
 
 
 def arm_traj_names() -> list[str]:
-    from hsr_genesis.analytic_ik import JOINT_ORDER  # noqa: E402
+    from hsr_genesis.analytic_ik import JOINT_ORDER
 
     return list(JOINT_ORDER)
 
