@@ -172,6 +172,34 @@ def test_end_effector_offset_transforms_target_ported():
     assert torch.allclose(recomposed[:3, 3], target[:3, 3], atol=1e-3)
 
 
+def test_ik_with_init_qpos_ported():
+    aik = _ik.AnalyticIK2()
+    param = aik.hsrb_param()
+
+    config = torch.tensor([0.0, 0.0, 0.0, 0.3, 0.0, 0.0, 0.0, 0.0], dtype=torch.float32)
+    target = _fk(param, config)
+
+    # Use a different init config to verify the solver handles it properly
+    alt_init = torch.tensor([0.0, 0.0, 0.0, 0.5, -0.5, 0.0, 0.0, 0.0], dtype=torch.float32)
+
+    req_alt = _make_request(ref_origin_to_end=target, init_config=alt_init)
+    res_alt, sol_alt = aik.solve_base_yaw_ik(req_alt)
+
+    assert res_alt == _ik.IKResult.SUCCESS
+    assert sol_alt[0] is not None
+
+    # Verify the solution reaches the target via FK
+    sol_config = torch.cat([
+        sol_alt[0].origin_to_base[:2, 3],  # x, y
+        torch.tensor(
+            [math.atan2(sol_alt[0].origin_to_base[1, 0].item(), sol_alt[0].origin_to_base[0, 0].item())]
+        ),  # base yaw
+        sol_alt[0].solution_angle.position,  # arm joints
+    ])
+    fk_result = _fk(param, sol_config)
+    assert torch.allclose(fk_result[:3, 3], target[:3, 3], atol=1e-3)
+
+
 def test_vector2_ported():
     v = Vector2(3.0, 4.0)
     assert v.v1 == pytest.approx(3.0)
