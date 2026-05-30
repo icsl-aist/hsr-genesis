@@ -191,7 +191,7 @@ def test_controller_timeout_zeros_command():
 def test_controller_yaw_limit_saturates_steer_rate():
     cfg = HSRBBaseControllersConfig(
         command_timeout=10.0,
-        yaw_velocity_limit=1.8,
+        yaw_velocity_limit=2.5,
     )
     joint_names = (
         list(cfg.wheel_drive_joints)
@@ -214,7 +214,7 @@ def test_controller_yaw_limit_saturates_steer_rate():
     inferred_steer_vel = steer_target / 0.1
     assert math.isclose(
         inferred_steer_vel,
-        -1.8,
+        -2.5,
         rel_tol=0.0,
         abs_tol=1.0e-6,
     )
@@ -223,7 +223,7 @@ def test_controller_yaw_limit_saturates_steer_rate():
 def test_controller_wheel_limit_saturates_wheel_rate():
     cfg = HSRBBaseControllersConfig(
         command_timeout=10.0,
-        wheel_velocity_limit=8.5,
+        wheel_velocity_limit=12.0,
     )
     joint_names = (
         list(cfg.wheel_drive_joints)
@@ -244,7 +244,7 @@ def test_controller_wheel_limit_saturates_wheel_rate():
     assert entity.last_velocity_cmd is not None
     assert torch.allclose(
         entity.last_velocity_cmd,
-        torch.tensor([8.5, 8.5], dtype=torch.float32),
+        torch.tensor([12.0, 12.0], dtype=torch.float32),
     )
 
 
@@ -277,7 +277,7 @@ def test_controller_timeout_batch_zeros_command():
 def test_controller_yaw_limit_batch_saturates_steer_rate():
     cfg = HSRBBaseControllersConfig(
         command_timeout=10.0,
-        yaw_velocity_limit=1.8,
+        yaw_velocity_limit=2.5,
     )
     joint_names = (
         list(cfg.wheel_drive_joints)
@@ -301,4 +301,4 @@ def test_controller_yaw_limit_batch_saturates_steer_rate():
     assert entity.last_position_cmd is not None
     steer_targets = entity.last_position_cmd.reshape(-1)
     inferred = steer_targets / 0.1
-    assert torch.allclose(inferred, torch.tensor([-1.8, -1.8], dtype=torch.float32), atol=1.0e-6)
+    assert torch.allclose(inferred, torch.tensor([-2.5, -2.5], dtype=torch.float32), atol=1.0e-6)
