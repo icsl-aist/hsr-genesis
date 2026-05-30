@@ -9,11 +9,17 @@ Repository: `https://github.com/icsl-aist/hsr-genesis.git`
 
 License: BSD 3-Clause (compatible with the original ROS packages).
 
-## Docker (Recommended)
+## Docker
 
 The Docker environment provides a reproducible setup with CUDA 12.4,
 necessary for the `batch_renderer` camera backend (the prebuilt
 `gs-madrona` wheel requires CUDA 12.x for NVVM JIT linking).
+
+**Use Docker if you need `camera_backend="batch_renderer"`.**  If you
+only use the default rasterizer backend (or run headless physics without
+cameras), a native install with a modern CUDA toolkit may give better
+simulation performance — newer CUDA versions include optimised cuBLAS
+and cuDNN kernels that accelerate Genesis internals.
 
 ### Prerequisites
 
