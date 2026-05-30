@@ -138,6 +138,35 @@ def _fk(param, config: torch.Tensor) -> torch.Tensor:
     return _ik.ti_to_torch(ws.origin_to_end_field, copy=True)[()]
 
 
+def test_end_effector_offset_transforms_target_ported():
+    aik = _ik.AnalyticIK2()
+    param = aik.hsrb_param()
+
+    config = torch.tensor([0.0, 0.0, 0.0, 0.3, 0.0, 0.0, 0.0, 0.0], dtype=torch.float32)
+    target = _fk(param, config)
+
+    # Solve WITHOUT offset — baseline
+    req_no_offset = _make_request(ref_origin_to_end=target, init_config=config)
+    result_no_off, sol_no_off = aik.solve_base_yaw_ik(req_no_offset)
+    assert result_no_off == _ik.IKResult.SUCCESS
+
+    # Simulate the offset adjustment that inverse_kinematics() does:
+    # targets = targets @ inv(offset)
+    T_offset = torch.eye(4, dtype=torch.float32)
+    T_offset[2, 3] = 0.1
+    inv_offset = torch.linalg.inv(T_offset)
+    adjusted_target = target @ inv_offset
+
+    req_with_offset = _make_request(ref_origin_to_end=adjusted_target, init_config=config)
+    result_with_off, sol_with_off = aik.solve_base_yaw_ik(req_with_offset)
+    assert result_with_off == _ik.IKResult.SUCCESS
+
+    # The solution should differ (arm compensates for the 0.1m z-offset)
+    assert sol_no_off[0] is not None
+    assert sol_with_off[0] is not None
+    assert not torch.allclose(sol_no_off[0].solution_angle.position, sol_with_off[0].solution_angle.position, atol=1e-4)
+
+
 def test_vector2_ported():
     v = Vector2(3.0, 4.0)
     assert v.v1 == pytest.approx(3.0)
