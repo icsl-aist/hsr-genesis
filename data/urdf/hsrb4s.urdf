@@ -1071,6 +1071,7 @@ POSSIBILITY OF SUCH DAMAGE.
   <!-- each link must have mass in URDF so we apply very small mass (10 gram) for this coupling link -->
   <link name="wrist_ft_sensor_mount_link">
     <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
       <mass value="0.01"/>
       <inertia ixx="0.001" ixy="0.0" ixz="0.0" iyy="0.001" iyz="0.0" izz="0.001"/>
     </inertial>
@@ -1153,6 +1154,7 @@ POSSIBILITY OF SUCH DAMAGE.
   </joint>
   <link name="hand_palm_link">
     <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
       <mass value="0.15"/>
       <inertia ixx="0.015" ixy="0.0" ixz="0.0" iyy="0.015" iyz="0.0" izz="0.015"/>
     </inertial>
@@ -1176,8 +1178,9 @@ POSSIBILITY OF SUCH DAMAGE.
   </joint>
   <link name="hand_motor_dummy_link">
     <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
       <mass value="0.001"/>
-      <inertia ixx="0.0" ixy="0.0" ixz="0.0" iyy="0.0" iyz="0.0" izz="0.0"/>
+      <inertia ixx="1.0e-7" ixy="0.0" ixz="0.0" iyy="1.0e-7" iyz="0.0" izz="1.0e-7"/>
     </inertial>
   </link>
   <joint name="hand_l_proximal_joint" type="revolute">
@@ -1191,8 +1194,9 @@ POSSIBILITY OF SUCH DAMAGE.
   </joint>
   <link name="hand_l_proximal_link">
     <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
       <mass value="0.001"/>
-      <inertia ixx="0.0" ixy="0.0" ixz="0.0" iyy="0.0" iyz="0.0" izz="0.0"/>
+      <inertia ixx="1.0e-7" ixy="0.0" ixz="0.0" iyy="1.0e-7" iyz="0.0" izz="1.0e-7"/>
     </inertial>
   </link>
   <joint name="hand_l_spring_proximal_joint" type="revolute">
@@ -1206,7 +1210,7 @@ POSSIBILITY OF SUCH DAMAGE.
     <inertial>
       <mass value="0.001"/>
       <origin xyz="0.021418 0.00248 0.022688"/>
-      <inertia ixx="0.00" ixy="-0.00000" ixz="-0.0000" iyy="0.00" iyz="-0.00000" izz="0.00000"/>
+      <inertia ixx="1.0e-7" ixy="0.0" ixz="0.0" iyy="1.0e-7" iyz="0.0" izz="1.0e-7"/>
     </inertial>
     <visual>
       <geometry>
@@ -1230,8 +1234,9 @@ POSSIBILITY OF SUCH DAMAGE.
   </joint>
   <link name="hand_l_mimic_distal_link">
     <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
       <mass value="0.001"/>
-      <inertia ixx="0.0" ixy="0.0" ixz="0.0" iyy="0.0" iyz="0.0" izz="0.0"/>
+      <inertia ixx="1.0e-7" ixy="0.0" ixz="0.0" iyy="1.0e-7" iyz="0.0" izz="1.0e-7"/>
     </inertial>
   </link>
   <joint name="hand_l_distal_joint" type="revolute">
@@ -1246,7 +1251,7 @@ POSSIBILITY OF SUCH DAMAGE.
     <inertial>
       <mass value="0.001"/>
       <origin xyz="0.011116 0.005679 0.017532"/>
-      <inertia ixx="0.0" ixy="-0.00" ixz="0.0" iyy="0.0" iyz="-0.000" izz="0.0"/>
+      <inertia ixx="1.0e-7" ixy="0.0" ixz="0.0" iyy="1.0e-7" iyz="0.0" izz="1.0e-7"/>
     </inertial>
     <visual>
       <geometry>
@@ -1267,8 +1272,9 @@ POSSIBILITY OF SUCH DAMAGE.
   </joint>
   <link name="hand_l_finger_tip_frame">
     <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
       <mass value="0.001"/>
-      <inertia ixx="0.0" ixy="0.0" ixz="0.0" iyy="0.0" iyz="0.0" izz="0.0"/>
+      <inertia ixx="1.0e-7" ixy="0.0" ixz="0.0" iyy="1.0e-7" iyz="0.0" izz="1.0e-7"/>
     </inertial>
   </link>
   <joint name="hand_l_finger_vacuum_frame_joint" type="fixed">
@@ -1278,8 +1284,9 @@ POSSIBILITY OF SUCH DAMAGE.
   </joint>
   <link name="hand_l_finger_vacuum_frame">
     <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
       <mass value="0.001"/>
-      <inertia ixx="0.0" ixy="0.0" ixz="0.0" iyy="0.0" iyz="0.0" izz="0.0"/>
+      <inertia ixx="1.0e-7" ixy="0.0" ixz="0.0" iyy="1.0e-7" iyz="0.0" izz="1.0e-7"/>
     </inertial>
     <visual>
       <origin rpy="0.0 0.0 0.0" xyz="0.0 0.0 -0.01"/>
@@ -1300,8 +1307,9 @@ POSSIBILITY OF SUCH DAMAGE.
   </joint>
   <link name="hand_r_proximal_link">
     <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
       <mass value="0.001"/>
-      <inertia ixx="0.0" ixy="0.0" ixz="0.0" iyy="0.0" iyz="0.0" izz="0.0"/>
+      <inertia ixx="1.0e-7" ixy="0.0" ixz="0.0" iyy="1.0e-7" iyz="0.0" izz="1.0e-7"/>
     </inertial>
   </link>
   <joint name="hand_r_spring_proximal_joint" type="revolute">
@@ -1315,7 +1323,7 @@ POSSIBILITY OF SUCH DAMAGE.
     <inertial>
       <mass value="0.001"/>
       <origin xyz="0.013203 0.002096 0.023311"/>
-      <inertia ixx="0.0" ixy="0.0" ixz="0.0" iyy="0.0" iyz="0.0" izz="0.0"/>
+      <inertia ixx="1.0e-7" ixy="0.0" ixz="0.0" iyy="1.0e-7" iyz="0.0" izz="1.0e-7"/>
     </inertial>
     <visual>
       <geometry>
@@ -1339,8 +1347,9 @@ POSSIBILITY OF SUCH DAMAGE.
   </joint>
   <link name="hand_r_mimic_distal_link">
     <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
       <mass value="0.001"/>
-      <inertia ixx="0.0" ixy="0.0" ixz="0.0" iyy="0.0" iyz="0.0" izz="0.0"/>
+      <inertia ixx="1.0e-7" ixy="0.0" ixz="0.0" iyy="1.0e-7" iyz="0.0" izz="1.0e-7"/>
     </inertial>
   </link>
   <joint name="hand_r_distal_joint" type="revolute">
@@ -1355,7 +1364,7 @@ POSSIBILITY OF SUCH DAMAGE.
     <inertial>
       <mass value="0.001"/>
       <origin xyz="0.014256 -0.008321 0.015591"/>
-      <inertia ixx="0.0" ixy="0.0" ixz="0.0" iyy="0.0" iyz="0.0" izz="0.0"/>
+      <inertia ixx="1.0e-7" ixy="0.0" ixz="0.0" iyy="1.0e-7" iyz="0.0" izz="1.0e-7"/>
     </inertial>
     <visual>
       <geometry>
@@ -1376,7 +1385,7 @@ POSSIBILITY OF SUCH DAMAGE.
   <link name="hand_r_finger_tip_frame">
     <inertial>
       <mass value="0.001"/>
-      <inertia ixx="0.0" ixy="0.0" ixz="0.0" iyy="0.0" iyz="0.0" izz="0.0"/>
+      <inertia ixx="1.0e-7" ixy="0.0" ixz="0.0" iyy="1.0e-7" iyz="0.0" izz="1.0e-7"/>
     </inertial>
   </link>
   <joint name="hand_camera_frame_joint" type="fixed">
