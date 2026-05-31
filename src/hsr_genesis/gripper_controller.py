@@ -200,12 +200,6 @@ class HSRBGenesisGripperInterface:
         self._commanded_grasp_torque = 0.0
         self._grasping_flag = False
         self._measured_torque = 0.0
-        self._joint_name_to_idx = {
-            motor_joint: self.motor_idx,
-            left_spring_joint: self.left_spring_idx,
-            right_spring_joint: self.right_spring_idx,
-        }
-        self._mimic_children = self._default_mimic_children()
 
     # ------------------------------------------------------------------
     # Sensors
@@ -261,16 +255,6 @@ class HSRBGenesisGripperInterface:
 
     def command_motor_position(self, position: float) -> None:
         self._set_joint_position(self.motor_idx, position)
-        for child in self._mimic_children.get("hand_motor_joint", []):
-            idx = self._joint_name_to_idx.get(child.joint)
-            if idx is None:
-                try:
-                    idx = _first_dof_index(self.entity.get_joint(child.joint).dofs_idx_local)
-                    self._joint_name_to_idx[child.joint] = idx
-                except Exception:  # pragma: no cover - joint missing in entity
-                    continue
-            commanded = child.multiplier * position + child.offset
-            self._set_joint_position(idx, commanded)
 
     def set_grasp_command(self, start_grasping: bool, effort: float) -> None:
         self._commanded_grasp_torque = effort
@@ -287,31 +271,6 @@ class HSRBGenesisGripperInterface:
 
     def set_measured_torque(self, value: float) -> None:
         self._measured_torque = float(value)
-
-    # ------------------------------------------------------------------
-    # URDF mimic helpers
-
-    @dataclass(frozen=True)
-    class _MimicJoint:
-        joint: str
-        multiplier: float = 1.0
-        offset: float = 0.0
-
-    def _default_mimic_children(self):
-        return {
-            "hand_motor_joint": [
-                HSRBGenesisGripperInterface._MimicJoint("hand_l_proximal_joint", 1.0, 0.0),
-                HSRBGenesisGripperInterface._MimicJoint("hand_r_proximal_joint", 1.0, 0.0),
-                HSRBGenesisGripperInterface._MimicJoint("hand_l_distal_joint", -1.0, -0.087),
-                HSRBGenesisGripperInterface._MimicJoint("hand_r_distal_joint", -1.0, -0.087),
-            ],
-            "hand_l_spring_proximal_joint": [
-                HSRBGenesisGripperInterface._MimicJoint("hand_l_mimic_distal_joint", -1.0, 0.0),
-            ],
-            "hand_r_spring_proximal_joint": [
-                HSRBGenesisGripperInterface._MimicJoint("hand_r_mimic_distal_joint", -1.0, 0.0),
-            ],
-        }
 
     def _set_joint_position(self, idx: int, position: float) -> None:
         self.entity.control_dofs_position(
@@ -535,51 +494,6 @@ class HSRBGenesisGripperInterfaceBatch:
             entity.get_joint(right_spring_joint).dofs_idx_local
         )
 
-        self._mimic_children = HSRBGenesisGripperInterface(
-            entity
-        )._default_mimic_children()
-        self._mimic_joint_names: list[str] = []
-        self._mimic_multipliers: list[float] = []
-        self._mimic_offsets: list[float] = []
-        for child in self._mimic_children.get(
-            motor_joint,
-            [],
-        ):
-            self._mimic_joint_names.append(child.joint)
-            self._mimic_multipliers.append(float(child.multiplier))
-            self._mimic_offsets.append(float(child.offset))
-
-        dof_indices: list[int] = [self.motor_idx]
-        valid_multipliers: list[float] = []
-        valid_offsets: list[float] = []
-        valid_mimic_joint_names: list[str] = []
-        for name, mult, offset in zip(
-            self._mimic_joint_names,
-            self._mimic_multipliers,
-            self._mimic_offsets,
-        ):
-            try:
-                idx = _first_dof_index(entity.get_joint(name).dofs_idx_local)
-            except Exception:
-                continue
-            dof_indices.append(idx)
-            valid_multipliers.append(mult)
-            valid_offsets.append(offset)
-            valid_mimic_joint_names.append(name)
-
-        self._command_dofs_idx_local = dof_indices
-        self._mimic_joint_names = valid_mimic_joint_names
-        self._mimic_multipliers_t = torch.tensor(
-            valid_multipliers,
-            device=gs.device,
-            dtype=gs.tc_float,
-        )
-        self._mimic_offsets_t = torch.tensor(
-            valid_offsets,
-            device=gs.device,
-            dtype=gs.tc_float,
-        )
-
     def get_motor_position(
         self,
         *,
@@ -658,19 +572,9 @@ class HSRBGenesisGripperInterfaceBatch:
                 dtype=gs.tc_float,
             )
         )
-        if self._mimic_multipliers_t.numel() == 0:
-            cmd = position.reshape(-1, 1)
-        else:
-            mimic = (
-                position.unsqueeze(1)
-                * self._mimic_multipliers_t.unsqueeze(0)
-                + self._mimic_offsets_t.unsqueeze(0)
-            )
-            cmd = torch.cat([position.reshape(-1, 1), mimic], dim=1)
-
         self.entity.control_dofs_position(
-            cmd,
-            dofs_idx_local=self._command_dofs_idx_local,
+            position,
+            dofs_idx_local=[self.motor_idx],
             envs_idx=envs_idx,
         )
 

@@ -68,7 +68,15 @@ def main() -> None:
             camera_fov=30,
             max_FPS=60,
         ),
-        sim_options=gs.options.SimOptions(dt=0.02),
+        sim_options=gs.options.SimOptions(dt=0.02, substeps=10),
+        rigid_options=gs.options.RigidOptions(
+            iterations=100,
+            ls_iterations=100,
+            noslip_iterations=5,
+            noslip_tolerance=1e-7,
+            constraint_timeconst=0.005,
+            use_gjk_collision=True,
+        ),
         show_viewer=True,
     )
 
@@ -103,7 +111,7 @@ def main() -> None:
 
     end_effector = hsr.get_link("hand_palm_link")
     # Offset palm so finger contact sits at cube mid-height (~z=0.02)
-    hsr.end_effector_offset = [0.0, 0.0, 0.02]
+    hsr.end_effector_offset = [0.0, 0.0, 0.07]
     hand_quat = np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32)
 
     qpos = hsr.inverse_kinematics(
@@ -158,7 +166,7 @@ def main() -> None:
 
     # --- Close gripper using apply-force action for torque-controlled grasp ---
     gripper = hsr.get_gripper_batched()
-    effort = torch.tensor([0.3], device=gs.device, dtype=gs.tc_float)
+    effort = torch.tensor([3.0], device=gs.device, dtype=gs.tc_float)
     active = torch.tensor([True], device=gs.device, dtype=torch.bool)
     gripper.set_apply_force_goal(effort=effort, active_mask=active, envs_idx=[0])
 
@@ -170,12 +178,6 @@ def main() -> None:
     _log_cube_pos("after grasp", cube)
 
     # --- Lift: raise grasped object ---
-    # Since the physics solver can't sustain a stable grasp on a small object,
-    # we kinematically attach the cube to the end-effector during the lift.
-    # First, record the cube-to-palm offset at grasp time.
-    palm_pos = end_effector.get_pos()
-    cube_to_palm_offset = cube.get_pos() - palm_pos
-
     current_qpos = hsr.get_qpos().clone()
     lift_height = 0.25
     lift_pos = np.array([cube_pos[0], cube_pos[1], lift_height], dtype=np.float32)
@@ -212,8 +214,6 @@ def main() -> None:
         gripper.step_apply_force(dt, envs_idx=[0])
         hsr.step_whole_body_trajectory_batched(dt, envs_idx=[0])
         scene.step()
-        target_cube_pos = end_effector.get_pos() + cube_to_palm_offset
-        cube.set_pos(target_cube_pos, zero_velocity=True)
 
     _log_cube_pos("after lift", cube)
 
@@ -221,8 +221,6 @@ def main() -> None:
         gripper.step_apply_force(dt, envs_idx=[0])
         hsr.step_whole_body_trajectory_batched(dt, envs_idx=[0])
         scene.step()
-        target_cube_pos = end_effector.get_pos() + cube_to_palm_offset
-        cube.set_pos(target_cube_pos, zero_velocity=True)
 
     _log_cube_pos("after hold", cube)
 
