@@ -51,9 +51,10 @@ def _qpos_to_arm_dofs(entity, qpos: torch.Tensor, arm_dofs_idx_local: list[int])
     return dofs[:, arm_dofs_idx_local]
 
 
-def _log_cube_pos(label: str, cube) -> None:
-    pos = cube.get_pos()
-    print(f"[cube] {label}: pos=({float(pos[0]):.4f}, {float(pos[1]):.4f}, {float(pos[2]):.4f})")
+def arm_traj_names() -> list[str]:
+    from hsr_genesis.analytic_ik import JOINT_ORDER
+
+    return list(JOINT_ORDER)
 
 
 def main() -> None:
@@ -110,8 +111,7 @@ def main() -> None:
     scene.build()
 
     end_effector = hsr.get_link("hand_palm_link")
-    # Offset palm so finger contact sits at cube mid-height (~z=0.02)
-    hsr.end_effector_offset = [0.0, 0.0, 0.07]
+    hsr.end_effector_offset = [0.0, 0.0, 0.09]
     hand_quat = np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32)
 
     qpos = hsr.inverse_kinematics(
@@ -162,8 +162,6 @@ def main() -> None:
             hsr.control_dofs_position(hand_open, dofs_idx_local=[motor_idx])
         scene.step()
 
-    _log_cube_pos("after approach", cube)
-
     # --- Close gripper using apply-force action for torque-controlled grasp ---
     gripper = hsr.get_gripper_batched()
     effort = torch.tensor([3.0], device=gs.device, dtype=gs.tc_float)
@@ -174,8 +172,6 @@ def main() -> None:
         gripper.step_apply_force(dt, envs_idx=[0])
         hsr.step_whole_body_trajectory_batched(dt, envs_idx=[0])
         scene.step()
-
-    _log_cube_pos("after grasp", cube)
 
     # --- Lift: raise grasped object ---
     current_qpos = hsr.get_qpos().clone()
@@ -215,20 +211,10 @@ def main() -> None:
         hsr.step_whole_body_trajectory_batched(dt, envs_idx=[0])
         scene.step()
 
-    _log_cube_pos("after lift", cube)
-
     for _ in range(100):
         gripper.step_apply_force(dt, envs_idx=[0])
         hsr.step_whole_body_trajectory_batched(dt, envs_idx=[0])
         scene.step()
-
-    _log_cube_pos("after hold", cube)
-
-
-def arm_traj_names() -> list[str]:
-    from hsr_genesis.analytic_ik import JOINT_ORDER
-
-    return list(JOINT_ORDER)
 
 
 if __name__ == "__main__":

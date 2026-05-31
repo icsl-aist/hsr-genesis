@@ -683,6 +683,24 @@ class HSRRigidEntity(RigidEntity):
             )
             self.set_dofs_kp(arm_kp, dofs_idx_local=self._hsr_arm_dofs_idx_local)
             self.set_dofs_kv(arm_kv, dofs_idx_local=self._hsr_arm_dofs_idx_local)
+        try:
+            ft_joint = self.get_joint("wrist_ft_sensor_frame_joint")
+            ft_dofs = ft_joint.dofs_idx_local
+            if isinstance(ft_dofs, (list, tuple)):
+                ft_dofs_list = [int(d) for d in ft_dofs]
+            else:
+                ft_dofs_list = [int(ft_dofs)]
+            n_ft = len(ft_dofs_list)
+            self.set_dofs_kp(
+                torch.full((n_ft,), 10000.0, device=gs.device, dtype=gs.tc_float),
+                dofs_idx_local=ft_dofs_list,
+            )
+            self.set_dofs_kv(
+                torch.full((n_ft,), 200.0, device=gs.device, dtype=gs.tc_float),
+                dofs_idx_local=ft_dofs_list,
+            )
+        except Exception:
+            pass
         if self._hsr_head_dofs_idx_local:
             head_names = []
             for name in ("head_pan_joint", "head_tilt_joint"):

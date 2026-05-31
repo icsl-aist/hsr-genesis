@@ -123,7 +123,7 @@ POSSIBILITY OF SUCH DAMAGE.
     <inertial>
       <mass value="0.2"/>
       <origin xyz="0 0 0"/>
-      <inertia ixx="0.015" ixy="0" ixz="0" iyy="0.015" iyz="0" izz="0.015"/>
+      <inertia ixx="9.5e-5" ixy="0" ixz="0" iyy="1.6e-4" iyz="0" izz="9.5e-5"/>
     </inertial>
   </link>
   <joint name="base_l_drive_wheel_joint" type="continuous">
@@ -151,7 +151,7 @@ POSSIBILITY OF SUCH DAMAGE.
     <inertial>
       <mass value="0.2"/>
       <origin xyz="0 0 0"/>
-      <inertia ixx="0.015" ixy="0" ixz="0" iyy="0.015" iyz="0" izz="0.015"/>
+      <inertia ixx="9.5e-5" ixy="0" ixz="0" iyy="1.6e-4" iyz="0" izz="9.5e-5"/>
     </inertial>
   </link>
   <joint name="base_r_passive_wheel_x_frame_joint" type="continuous">
@@ -166,7 +166,7 @@ POSSIBILITY OF SUCH DAMAGE.
     <inertial>
       <mass value="0.2"/>
       <origin xyz="0 0 0"/>
-      <inertia ixx="0.015" ixy="0" ixz="0" iyy="0.015" iyz="0" izz="0.015"/>
+      <inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/>
     </inertial>
   </link>
   <joint name="base_r_passive_wheel_y_frame_joint" type="continuous">
@@ -179,7 +179,7 @@ POSSIBILITY OF SUCH DAMAGE.
     <inertial>
       <mass value="0.2"/>
       <origin xyz="0 0 0"/>
-      <inertia ixx="0.015" ixy="0" ixz="0" iyy="0.015" iyz="0" izz="0.015"/>
+      <inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/>
     </inertial>
   </link>
   <joint name="base_r_passive_wheel_z_joint" type="continuous">
@@ -190,12 +190,14 @@ POSSIBILITY OF SUCH DAMAGE.
   </joint>
   <link name="base_r_passive_wheel_z_link">
     <visual>
+      <origin xyz="0 0 0"/>
       <geometry>
         <sphere radius="0.03"/>
       </geometry>
       <material name="wheel"/>
     </visual>
     <collision>
+      <origin xyz="0 0 0"/>
       <geometry>
         <sphere radius="0.03"/>
       </geometry>
@@ -203,7 +205,7 @@ POSSIBILITY OF SUCH DAMAGE.
     <inertial>
       <mass value="0.2"/>
       <origin xyz="0 0 0"/>
-      <inertia ixx="0.015" ixy="0" ixz="0" iyy="0.015" iyz="0" izz="0.015"/>
+      <inertia ixx="7.2e-5" ixy="0" ixz="0" iyy="7.2e-5" iyz="0" izz="7.2e-5"/>
     </inertial>
   </link>
   <joint name="base_l_passive_wheel_x_frame_joint" type="continuous">
@@ -218,7 +220,7 @@ POSSIBILITY OF SUCH DAMAGE.
     <inertial>
       <mass value="0.2"/>
       <origin xyz="0 0 0"/>
-      <inertia ixx="0.015" ixy="0" ixz="0" iyy="0.015" iyz="0" izz="0.015"/>
+      <inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/>
     </inertial>
   </link>
   <joint name="base_l_passive_wheel_y_frame_joint" type="continuous">
@@ -231,7 +233,7 @@ POSSIBILITY OF SUCH DAMAGE.
     <inertial>
       <mass value="0.2"/>
       <origin xyz="0 0 0"/>
-      <inertia ixx="0.015" ixy="0" ixz="0" iyy="0.015" iyz="0" izz="0.015"/>
+      <inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/>
     </inertial>
   </link>
   <joint name="base_l_passive_wheel_z_joint" type="continuous">
@@ -242,12 +244,14 @@ POSSIBILITY OF SUCH DAMAGE.
   </joint>
   <link name="base_l_passive_wheel_z_link">
     <visual>
+      <origin xyz="0 0 0"/>
       <geometry>
         <sphere radius="0.03"/>
       </geometry>
       <material name="wheel"/>
     </visual>
     <collision>
+      <origin xyz="0 0 0"/>
       <geometry>
         <sphere radius="0.03"/>
       </geometry>
@@ -255,7 +259,7 @@ POSSIBILITY OF SUCH DAMAGE.
     <inertial>
       <mass value="0.2"/>
       <origin xyz="0 0 0"/>
-      <inertia ixx="0.015" ixy="0" ixz="0" iyy="0.015" iyz="0" izz="0.015"/>
+      <inertia ixx="7.2e-5" ixy="0" ixz="0" iyy="7.2e-5" iyz="0" izz="7.2e-5"/>
     </inertial>
   </link>
   <joint name="base_range_sensor_joint" type="fixed">
@@ -1156,7 +1160,7 @@ POSSIBILITY OF SUCH DAMAGE.
     <inertial>
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <mass value="0.15"/>
-      <inertia ixx="0.015" ixy="0.0" ixz="0.0" iyy="0.015" iyz="0.0" izz="0.015"/>
+      <inertia ixx="7.21e-5" ixy="0.0" ixz="0.0" iyy="4.577e-5" iyz="0.0" izz="5.935e-5"/>
     </inertial>
     <visual>
       <geometry>

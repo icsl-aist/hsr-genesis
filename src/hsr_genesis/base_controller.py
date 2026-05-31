@@ -498,6 +498,7 @@ class HSRBBaseController:
         )
 
 
+
 @dataclass(frozen=True)
 class Trajectory:
     """Base trajectory waypoints in the world/odom frame.
