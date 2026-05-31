@@ -174,3 +174,47 @@ def apply_runtime_patches() -> None:
 
     # Import force_torque to register the custom sensor (requires gs.init())
     from . import force_torque as _force_torque  # noqa: F401
+
+    apply_planar_rrt_patch()
+
+
+def apply_planar_rrt_patch() -> None:
+    """Patch PathPlanner to tolerate FREE joints for planar-base entities.
+
+    Entities with ``_hsr_base_mode == \"planar\"`` use a FREE root joint for the
+    base but effectively only move in x, y, yaw.  This patch lets the RRT planners
+    skip the FREE-joint rejection for such entities and instead treat the 7 free
+    DOFs as regular scalar DOFs that are constrained to planar motion via
+    ``q_limit``.
+    """
+    import genesis as gs
+    from genesis.utils.path_planning import PathPlanner
+
+    if getattr(PathPlanner, "_hsr_planar_rrt_patched", False):
+        return
+
+    def _patched_init(self, entity):
+        self._entity = entity
+        self._solver = entity._solver
+        self.PENETRATION_EPS = 1e-5
+
+        is_planar_base = False
+        morph = getattr(entity, "_morph", None)
+        if morph is not None:
+            is_planar_base = getattr(morph, "hsr_base_mode", None) == "planar"
+
+        for joint in entity.joints:
+            if joint.type == gs.JOINT_TYPE.FREE:
+                if not is_planar_base:
+                    gs.raise_exception(
+                        "planning for the gs.JOINT_TYPE.FREE is not supported (yet). "
+                        "Use `base_mode=\"planar\"` on entities with a floating base to "
+                        "enable RRT planning."
+                    )
+            elif joint.type == gs.JOINT_TYPE.SPHERICAL:
+                gs.raise_exception(
+                    "planning for the gs.JOINT_TYPE.SPHERICAL is not supported (yet)"
+                )
+
+    PathPlanner.__init__ = _patched_init
+    PathPlanner._hsr_planar_rrt_patched = True

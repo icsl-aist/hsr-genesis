@@ -10,6 +10,8 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Sequence
 
+import numpy as np
+
 import genesis as gs
 import torch
 
@@ -353,22 +355,6 @@ class HSRRigidEntity(RigidEntity):
                 self._hsr_arm_dofs_idx_local.append(int(dofs))
         self._hsr_default_gains_applied = False
 
-    @property
-    def end_effector_offset(self) -> list[float] | None:
-        if self._hsr_local_point is None:
-            return None
-        return self._hsr_local_point.tolist()
-
-    @end_effector_offset.setter
-    def end_effector_offset(self, value: list[float] | None) -> None:
-        if value is None:
-            self._hsr_local_point = None
-        else:
-            x, y, z = float(value[0]), float(value[1]), float(value[2])
-            self._hsr_local_point = torch.tensor(
-                [x, y, z], device=gs.device, dtype=gs.tc_float
-            )
-
         self._hsr_gripper_batch: HSRBGripperControllerBatch | None = None
         self._hsr_base_controller: HSRBBaseController | None = None
         self._hsr_base_traj_ctrls: list[OmniBaseTrajectoryControl] | None = None
@@ -392,6 +378,22 @@ class HSRRigidEntity(RigidEntity):
                     self._hsr_head_dofs_idx_local.append(int(dofs))
             except Exception:
                 continue
+
+    @property
+    def end_effector_offset(self) -> list[float] | None:
+        if self._hsr_local_point is None:
+            return None
+        return self._hsr_local_point.tolist()
+
+    @end_effector_offset.setter
+    def end_effector_offset(self, value: list[float] | None) -> None:
+        if value is None:
+            self._hsr_local_point = None
+        else:
+            x, y, z = float(value[0]), float(value[1]), float(value[2])
+            self._hsr_local_point = torch.tensor(
+                [x, y, z], device=gs.device, dtype=gs.tc_float
+            )
         # Gains are applied lazily after build.
 
     def get_gripper_batched(self) -> HSRBGripperControllerBatch:
@@ -653,6 +655,8 @@ class HSRRigidEntity(RigidEntity):
             "head_pan_joint": 100.0,
             "head_tilt_joint": 100.0,
             "hand_motor_joint": 10.0,
+            # torso: mimic joint controlled via arm_lift; needs PD to hold against gravity
+            "torso_lift_joint": 10000.0,
         }
         tuned_kv = {
             # kv = 2 * sqrt(kp)  (critically damped)
@@ -664,6 +668,7 @@ class HSRRigidEntity(RigidEntity):
             "head_pan_joint": 20.0,
             "head_tilt_joint": 20.0,
             "hand_motor_joint": 6.324555320336759,
+            "torso_lift_joint": 200.0,
         }
         if self._hsr_arm_dofs_idx_local:
             arm_kp = torch.tensor(
@@ -718,6 +723,16 @@ class HSRRigidEntity(RigidEntity):
             self.set_dofs_kv(
                 torch.tensor([tuned_kv["hand_motor_joint"]], device=gs.device, dtype=gs.tc_float),
                 dofs_idx_local=[hand_idx],
+            )
+        torso_idx = self._ensure_torso_dof_idx()
+        if torso_idx is not None:
+            self.set_dofs_kp(
+                torch.tensor([tuned_kp["torso_lift_joint"]], device=gs.device, dtype=gs.tc_float),
+                dofs_idx_local=[torso_idx],
+            )
+            self.set_dofs_kv(
+                torch.tensor([tuned_kv["torso_lift_joint"]], device=gs.device, dtype=gs.tc_float),
+                dofs_idx_local=[torso_idx],
             )
         self._hsr_default_gains_applied = True
 
@@ -787,6 +802,18 @@ class HSRRigidEntity(RigidEntity):
             except ValueError:
                 return []
         return perm
+
+    @staticmethod
+    def _arm_lift_gravity_compensation_force() -> float:
+        """Return the steady feed-forward force (N) applied to arm_lift_joint.
+
+        The arm assembly exerts approximately 75 N of gravity load on the
+        arm_lift_joint at full extension (see tuning comments in
+        _hsr_apply_default_gains).  A 60 N feed-forward compensates for ~80 %
+        of the gravity load, reducing sag without over-compensating or
+        destabilising the closed-loop PD response.
+        """
+        return 60.0
 
     @staticmethod
     def _sample_linear_trajectory(
@@ -1208,6 +1235,20 @@ class HSRRigidEntity(RigidEntity):
                         f"[hsr] torso_mimic env={env0} arm_lift={arm0:.4f} torso={torso0:.4f}",
                         flush=True,
                     )
+
+            # Feed-forward force on arm_lift_joint to compensate gravity.
+            arm_lift_dof_idx = self._hsr_arm_dofs_idx_local[self._hsr_arm_lift_order_idx]
+            ff_val = self._arm_lift_gravity_compensation_force()
+            self.control_dofs_force(
+                torch.full(
+                    (len(active_envs), 1),
+                    ff_val,
+                    device=gs.device,
+                    dtype=gs.tc_float,
+                ),
+                dofs_idx_local=[arm_lift_dof_idx],
+                envs_idx=active_envs,
+            )
 
         base_status = self.step_base_trajectory_batched(dt, envs_idx=envs_idx_arr.tolist())
 
@@ -1729,6 +1770,89 @@ class HSRRigidEntity(RigidEntity):
             return qpos, error_pose
         return qpos
 
+
+    def plan_path_planar(
+        self,
+        qpos_goal,
+        qpos_start=None,
+        base_xy_range: float = 2.0,
+        base_yaw_range: float = 6.2832,
+        **kwargs,
+    ):
+        """Plan a path with RRT/RRTConnect using virtual xyyaw joints for the base.
+
+        The HSR's floating base uses a 7-DOF FREE joint internally, which the
+        Genesis RRT planner does not support.  This method constrains the free
+        joint DOFs to planar motion (z=0, roll=0, pitch=0) via ``q_limit``,
+        so the RRT effectively plans in x/y/yaw space for the base.  Quaternion
+        components are normalized in the returned path.
+
+        Parameters match :meth:`plan_path` with the addition of:
+        *base_xy_range* – max |x|,|y| motion for the base (meters).
+        *base_yaw_range* – half-range of yaw (radians).
+        """
+        if not hasattr(self, "_morph") or getattr(self._morph, "hsr_base_mode", None) != "planar":
+            from genesis.utils.misc import raise_exception
+            raise_exception("plan_path_planar requires an entity with ``base_mode=\"planar\"``.")
+
+        free_start = None
+        for joint in self.joints:
+            if joint.type == gs.JOINT_TYPE.FREE:
+                idxs = joint.qs_idx_local
+                free_start = min(idxs) if idxs else 0
+                break
+        if free_start is None:
+            return self.plan_path(qpos_goal=qpos_goal, qpos_start=qpos_start, **kwargs)
+
+        q_limit_lower = np.array(self.q_limit[0], copy=True)
+        q_limit_upper = np.array(self.q_limit[1], copy=True)
+
+        original_lower = q_limit_lower[free_start:free_start + 7].copy()
+        original_upper = q_limit_upper[free_start:free_start + 7].copy()
+
+        q_limit_lower[free_start + 0] = -base_xy_range     # x
+        q_limit_upper[free_start + 0] = base_xy_range
+        q_limit_lower[free_start + 1] = -base_xy_range     # y
+        q_limit_upper[free_start + 1] = base_xy_range
+        q_limit_lower[free_start + 2] = 0.0                # z (ground)
+        q_limit_upper[free_start + 2] = 0.0
+        q_limit_lower[free_start + 3] = -1.0               # qw (full range)
+        q_limit_upper[free_start + 3] = 1.0
+        q_limit_lower[free_start + 4] = 0.0                # qx (no roll)
+        q_limit_upper[free_start + 4] = 0.0
+        q_limit_lower[free_start + 5] = 0.0                # qy (no pitch)
+        q_limit_upper[free_start + 5] = 0.0
+        q_limit_lower[free_start + 6] = -base_yaw_range    # qz (yaw)
+        q_limit_upper[free_start + 6] = base_yaw_range
+
+        self.q_limit = np.stack([q_limit_lower, q_limit_upper])
+
+        try:
+            result = self.plan_path(qpos_goal=qpos_goal, qpos_start=qpos_start, **kwargs)
+
+            if isinstance(result, tuple):
+                path = result[0]
+            else:
+                path = result
+
+            if path.ndim >= 2:
+                qw = path[..., free_start + 3]
+                qx = path[..., free_start + 4]
+                qy = path[..., free_start + 5]
+                qz = path[..., free_start + 6]
+                norm = torch.sqrt(qw * qw + qx * qx + qy * qy + qz * qz).clamp(min=1e-12)
+                path[..., free_start + 3] = qw / norm
+                path[..., free_start + 4] = qx / norm
+                path[..., free_start + 5] = qy / norm
+                path[..., free_start + 6] = qz / norm
+
+            if isinstance(result, tuple):
+                return (path,) + result[1:]
+            return path
+        finally:
+            q_limit_lower[free_start:free_start + 7] = original_lower
+            q_limit_upper[free_start:free_start + 7] = original_upper
+            self.q_limit = np.stack([q_limit_lower, q_limit_upper])
 
 class HSRBURDF(gs.morphs.URDF):
     def __init__(
