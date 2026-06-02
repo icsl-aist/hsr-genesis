@@ -1537,8 +1537,15 @@ class HSRRigidEntity(RigidEntity):
             if ik_init_arr.shape[0] != n_envs:
                 ik_init_arr = ik_init_arr.expand(n_envs, -1)
             ik_init = ik_init_arr
+            # Extract base state from init_qpos if it contains base joint values
+            base_qs_idx_local = self._ensure_base_qs_idx()
+            if base_qs_idx_local and len(base_qs_idx_local) >= 7 and ik_init.shape[1] > max(base_qs_idx_local):
+                init_base_o2b = self._qpos_to_base_origin_to_base(ik_init)
+            else:
+                init_base_o2b = None
         else:
             ik_init = None
+            init_base_o2b = None
 
         if envs_idx is None:
             envs_idx = [0]
@@ -1552,6 +1559,8 @@ class HSRRigidEntity(RigidEntity):
             if ik_init is not None:
                 for i in range(len(requests)):
                     requests[i].initial_angle.position = ik_init[i]
+                    if init_base_o2b is not None:
+                        requests[i].origin_to_base = init_base_o2b
             results = []
             sol = []
             o2b = []
@@ -1626,7 +1635,10 @@ class HSRRigidEntity(RigidEntity):
                     o2b[i] = torch.eye(4, device=gs.device, dtype=gs.tc_float)
                     o2e[i] = torch.eye(4, device=gs.device, dtype=gs.tc_float)
         else:
-            origin_to_base = self._current_base_origin_to_base_batch(envs_idx=envs_idx)
+            if init_base_o2b is not None:
+                origin_to_base = init_base_o2b
+            else:
+                origin_to_base = self._current_base_origin_to_base_batch(envs_idx=envs_idx)
             init_angles = ik_init if ik_init is not None else self._current_arm_joint_state_batch(envs_idx=envs_idx)
             if use_base_yaw:
                 results, sol, o2b, o2e = self._hsr_ik.solve_base_yaw_ik_batch_tensors(
