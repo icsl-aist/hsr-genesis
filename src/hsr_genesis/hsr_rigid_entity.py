@@ -1367,7 +1367,7 @@ class HSRRigidEntity(RigidEntity):
         T[:, 0, 3] = pos[:, 0]
         T[:, 1, 3] = pos[:, 1]
         T[:, 2, 3] = pos[:, 2]
-        return T.squeeze(0) if n == 1 else T
+        return T
 
     def _build_request(self, *, target_origin_to_end: torch.Tensor, envs_idx=None) -> IKRequest:
         origin_to_base = self._current_base_origin_to_base(envs_idx=envs_idx)
@@ -1497,9 +1497,21 @@ class HSRRigidEntity(RigidEntity):
 
         qs_idx_local = self._ensure_arm_qs_idx()
 
+        # Determine effective number of environments from envs_idx, init_qpos, and pos/quat
         n_envs = len(envs_idx) if envs_idx is not None else 1
         device = gs.device
         dtype = gs.tc_float
+
+        # Pre-process init_qpos to determine batch size when envs_idx is not provided
+        if init_qpos is not None:
+            ik_init_arr = torch.as_tensor(init_qpos, device=gs.device, dtype=gs.tc_float)
+            if ik_init_arr.ndim == 1:
+                ik_init_arr = ik_init_arr.unsqueeze(0)
+            if envs_idx is None and ik_init_arr.shape[0] > 1:
+                n_envs = ik_init_arr.shape[0]
+        else:
+            ik_init_arr = None
+
         if pos is None:
             pos_arr = torch.zeros((n_envs, 3), device=device, dtype=dtype)
         else:
@@ -1513,6 +1525,10 @@ class HSRRigidEntity(RigidEntity):
             pos_arr = pos_arr.reshape(1, 3)
         if quat_arr.ndim == 1:
             quat_arr = quat_arr.reshape(1, 4)
+        if pos_arr.shape[0] == 1 and n_envs > 1:
+            pos_arr = pos_arr.expand(n_envs, -1)
+        if quat_arr.shape[0] == 1 and n_envs > 1:
+            quat_arr = quat_arr.expand(n_envs, -1)
         if pos_arr.shape[0] != n_envs or quat_arr.shape[0] != n_envs:
             gs.raise_exception("First dimension of `pos` and `quat` must match envs_idx length.")
 
@@ -1531,11 +1547,15 @@ class HSRRigidEntity(RigidEntity):
             targets = targets @ inv_offset
 
         if init_qpos is not None:
-            ik_init_arr = torch.as_tensor(init_qpos, device=gs.device, dtype=gs.tc_float)
-            if ik_init_arr.ndim == 1:
-                ik_init_arr = ik_init_arr.unsqueeze(0)
+            # ik_init_arr already prepared above; now ensure batch size matches
             if ik_init_arr.shape[0] != n_envs:
-                ik_init_arr = ik_init_arr.expand(n_envs, -1)
+                if ik_init_arr.shape[0] == 1:
+                    ik_init_arr = ik_init_arr.expand(n_envs, -1)
+                else:
+                    gs.raise_exception(
+                        f"init_qpos batch size {ik_init_arr.shape[0]} does not match "
+                        f"env count {n_envs}."
+                    )
             ik_init = ik_init_arr
             # Extract base state from init_qpos if it contains base joint values
             base_qs_idx_local = self._ensure_base_qs_idx()
@@ -1548,7 +1568,7 @@ class HSRRigidEntity(RigidEntity):
             init_base_o2b = None
 
         if envs_idx is None:
-            envs_idx = [0]
+            envs_idx = [0] * n_envs
 
         use_base_yaw = self._hsr_use_base_yaw_ik or self._hsr_base_mode == "rotation_z"
         use_base_yaw_effective = use_base_yaw
@@ -1560,7 +1580,10 @@ class HSRRigidEntity(RigidEntity):
                 for i in range(len(requests)):
                     requests[i].initial_angle.position = ik_init[i]
                     if init_base_o2b is not None:
-                        requests[i].origin_to_base = init_base_o2b
+                        o2b_val = init_base_o2b
+                        if o2b_val.ndim == 3 and o2b_val.shape[0] == 1:
+                            o2b_val = o2b_val.squeeze(0)
+                        requests[i].origin_to_base = o2b_val
             results = []
             sol = []
             o2b = []
@@ -1702,6 +1725,10 @@ class HSRRigidEntity(RigidEntity):
             qpos = torch.as_tensor(qpos, device=gs.device, dtype=gs.tc_float)
         if qpos.ndim == 1:
             qpos = qpos.unsqueeze(0)
+        # When the batch solver has more IK problems than scene environments
+        # (e.g. multiple init_qpos on the same env), expand qpos to match.
+        if qpos.shape[0] < n_envs:
+            qpos = qpos.expand(n_envs, -1).contiguous()
 
         base_qs_idx_local = self._ensure_base_qs_idx()
         torso_qs_idx_local = self._ensure_torso_qs_idx()
@@ -1712,6 +1739,8 @@ class HSRRigidEntity(RigidEntity):
                 cur_pos_all = torch.as_tensor(cur_pos_all, device=qpos.device, dtype=qpos.dtype)
             if cur_pos_all.ndim == 1:
                 cur_pos_all = cur_pos_all.reshape(1, 3)
+            if cur_pos_all.shape[0] < n_envs:
+                cur_pos_all = cur_pos_all.expand(n_envs, -1).contiguous()
 
         if use_base_yaw_effective:
             for i, (res, s, b, e) in enumerate(zip(results, sol, o2b, o2e)):

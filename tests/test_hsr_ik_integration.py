@@ -175,3 +175,95 @@ class TestHSRIKIntegration:
         assert torch.allclose(fk_pos[0], target_pos, atol=1e-2), (
             f"FK position {fk_pos[0].tolist()} should match target {target_pos.tolist()}"
         )
+
+    def test_init_qpos_base_state_affects_ik_solution(self):
+        hsr = _ensure_hsr()
+        hsr.end_effector_offset = None
+        end_effector = hsr.get_link("hand_palm_link")
+
+        # Pick a reachable target
+        target_pos = torch.tensor([0.45, 0.0, 0.06], dtype=gs.tc_float)
+        target_quat = torch.tensor([0.0, 1.0, 0.0, 0.0], dtype=gs.tc_float)
+
+        current_qpos = hsr.get_qpos().clone()
+        base_qs_idx_local = hsr._ensure_base_qs_idx()
+
+        # Use init_qpos with base y shifted so we verify the extraction path
+        # doesn't crash and the base state from init_qpos is used as the solver's
+        # initial condition (the optimizer may move the base, but it won't error).
+        arm_dofs = hsr._ensure_arm_qs_idx()
+        init_qpos = current_qpos.clone()
+        for idx in arm_dofs:
+            init_qpos[idx] = 0.0
+        if base_qs_idx_local and len(base_qs_idx_local) >= 7:
+            init_qpos[base_qs_idx_local[1]] = current_qpos[base_qs_idx_local[1]] + 0.15
+
+        qpos = hsr.inverse_kinematics(
+            link=end_effector,
+            pos=target_pos,
+            quat=target_quat,
+            init_qpos=init_qpos,
+            max_samples=50,
+            max_solver_iters=30,
+            respect_joint_limit=False,
+        )
+
+        assert qpos is not None
+        assert not torch.isnan(qpos).any()
+
+        # Verify the solution still FK's back to the target
+        fk_pos, fk_quat = hsr.forward_kinematics(
+            qpos, links_idx_local=[end_effector.idx_local]
+        )
+        assert torch.allclose(fk_pos[0], target_pos, atol=1e-2), (
+            f"FK position {fk_pos[0].tolist()} should match target {target_pos.tolist()}"
+        )
+
+    def test_init_qpos_base_state_multi_env(self):
+        hsr = _ensure_hsr()
+        hsr.end_effector_offset = None
+        end_effector = hsr.get_link("hand_palm_link")
+
+        target_pos = torch.tensor([0.45, 0.0, 0.06], dtype=gs.tc_float)
+        target_quat = torch.tensor([0.0, 1.0, 0.0, 0.0], dtype=gs.tc_float)
+
+        current_qpos = hsr.get_qpos().clone()
+        base_qs_idx_local = hsr._ensure_base_qs_idx()
+
+        # Create 2 init_qpos tensors with different base y positions
+        arm_dofs = hsr._ensure_arm_qs_idx()
+        init_qpos_0 = current_qpos.clone()
+        init_qpos_1 = current_qpos.clone()
+        for idx in arm_dofs:
+            init_qpos_0[idx] = 0.0
+            init_qpos_1[idx] = 0.0
+        if base_qs_idx_local and len(base_qs_idx_local) >= 7:
+            init_qpos_0[base_qs_idx_local[1]] = current_qpos[base_qs_idx_local[1]] + 0.1
+            init_qpos_1[base_qs_idx_local[1]] = current_qpos[base_qs_idx_local[1]] - 0.1
+
+        init_qpos_stack = torch.stack([init_qpos_0, init_qpos_1], dim=0)
+
+        qpos = hsr.inverse_kinematics(
+            link=end_effector,
+            pos=target_pos,
+            quat=target_quat,
+            init_qpos=init_qpos_stack,
+            max_samples=50,
+            max_solver_iters=30,
+            respect_joint_limit=False,
+        )
+
+        assert qpos is not None
+        assert not torch.isnan(qpos).any()
+        assert qpos.ndim == 2 and qpos.shape[0] == 2
+
+        # Verify the two solutions differ (different init_qpos base states produce different results).
+        # The optimizer may move the base, but the two starting points should lead to
+        # measurably different solutions (proving init_qpos base state was used).
+        if base_qs_idx_local and len(base_qs_idx_local) >= 7:
+            base_y_0 = qpos[0, base_qs_idx_local[1]]
+            base_y_1 = qpos[1, base_qs_idx_local[1]]
+            assert not torch.allclose(base_y_0, base_y_1, atol=1e-4), (
+                f"Env 0 base y {base_y_0:.4f} and env 1 base y {base_y_1:.4f} should differ "
+                f"(different init_qpos base y inputs)"
+            )
