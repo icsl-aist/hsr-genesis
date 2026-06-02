@@ -1339,6 +1339,36 @@ class HSRRigidEntity(RigidEntity):
         T[:, 2, 3] = pos[:, 2]
         return T
 
+    def _qpos_to_base_origin_to_base(self, qpos: torch.Tensor) -> torch.Tensor:
+        base_qs_idx_local = self._ensure_base_qs_idx()
+        if not base_qs_idx_local or len(base_qs_idx_local) < 7:
+            gs.raise_exception("Cannot extract base state from qpos: no base joint found.")
+        if qpos.ndim == 1:
+            qpos = qpos.unsqueeze(0)
+        n = qpos.shape[0]
+
+        pos = qpos[:, base_qs_idx_local[0:3]]                    # (n, 3): x, y, z
+        quat = qpos[:, base_qs_idx_local[3:7]]                   # (n, 4): qw, qx, qy, qz
+
+        w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+        siny_cosp = 2.0 * (w * z + x * y)
+        cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+        yaw = torch.atan2(siny_cosp, cosy_cosp)
+
+        c = torch.cos(yaw)
+        s = torch.sin(yaw)
+        T = torch.zeros((n, 4, 4), device=qpos.device, dtype=qpos.dtype)
+        T[:, 0, 0] = c
+        T[:, 0, 1] = -s
+        T[:, 1, 0] = s
+        T[:, 1, 1] = c
+        T[:, 2, 2] = 1.0
+        T[:, 3, 3] = 1.0
+        T[:, 0, 3] = pos[:, 0]
+        T[:, 1, 3] = pos[:, 1]
+        T[:, 2, 3] = pos[:, 2]
+        return T.squeeze(0) if n == 1 else T
+
     def _build_request(self, *, target_origin_to_end: torch.Tensor, envs_idx=None) -> IKRequest:
         origin_to_base = self._current_base_origin_to_base(envs_idx=envs_idx)
         initial_angle = self._current_arm_joint_state(envs_idx=envs_idx)
