@@ -413,6 +413,8 @@ class HSRRigidEntity(RigidEntity):
         self._hsr_default_gains_applied = False
 
         self._hsr_gripper_batch: HSRBGripperControllerBatch | None = None
+        self._hsr_hand_spring_stiffness: float = 100.0
+        self._hsr_hand_spring_max_torque: float = 7.0
         self._hsr_base_controller: HSRBBaseController | None = None
         self._hsr_base_traj_ctrls: list[OmniBaseTrajectoryControl] | None = None
         self._hsr_base_traj_time: torch.Tensor | None = None
@@ -945,6 +947,68 @@ class HSRRigidEntity(RigidEntity):
                 torch.tensor([tuned_kv["hand_motor_joint"]], device=gs.device, dtype=gs.tc_float),
                 dofs_idx_local=[hand_idx],
             )
+
+        # Configure the passive spring joints in the gripper.
+        #
+        # On the real HSR, hand_l/r_spring_proximal_joint are passive
+        # spring joints that compress when the fingers meet resistance
+        # (contact with an object).  The spring deflection is proportional
+        # to the gripping force and is used by HrhGripperApplyForceCalculator
+        # to estimate the grasp force:
+        #   force = spring_pos * hand_spring_coeff / arm_length
+        #
+        # In Genesis the spring behaviour is emulated with a PD controller
+        # targeting position 0, where kp acts as the spring stiffness and
+        # the effort limit caps the maximum spring force (matching the real
+        # robot's kDefaultMaxSpringJointTorque = 7 Nm).
+        #
+        # The spring stiffness (kp) is stored so that the force calculator
+        # can be kept in sync (hand_spring_coeff should equal kp).
+        self._hsr_hand_spring_stiffness = 100.0  # N·m/rad, matches real HSR
+        self._hsr_hand_spring_max_torque = 7.0   # Nm, from Gazebo plugin
+        spring_joint_names = (
+            "hand_l_spring_proximal_joint",
+            "hand_r_spring_proximal_joint",
+        )
+        spring_dofs: list[int] = []
+        for sname in spring_joint_names:
+            try:
+                sj = self.get_joint(sname)
+            except Exception:
+                continue
+            sdofs = sj.dofs_idx_local
+            if isinstance(sdofs, (list, tuple)):
+                si = int(sdofs[0]) if sdofs else None
+            else:
+                si = int(sdofs)
+            if si is not None:
+                spring_dofs.append(si)
+        if spring_dofs:
+            spring_kp = torch.full(
+                (len(spring_dofs),), self._hsr_hand_spring_stiffness,
+                device=gs.device, dtype=gs.tc_float,
+            )
+            spring_kv = torch.full(
+                (len(spring_dofs),), 10.0,
+                device=gs.device, dtype=gs.tc_float,
+            )
+            self.set_dofs_kp(spring_kp, dofs_idx_local=spring_dofs)
+            self.set_dofs_kv(spring_kv, dofs_idx_local=spring_dofs)
+            # Limit the maximum torque the spring PD can apply so that the
+            # spring compresses under contact (like the real robot's 7 Nm
+            # spring torque limit).
+            spring_lower = torch.full(
+                (len(spring_dofs),), -self._hsr_hand_spring_max_torque,
+                device=gs.device, dtype=gs.tc_float,
+            )
+            spring_upper = torch.full(
+                (len(spring_dofs),), self._hsr_hand_spring_max_torque,
+                device=gs.device, dtype=gs.tc_float,
+            )
+            self.set_dofs_force_range(
+                spring_lower, spring_upper, dofs_idx_local=spring_dofs,
+            )
+
         torso_idx = self._ensure_torso_dof_idx()
         if torso_idx is not None:
             self.set_dofs_kp(
