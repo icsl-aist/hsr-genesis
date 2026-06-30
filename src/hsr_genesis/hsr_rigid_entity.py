@@ -299,6 +299,34 @@ def _pose_error_torch_batch(target: torch.Tensor, current: torch.Tensor) -> torc
     return torch.cat([err_pos, err_rot], dim=-1)
 
 
+_HSR_HAND_WRIST_LINKS = (
+    # wrist
+    "wrist_flex_link",
+    "wrist_ft_sensor_mount_link",
+    "wrist_roll_link",
+    "wrist_ft_sensor_frame",
+    # hand (including dummy / mimic / spring / sensor / camera frames)
+    "hand_palm_link",
+    "hand_motor_dummy_link",
+    "hand_l_proximal_link",
+    "hand_l_spring_proximal_link",
+    "hand_l_mimic_distal_link",
+    "hand_l_distal_link",
+    "hand_l_finger_tip_frame",
+    "hand_l_finger_vacuum_frame",
+    "hand_r_proximal_link",
+    "hand_r_spring_proximal_link",
+    "hand_r_mimic_distal_link",
+    "hand_r_distal_link",
+    "hand_r_finger_tip_frame",
+    "hand_camera_frame",
+    "hand_camera_gazebo_frame",
+)
+# Distal finger pair kept collidable so the gripper fingertips still register
+# contact against each other (e.g. grasp closure detection).
+_HSR_HAND_DISTAL_KEEP_COLLISION = ("hand_l_distal_link", "hand_r_distal_link")
+
+
 class HSRRigidEntity(RigidEntity):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -472,6 +500,17 @@ class HSRRigidEntity(RigidEntity):
             self._hsr_disable_collision_between_links(["base_r_passive_wheel_z_link"], [link_name])
             self._hsr_disable_collision_between_links(["base_l_passive_wheel_y_frame"], [link_name])
             self._hsr_disable_collision_between_links(["base_r_passive_wheel_y_frame"], [link_name])
+        # Disable all internal collisions within the hand+wrist group (including
+        # dummy / mimic / spring / sensor / camera links), but preserve the
+        # left/right distal finger pair so fingertip-to-fingertip contact still
+        # registers (e.g. for grasp closure detection). The helper sets both
+        # [i, j] and [j, i], so we must keep both orderings of the distal pair
+        # out of every disable call.
+        keep_l, keep_r = _HSR_HAND_DISTAL_KEEP_COLLISION
+        rest = [n for n in _HSR_HAND_WRIST_LINKS if n not in (keep_l, keep_r)]
+        self._hsr_disable_collision_between_links(rest, _HSR_HAND_WRIST_LINKS)
+        self._hsr_disable_collision_between_links([keep_l], rest)
+        self._hsr_disable_collision_between_links([keep_r], rest)
         self._hsr_collision_disable_applied = True
 
     def _hsr_check_collisions(self, envs_idx=None) -> dict:
