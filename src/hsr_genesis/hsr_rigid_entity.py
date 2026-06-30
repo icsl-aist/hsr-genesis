@@ -849,10 +849,19 @@ class HSRRigidEntity(RigidEntity):
             "hand_motor_joint": 10.0,
             # torso: mimic joint controlled via arm_lift; needs PD to hold against gravity
             "torso_lift_joint": 10000.0,
+            # base_roll_joint is the steering joint actively controlled by
+            # the base controller.  Effective inertia ~2-5 kg·m² (entire
+            # upper body rotating about the yaw axis).  kp=100 with kv=10
+            # gave zeta ≈ 0.1-0.35 (severely underdamped) causing violent
+            # whole-body oscillation when the arm extends forward.
+            "base_roll_joint": 100.0,
         }
         tuned_kv = {
-            # kv = 2 * sqrt(kp)  (critically damped)
-            "arm_lift_joint": 200.0,
+            # kv tuned for critical damping using effective downstream mass.
+            # arm_lift downstream mass ~4.5 kg -> kv_crit = 2*sqrt(kp*m) ≈ 425.
+            # Using 450 for slight overdamping to avoid bouncing across arm configs.
+            "arm_lift_joint": 450.0,
+            # arm_flex: kv = 2 * sqrt(kp)  (critically damped)
             "arm_flex_joint": 34.641,
             "arm_roll_joint": 12.649,
             "wrist_flex_joint": 15.492,
@@ -860,7 +869,13 @@ class HSRRigidEntity(RigidEntity):
             "head_pan_joint": 20.0,
             "head_tilt_joint": 20.0,
             "hand_motor_joint": 6.324555320336759,
-            "torso_lift_joint": 200.0,
+            # torso_lift_link mass ~3.4 kg -> kv_crit = 2*sqrt(kp*m) ≈ 370.
+            # Using 400 for slight overdamping.
+            "torso_lift_joint": 400.0,
+            # base_roll: kv=50 gives zeta ≈ 1.1 for I_eff ≈ 5 kg·m²,
+            # providing critical damping for the steering joint without
+            # making the steering response sluggish.
+            "base_roll_joint": 50.0,
         }
         if self._hsr_arm_dofs_idx_local:
             arm_kp = torch.tensor(
@@ -1019,6 +1034,23 @@ class HSRRigidEntity(RigidEntity):
                 torch.tensor([tuned_kv["torso_lift_joint"]], device=gs.device, dtype=gs.tc_float),
                 dofs_idx_local=[torso_idx],
             )
+        # Apply critically-damped gains to the base_roll_joint (steering).
+        # Genesis applies default kp=100/kv=10 to all joints, which gives
+        # zeta ≈ 0.1 for the ~60 kg upper body — violently underdamped.
+        try:
+            steer_joint = self.get_joint("base_roll_joint")
+            steer_dofs = steer_joint.dofs_idx_local
+            steer_idx = int(steer_dofs[0]) if isinstance(steer_dofs, (list, tuple)) else int(steer_dofs)
+            self.set_dofs_kp(
+                torch.tensor([tuned_kp["base_roll_joint"]], device=gs.device, dtype=gs.tc_float),
+                dofs_idx_local=[steer_idx],
+            )
+            self.set_dofs_kv(
+                torch.tensor([tuned_kv["base_roll_joint"]], device=gs.device, dtype=gs.tc_float),
+                dofs_idx_local=[steer_idx],
+            )
+        except Exception:
+            pass
         self._hsr_default_gains_applied = True
 
     def _hsr_apply_head_hold(self) -> None:
