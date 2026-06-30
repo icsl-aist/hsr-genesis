@@ -521,8 +521,16 @@ class HSRRigidEntity(RigidEntity):
         ft_idx = self._hsr_ft_link_idx_local
         masses = self._hsr_ft_downstream_masses  # (n_links,) or (n_envs, n_links)
 
+        # Genesis's get_links_acc() always validates envs_idx via
+        # _sanitize_io_variables(), which raises on non-parallelized
+        # scenes (n_envs == 0).  Other getters (get_links_pos, get_links_quat,
+        # etc.) skip validation when gs.use_zerocopy is enabled, so they
+        # silently accept envs_idx=[0].  To keep all calls consistent,
+        # normalize envs_idx to None for non-parallelized scenes.
+        if envs_idx is not None and self._solver.n_envs == 0:
+            envs_idx = None
+
         # Get link states in world frame
-        # COM positions, link quaternions, velocities, accelerations
         com_pos = self.get_links_pos(links_idx_local=idxs, envs_idx=envs_idx, ref="link_com")
         quats = self.get_links_quat(links_idx_local=idxs, envs_idx=envs_idx)
         ang_vel = self.get_links_ang(links_idx_local=idxs, envs_idx=envs_idx)
