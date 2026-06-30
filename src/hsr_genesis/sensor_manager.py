@@ -465,6 +465,10 @@ class URDFSensorManager:
         pos_offset = spec.pose_xyz
         euler_offset = _rpy_rad_to_euler_deg(spec.pose_rpy)
         link_idx_local = self._link_idx_local_from_reference(spec.reference)
+
+        # The ForceTorque sensor auto-discovers downstream links during
+        # scene.build() by traversing the kinematic tree from the FT link.
+        # No need to pass downstream_link_idxs_local explicitly.
         return self.scene.add_sensor(
             gs.sensors.ForceTorque(
                 entity_idx=int(self.entity.idx),

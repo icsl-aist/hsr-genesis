@@ -69,13 +69,8 @@ def main() -> None:
             camera_fov=30,
             max_FPS=60,
         ),
-        sim_options=gs.options.SimOptions(dt=0.02, substeps=10),
+        sim_options=gs.options.SimOptions(dt=0.02, substeps=20),
         rigid_options=gs.options.RigidOptions(
-            iterations=100,
-            ls_iterations=100,
-            noslip_iterations=5,
-            noslip_tolerance=1e-7,
-            constraint_timeconst=0.005,
             use_gjk_collision=True,
         ),
         show_viewer=True,
@@ -106,6 +101,21 @@ def main() -> None:
             optimizer="gpu",
         ),
         visualize_contact=True,
+    )
+
+    # Add FT sensor with debug visualization.
+    # The sensor auto-discovers downstream links during scene.build().
+    ft_link = hsr.get_link("wrist_ft_sensor_frame")
+    ft_sensor = scene.add_sensor(
+        gs.sensors.ForceTorque(
+            entity_idx=int(hsr.idx),
+            link_idx_local=int(ft_link.idx_local),
+            draw_debug=True,
+            debug_force_scale=0.02,
+            debug_force_color=(1.0, 0.0, 0.0, 0.9),
+            debug_torque_scale=0.005,
+            debug_torque_color=(0.0, 0.3, 1.0, 0.9),
+        )
     )
 
     scene.build()
