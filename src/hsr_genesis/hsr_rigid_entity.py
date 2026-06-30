@@ -1440,7 +1440,10 @@ class HSRRigidEntity(RigidEntity):
                 and self._hsr_torso_mimic_multiplier is not None
                 and self._hsr_torso_mimic_offset is not None
             ):
-                arm_lift = desired_arm[active][:, self._hsr_arm_lift_order_idx]
+                # Use the *current* (actual) arm_lift position, not the
+                # desired/commanded value, so the torso physically follows
+                # the arm rather than racing ahead of it.
+                arm_lift = arm_pos[active][:, self._hsr_arm_lift_order_idx]
                 torso_pos = arm_lift * self._hsr_torso_mimic_multiplier + self._hsr_torso_mimic_offset
                 self.control_dofs_position(
                     torso_pos.reshape(-1, 1),
