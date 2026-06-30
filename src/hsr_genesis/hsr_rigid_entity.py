@@ -417,6 +417,8 @@ class HSRRigidEntity(RigidEntity):
         self._hsr_hand_spring_max_torque: float = 7.0
         self._hsr_arm_lift_kp: float = 10000.0
         self._hsr_arm_lift_kv: float = 450.0
+        self._hsr_torso_kp: float = 10000.0
+        self._hsr_torso_kv: float = 400.0
         self._hsr_base_controller: HSRBBaseController | None = None
         self._hsr_base_traj_ctrls: list[OmniBaseTrajectoryControl] | None = None
         self._hsr_base_traj_time: torch.Tensor | None = None
@@ -1062,9 +1064,11 @@ class HSRRigidEntity(RigidEntity):
             )
         except Exception:
             pass
-        # Cache arm_lift gains for dynamic torso feed-forward computation.
+        # Cache arm_lift and torso gains for manual PD + feed-forward computation.
         self._hsr_arm_lift_kp = tuned_kp["arm_lift_joint"]
         self._hsr_arm_lift_kv = tuned_kv["arm_lift_joint"]
+        self._hsr_torso_kp = tuned_kp["torso_lift_joint"]
+        self._hsr_torso_kv = tuned_kv["torso_lift_joint"]
         self._hsr_default_gains_applied = True
 
     def _hsr_apply_head_hold(self) -> None:
@@ -1550,25 +1554,70 @@ class HSRRigidEntity(RigidEntity):
 
         if torch.any(active):
             active_envs = envs_idx_arr[active].tolist()
+
+            # --- Arm PD position control with gravity feed-forward ---
+            #
+            # Genesis's CTRL_MODE.POSITION recomputes the PD force every
+            # substep using the current pos/vel, while CTRL_MODE.FORCE
+            # applies a constant force for all substeps.  Using
+            # control_dofs_force for PD+FF causes vibration at large dt
+            # because the force goes stale between substeps.
+            #
+            # Solution: embed the feed-forward into the position target.
+            # Setting ctrl_pos = desired + ff / kp makes Genesis's PD
+            # controller produce: kp*(desired + ff/kp - pos) + kv*(-vel)
+            #                           = kp*(desired - pos) + ff + kv*(-vel)
+            # which is exactly PD + feed-forward, recomputed every substep.
+            arm_lift_dof_idx = self._hsr_arm_dofs_idx_local[self._hsr_arm_lift_order_idx]
+            arm_ff_val = self._arm_lift_gravity_compensation_force()
+            torso_idx = self._ensure_torso_dof_idx()
+
+            # Compute the arm_lift PD force prediction for the torso FF.
+            # This is needed to counteract the arm reaction on the torso.
+            arm_lift_actual = arm_pos[active][:, self._hsr_arm_lift_order_idx]
+            arm_lift_vel = arm_vel[active][:, self._hsr_arm_lift_order_idx]
+            arm_lift_desired = desired_arm[active][:, self._hsr_arm_lift_order_idx]
+            arm_pd_force = (
+                self._hsr_arm_lift_kp * (arm_lift_desired - arm_lift_actual)
+                + self._hsr_arm_lift_kv * (-arm_lift_vel)
+            )
+            arm_total_force = arm_pd_force + arm_ff_val
+            arm_force_limit = 300.0
+            arm_total_force = arm_total_force.clamp(-arm_force_limit, arm_force_limit)
+
+            # Shift the arm_lift target to embed the gravity feed-forward.
+            desired_arm_shifted = desired_arm[active].clone()
+            desired_arm_shifted[:, self._hsr_arm_lift_order_idx] = (
+                arm_lift_desired + arm_ff_val / self._hsr_arm_lift_kp
+            )
+
+            # Apply standard PD position control to all arm DOFs.
+            # The arm_lift target is shifted to produce PD + FF.
             self.control_dofs_position(
-                desired_arm[active],
+                desired_arm_shifted,
                 dofs_idx_local=self._hsr_arm_dofs_idx_local,
                 envs_idx=active_envs,
             )
 
-            torso_idx = self._ensure_torso_dof_idx()
+            # --- Torso mimic + gravity + arm-reaction feed-forward ---
             if (
                 torso_idx is not None
                 and self._hsr_torso_mimic_multiplier is not None
                 and self._hsr_torso_mimic_offset is not None
             ):
-                # Use the *current* (actual) arm_lift position, not the
-                # desired/commanded value, so the torso physically follows
-                # the arm rather than racing ahead of it.
+                # Torso follows arm_lift position (mimic joint).
                 arm_lift = arm_pos[active][:, self._hsr_arm_lift_order_idx]
-                torso_pos = arm_lift * self._hsr_torso_mimic_multiplier + self._hsr_torso_mimic_offset
+                torso_pos_desired = arm_lift * self._hsr_torso_mimic_multiplier + self._hsr_torso_mimic_offset
+
+                # Torso feed-forward: gravity + arm total force reaction
+                torso_ff = (
+                    self._torso_lift_gravity_compensation_force()
+                    + arm_total_force
+                )
+                # Shift the torso target to embed the feed-forward.
+                torso_ctrl_pos = torso_pos_desired + torso_ff / self._hsr_torso_kp
                 self.control_dofs_position(
-                    torso_pos.reshape(-1, 1),
+                    torso_ctrl_pos.reshape(-1, 1),
                     dofs_idx_local=[torso_idx],
                     envs_idx=active_envs,
                 )
@@ -1576,70 +1625,11 @@ class HSRRigidEntity(RigidEntity):
                 if self._hsr_debug_log_every > 0 and self._hsr_debug_log_counter % self._hsr_debug_log_every == 0:
                     env0 = active_envs[0] if active_envs else -1
                     arm0 = float(arm_lift[0].item()) if arm_lift.numel() else 0.0
-                    torso0 = float(torso_pos[0].item()) if torso_pos.numel() else 0.0
+                    torso0 = float(torso_pos_desired[0].item()) if torso_pos_desired.numel() else 0.0
                     print(
                         f"[hsr] torso_mimic env={env0} arm_lift={arm0:.4f} torso={torso0:.4f}",
                         flush=True,
                     )
-
-            # Feed-forward force on arm_lift_joint to compensate gravity.
-            arm_lift_dof_idx = self._hsr_arm_dofs_idx_local[self._hsr_arm_lift_order_idx]
-            arm_ff_val = self._arm_lift_gravity_compensation_force()
-            self.control_dofs_force(
-                torch.full(
-                    (len(active_envs), 1),
-                    arm_ff_val,
-                    device=gs.device,
-                    dtype=gs.tc_float,
-                ),
-                dofs_idx_local=[arm_lift_dof_idx],
-                envs_idx=active_envs,
-            )
-
-            # Feed-forward force on torso_lift_joint.
-            #
-            # The torso supports the torso link (~3.4 kg) plus the arm
-            # assembly (~4.5 kg), giving ~78 N of gravity load.
-            # Additionally, the arm_lift PD+FF force creates an equal and
-            # opposite reaction on the torso.  When the arm accelerates
-            # upward (PD saturates at +300 N), the torso needs 78+300=378 N
-            # to hold position.  When the arm descends (PD = -300 N), the
-            # reaction pushes the torso UP, and the torso PD must push down
-            # to compensate.
-            #
-            # To keep the torso stable regardless of arm motion, we
-            # feed-forward the *predicted* arm total force (PD + FF) in
-            # addition to the torso gravity compensation.  The torso PD
-            # then only needs to handle residual tracking error.
-            if (
-                torso_idx is not None
-                and self._hsr_torso_mimic_multiplier is not None
-                and self._hsr_torso_mimic_offset is not None
-            ):
-                # Compute the predicted arm_lift PD force for the active envs.
-                arm_lift_actual = arm_pos[active][:, self._hsr_arm_lift_order_idx]
-                arm_lift_vel = arm_vel[active][:, self._hsr_arm_lift_order_idx]
-                arm_lift_desired = desired_arm[active][:, self._hsr_arm_lift_order_idx]
-                arm_pd_force = (
-                    self._hsr_arm_lift_kp * (arm_lift_desired - arm_lift_actual)
-                    + self._hsr_arm_lift_kv * (-arm_lift_vel)
-                )
-                # Total arm force = PD + FF, clamped to force range
-                arm_force_limit = 300.0
-                arm_total_force = arm_pd_force + arm_ff_val
-                arm_total_force = arm_total_force.clamp(
-                    -arm_force_limit, arm_force_limit
-                )
-                # Torso FF = torso gravity + arm total force reaction
-                torso_ff = (
-                    self._torso_lift_gravity_compensation_force()
-                    + arm_total_force
-                )
-                self.control_dofs_force(
-                    torso_ff.reshape(-1, 1),
-                    dofs_idx_local=[torso_idx],
-                    envs_idx=active_envs,
-                )
 
         base_status = self.step_base_trajectory_batched(dt, envs_idx=envs_idx_arr.tolist())
 
