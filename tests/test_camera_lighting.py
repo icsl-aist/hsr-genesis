@@ -4,19 +4,15 @@ If the Genesis library ever changes default lighting (VisOptions.lights defaults
 renderer-default DirectionalLight, etc.), these tests will catch the regression so
 we can update the compatibility code in sensor_manager.py before users notice.
 
-NOTE: this module must be run in its own pytest process (no concurrent mock tests)
-because mock tests register stub modules that shadow the real Genesis package.
+Genesis is initialized once in conftest.py for the entire test session.
+The stub-module cleanup that previously ran here is no longer needed because
+conftest.py imports the real ``genesis`` before any test module, so
+``sys.modules.setdefault`` in test_sensor_manager.py cannot shadow it.
 """
 
 import gc
 import subprocess
 import sys
-
-# Remove any genesis stub registered by other test modules, otherwise
-# ``import genesis`` will resolve to the stub instead of the real package.
-for _key in list(sys.modules):
-    if _key == "genesis" or _key.startswith("genesis."):
-        del sys.modules[_key]
 
 import genesis as gs
 import pytest
@@ -25,9 +21,9 @@ import torch
 
 @pytest.fixture(scope="module")
 def _genesis_initialized():
-    gs.init(backend=gs.gpu, precision="32", logging_level="warning")
+    if not getattr(gs, "_initialized", False):
+        gs.init(backend=gs.gpu, precision="32", logging_level="warning")
     yield
-    gs.destroy()
 
 
 def _render_and_mean_brightness(
