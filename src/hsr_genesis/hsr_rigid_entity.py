@@ -299,35 +299,6 @@ def _pose_error_torch_batch(target: torch.Tensor, current: torch.Tensor) -> torc
     return torch.cat([err_pos, err_rot], dim=-1)
 
 
-def _quat_to_rotmat_batch(quat_wxyz: torch.Tensor) -> torch.Tensor:
-    """Convert quaternion(s) to rotation matrix(ices).
-
-    Parameters
-    ----------
-    quat_wxyz : torch.Tensor, shape (..., 4) in wxyz convention
-
-    Returns
-    -------
-    R : torch.Tensor, shape (..., 3, 3)
-    """
-    w, x, y, z = quat_wxyz[..., 0], quat_wxyz[..., 1], quat_wxyz[..., 2], quat_wxyz[..., 3]
-    n = w * w + x * x + y * y + z * z
-    n = torch.where(n <= 1e-12, torch.ones_like(n), n)
-    s = 2.0 / n
-    wx, wy, wz = w * x * s, w * y * s, w * z * s
-    xx, xy, xz = x * x * s, x * y * s, x * z * s
-    yy, yz, zz = y * y * s, y * z * s, z * z * s
-    R = torch.stack(
-        [
-            torch.stack([1.0 - (yy + zz), xy - wz, xz + wy], dim=-1),
-            torch.stack([xy + wz, 1.0 - (xx + zz), yz - wx], dim=-1),
-            torch.stack([xz - wy, yz + wx, 1.0 - (xx + yy)], dim=-1),
-        ],
-        dim=-2,
-    )
-    return R
-
-
 _HSR_HAND_WRIST_LINKS = (
     # wrist
     "wrist_flex_link",
@@ -431,13 +402,6 @@ class HSRRigidEntity(RigidEntity):
         self._hsr_head_hold_applied = False
         self._hsr_debug_log_counter = 0
         self._hsr_debug_log_every = 120
-        # FT sensor: the wrist_ft_sensor_frame_joint is a fixed joint, so the
-        # wrench is computed via recursive Newton-Euler over all downstream
-        # links (hand/gripper chain) in get_wrist_ft_wrench().
-        self._hsr_ft_link_idx_local: int | None = None
-        self._hsr_ft_downstream_link_idxs_local: list[int] = []
-        self._hsr_ft_downstream_masses: torch.Tensor | None = None
-        self._hsr_ft_downstream_inertias: torch.Tensor | None = None
         self._hsr_head_dofs_idx_local = []
         for name in ("head_pan_joint", "head_tilt_joint"):
             try:
@@ -497,129 +461,6 @@ class HSRRigidEntity(RigidEntity):
             float(dt),
             envs_idx=envs_idx,
         )
-
-    def get_wrist_ft_wrench(self, envs_idx=None) -> torch.Tensor:
-        """Read the 6-DOF wrench at the wrist FT sensor joint.
-
-        The ``wrist_ft_sensor_frame_joint`` is a fixed joint. The wrench is
-        computed via recursive Newton-Euler: summing gravity, inertial, and
-        contact forces over all downstream links (the hand/gripper chain),
-        then transforming the result to the FT sensor frame's local
-        coordinates.
-
-        Returns
-        -------
-        wrench : torch.Tensor, shape (6,) or (n_envs, 6)
-            [fx, fy, fz, tx, ty, tz] in the FT sensor frame's local frame.
-            Returns zeros if the FT link was not configured.
-        """
-        if (not self._hsr_ft_downstream_link_idxs_local
-                or self._hsr_ft_downstream_masses is None):
-            return torch.zeros(6, device=gs.device, dtype=gs.tc_float)
-
-        idxs = self._hsr_ft_downstream_link_idxs_local
-        ft_idx = self._hsr_ft_link_idx_local
-        masses = self._hsr_ft_downstream_masses  # (n_links,) or (n_envs, n_links)
-
-        # Genesis's get_links_acc() always validates envs_idx via
-        # _sanitize_io_variables(), which raises on non-parallelized
-        # scenes (n_envs == 0).  Other getters (get_links_pos, get_links_quat,
-        # etc.) skip validation when gs.use_zerocopy is enabled, so they
-        # silently accept envs_idx=[0].  To keep all calls consistent,
-        # normalize envs_idx to None for non-parallelized scenes.
-        if envs_idx is not None and self._solver.n_envs == 0:
-            envs_idx = None
-
-        # Get link states in world frame
-        com_pos = self.get_links_pos(links_idx_local=idxs, envs_idx=envs_idx, ref="link_com")
-        quats = self.get_links_quat(links_idx_local=idxs, envs_idx=envs_idx)
-        ang_vel = self.get_links_ang(links_idx_local=idxs, envs_idx=envs_idx)
-        lin_acc = self.get_links_acc(links_idx_local=idxs, envs_idx=envs_idx)
-        ang_acc = self.get_links_acc_ang(links_idx_local=idxs, envs_idx=envs_idx)
-
-        # FT sensor frame pose
-        ft_pos = self.get_links_pos(links_idx_local=[ft_idx], envs_idx=envs_idx, ref="link_com")
-        ft_quat = self.get_links_quat(links_idx_local=[ft_idx], envs_idx=envs_idx)
-
-        # Net contact forces on downstream links
-        contact_forces = self.get_links_net_contact_force(envs_idx=envs_idx)
-        # Extract only downstream links
-        if contact_forces.dim() == 2:
-            # (n_links, 3) — single env
-            contact_forces = contact_forces[idxs]  # (n_downstream, 3)
-        else:
-            # (n_envs, n_links, 3)
-            contact_forces = contact_forces[:, idxs, :]  # (n_envs, n_downstream, 3)
-
-        # Gravity vector (world frame)
-        gravity = torch.tensor(
-            [0.0, 0.0, -9.81], device=gs.device, dtype=gs.tc_float,
-        )
-
-        # Determine batch dimension
-        single_env = com_pos.dim() == 2  # (n_links, 3)
-        if single_env:
-            # Expand to (1, n_links, ...) for uniform processing
-            com_pos = com_pos.unsqueeze(0)
-            quats = quats.unsqueeze(0)
-            ang_vel = ang_vel.unsqueeze(0)
-            lin_acc = lin_acc.unsqueeze(0)
-            ang_acc = ang_acc.unsqueeze(0)
-            ft_pos = ft_pos.unsqueeze(0)
-            ft_quat = ft_quat.unsqueeze(0)
-            contact_forces = contact_forces.unsqueeze(0)
-            masses_b = masses.unsqueeze(0)
-        else:
-            masses_b = masses
-
-        n_envs_b = com_pos.shape[0]
-        n_links_b = com_pos.shape[1]
-
-        # Compute world-frame inertia for each downstream link
-        # I_world = R @ I_local @ R^T
-        # quats: (n_envs, n_links, 4) in wxyz
-        R = _quat_to_rotmat_batch(quats)  # (n_envs, n_links, 3, 3)
-        I_local = self._hsr_ft_downstream_inertias  # (n_links, 3, 3)
-        I_local_b = I_local.unsqueeze(0).expand(n_envs_b, -1, -1, -1)
-        I_world = R @ I_local_b @ R.transpose(-1, -2)  # (n_envs, n_links, 3, 3)
-
-        # Forces on each link (world frame):
-        # Newton's 2nd law: F_joint + F_gravity + F_contact = m * a
-        # => F_joint = m * a - F_gravity - F_contact
-        #           = m * (a - g) - F_contact
-        # where g = [0, 0, -9.81] (gravity acceleration vector)
-        # Genesis returns physical acceleration a (≈0 when static), so
-        # a - g ≈ +9.81 in z when static, giving the expected gravity load.
-        m_exp = masses_b.unsqueeze(-1)  # (n_envs, n_links, 1)
-        F_link = m_exp * (lin_acc - gravity.unsqueeze(0).unsqueeze(0)) - contact_forces
-        # (n_envs, n_links, 3)
-
-        # Torques on each link (world frame, about FT sensor origin):
-        # T_i = I_world_i @ alpha_i + omega_i x (I_world_i @ omega_i)
-        #       + (r_com_i - r_ft) x F_link_i
-        I_alpha = (I_world @ ang_acc.unsqueeze(-1)).squeeze(-1)  # (n_envs, n_links, 3)
-        I_omega = (I_world @ ang_vel.unsqueeze(-1)).squeeze(-1)  # (n_envs, n_links, 3)
-        gyro = torch.cross(ang_vel, I_omega, dim=-1)  # (n_envs, n_links, 3)
-        r_rel = com_pos - ft_pos  # (n_envs, n_links, 3)
-        r_x_F = torch.cross(r_rel, F_link, dim=-1)  # (n_envs, n_links, 3)
-        T_link = I_alpha + gyro + r_x_F  # (n_envs, n_links, 3)
-
-        # Sum over all downstream links
-        F_total = F_link.sum(dim=1)  # (n_envs, 3)
-        T_total = T_link.sum(dim=1)  # (n_envs, 3)
-
-        # Transform to FT sensor local frame
-        R_ft = _quat_to_rotmat_batch(ft_quat)  # (n_envs, 1, 3, 3)
-        R_ft = R_ft.squeeze(1)  # (n_envs, 3, 3)
-        # Local wrench = R_ft^T @ world_wrench
-        F_local = (R_ft.transpose(-1, -2) @ F_total.unsqueeze(-1)).squeeze(-1)
-        T_local = (R_ft.transpose(-1, -2) @ T_total.unsqueeze(-1)).squeeze(-1)
-
-        wrench = torch.cat([F_local, T_local], dim=-1)  # (n_envs, 6)
-
-        if single_env:
-            wrench = wrench.squeeze(0)
-        return wrench
 
     def get_base_controller(self) -> HSRBBaseController:
         if self._hsr_base_control_mode != BaseControlMode.CONTROLLER:
@@ -902,37 +743,6 @@ class HSRRigidEntity(RigidEntity):
             )
             self.set_dofs_kp(arm_kp, dofs_idx_local=self._hsr_arm_dofs_idx_local)
             self.set_dofs_kv(arm_kv, dofs_idx_local=self._hsr_arm_dofs_idx_local)
-        try:
-            ft_link = self.get_link("wrist_ft_sensor_frame")
-            ft_link_idx_local = int(ft_link.idx) - int(self._link_start)
-            # Traverse the kinematic tree to find all downstream links
-            # (children of the FT sensor frame link).
-            downstream = []
-            stack = [ft_link_idx_local]
-            while stack:
-                li = stack.pop()
-                downstream.append(li)
-                for j, link in enumerate(self.links):
-                    if int(link.parent_idx) - int(self._link_start) == li:
-                        stack.append(j)
-            self._hsr_ft_link_idx_local = ft_link_idx_local
-            self._hsr_ft_downstream_link_idxs_local = downstream
-            # Cache masses and inertias (constant after build)
-            masses = self.get_links_inertial_mass(
-                links_idx_local=downstream,
-            )
-            self._hsr_ft_downstream_masses = masses
-            # Cache inertia tensors in link-local frame (will be rotated to world per-call)
-            inertias = []
-            for li in downstream:
-                link = self.links[li]
-                I_local = np.array(link._inertial_i, dtype=np.float64)
-                inertias.append(I_local)
-            self._hsr_ft_downstream_inertias = torch.tensor(
-                np.stack(inertias), device=gs.device, dtype=gs.tc_float,
-            )
-        except Exception:
-            pass
         if self._hsr_head_dofs_idx_local:
             head_names = []
             for name in ("head_pan_joint", "head_tilt_joint"):
