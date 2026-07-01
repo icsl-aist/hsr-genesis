@@ -21,6 +21,9 @@ __all__ = [
     "set_raycast_ignore_list",
     "update_raycast_ignore_list",
     "clear_raycast_ignore_list",
+    "sdf_to_urdf",
+    "load_sdf_model",
+    "morph_from_sdf",
 ]
 
 __version__ = "0.1.0"
@@ -65,6 +68,10 @@ def __getattr__(name: str):
         from .raycast_filter_patch import clear_raycast_ignore_list
 
         return clear_raycast_ignore_list
+    if name in ("sdf_to_urdf", "load_sdf_model", "morph_from_sdf"):
+        from . import sdf_parser
+
+        return getattr(sdf_parser, name)
     raise AttributeError(name)
 
 

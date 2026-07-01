@@ -1,3 +1,6 @@
 [submodule "data/urdf/hsrb_meshes"]
 	path = data/urdf/hsrb_meshes
 	url = https://github.com/hsr-project/hsrb_meshes.git
+[submodule "data/tmc_wrs_gazebo"]
+	path = data/tmc_wrs_gazebo
+	url = https://github.com/hsr-project/tmc_wrs_gazebo.git
