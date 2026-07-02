@@ -1191,7 +1191,15 @@ class HSRRigidEntity(RigidEntity):
                     self.set_quat(quat, envs_idx=active_envs, zero_velocity=False)
         else:
             base_controller = self.get_base_controller()
-            base_controller.update_velocity_command_batch(out, envs_idx=envs_idx_arr.tolist())
+            # Only overwrite the velocity command for envs with an active
+            # trajectory.  For envs without one, preserve any velocity command
+            # that was set externally (e.g. via update_velocity_command) so
+            # that raw velocity control still works.
+            if torch.any(active):
+                active_envs_list = envs_idx_arr[active].tolist()
+                base_controller.update_velocity_command_batch(
+                    out[active], envs_idx=active_envs_list
+                )
             base_controller.step_batch(dt, envs_idx=envs_idx_arr.tolist())
 
         return {"active": active, "command": out}

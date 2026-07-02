@@ -1,0 +1,746 @@
+"""Tests for ``hsr_genesis.tutorial_utils`` — both pure functions and sim-integrated.
+
+The file is split into two layers:
+
+1. **Pure-function tests** (no Genesis scene required): test the math helpers,
+   constants, and state-management logic that don't need a running simulator.
+   These run on any platform (CPU-only CI included).
+
+2. **Integration tests** (require a GPU-capable Taichi backend): call
+   ``init_sim()``, exercise every public control function, and verify
+   observable effects on the simulated HSR (base motion, arm motion, gripper,
+   head, FK/IK consistency, frame capture, reset, etc.).
+
+Run::
+
+    PYTHONPATH=src .venv/bin/python -m pytest tests/test_tutorial_utils.py -v
+"""
+
+from __future__ import annotations
+
+import math
+import os
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pytest
+import torch
+
+import genesis as gs
+
+from hsr_genesis import tutorial_utils as tu
+
+
+# ---------------------------------------------------------------------------
+# GPU guard (mirrors test_hsr_ik_integration.py)
+# ---------------------------------------------------------------------------
+
+
+def _check_gpu() -> bool:
+    """Return True if a GPU-capable backend is available.
+
+    Uses ``torch.cuda.is_available()`` because Taichi's ``ti.cfg`` is ``None``
+    before ``gs.init()`` is called, so checking ``ti.cfg.arch`` at module import
+    time (when pytest evaluates ``skipif``) always fails.
+    """
+    try:
+        import torch
+
+        return torch.cuda.is_available()
+    except Exception:
+        return False
+
+
+_gpu_required = pytest.mark.skipif(
+    not _check_gpu(),
+    reason="tutorial_utils integration tests require a GPU-capable Taichi backend",
+)
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _clear_state():
+    """Clear tutorial_utils singleton state before and after a test."""
+    tu._state.scene = None
+    tu._state.hsr = None
+    tu._state.cam = None
+    tu._state.frames = []
+    tu._state.base_vel_cmd = None
+    tu._state.gripper_active = False
+    tu._state.gripper = None
+    tu._state.motor_idx = None
+    tu._state.arm_dofs_idx = []
+    tu._state.end_effector = None
+    tu._state.head_idx = None
+    tu._state.built = False
+    yield
+    tu._state.scene = None
+    tu._state.hsr = None
+    tu._state.cam = None
+    tu._state.frames = []
+    tu._state.base_vel_cmd = None
+    tu._state.gripper_active = False
+    tu._state.built = False
+
+
+@_gpu_required
+@pytest.fixture
+def _sim():
+    """Function-scoped initialized simulation.
+
+    ``init_sim`` is idempotent (no-op if already initialized), so this is safe
+    to call even if a prior test left state populated.  If a ``_clear_state``
+    test ran in between, ``init_sim`` will rebuild the scene.
+    """
+    if not getattr(gs, "_initialized", False):
+        gs.init(backend=gs.gpu, precision="32", logging_level="warning")
+    tu.init_sim(dt=0.02, cam_res=(160, 120))
+    # init_sim defers scene.build() so spawn_* can add entities first.
+    # For tests that need the built scene immediately, build now.
+    tu._maybe_build()
+    yield
+    # Tear down: clear state so pure-function tests see a clean slate.
+    tu._state.scene = None
+    tu._state.hsr = None
+    tu._state.cam = None
+    tu._state.frames = []
+    tu._state.base_vel_cmd = None
+    tu._state.gripper_active = False
+    tu._state.built = False
+
+
+@_gpu_required
+@pytest.fixture
+def _sim_unbuilt():
+    """Like ``_sim`` but does NOT build the scene.
+
+    Used by spawn tests that need to add entities before the first
+    ``run()`` / ``step()`` call (Genesis disallows ``add_entity`` after build).
+    """
+    if not getattr(gs, "_initialized", False):
+        gs.init(backend=gs.gpu, precision="32", logging_level="warning")
+    tu.init_sim(dt=0.02, cam_res=(160, 120))
+    yield
+    tu._state.scene = None
+    tu._state.hsr = None
+    tu._state.cam = None
+    tu._state.frames = []
+    tu._state.base_vel_cmd = None
+    tu._state.gripper_active = False
+    tu._state.built = False
+
+
+# ===========================================================================
+# 1. Pure-function tests (no simulator)
+# ===========================================================================
+
+
+class TestEulerToQuaternion:
+    """Tests for ``_euler_deg_to_quat_wxyz``."""
+
+    def test_identity_rotation_is_unit_quaternion(self, _clear_state):
+        q = tu._euler_deg_to_quat_wxyz(0, 0, 0)
+        assert q.shape == (4,)
+        assert q.dtype == np.float32
+        # Identity quaternion: w=1, x=y=z=0
+        np.testing.assert_allclose(q, [1, 0, 0, 0], atol=1e-6)
+
+    def test_quaternion_is_unit_norm(self, _clear_state):
+        """Result must always be a unit quaternion."""
+        for roll, pitch, yaw in [(0, 0, 90), (30, 45, 60), (10, -20, 170), (180, 0, 0)]:
+            q = tu._euler_deg_to_quat_wxyz(roll, pitch, yaw)
+            norm = float(np.linalg.norm(q))
+            assert abs(norm - 1.0) < 1e-5, f"norm={norm} for ({roll},{pitch},{yaw})"
+
+    def test_180_yaw(self, _clear_state):
+        """Yaw=180° → w≈0, z≈1 (rotation about Z)."""
+        q = tu._euler_deg_to_quat_wxyz(0, 0, 180)
+        # w = cos(90°) ≈ 0, z = sin(90°) = 1
+        assert abs(q[0]) < 1e-5
+        assert abs(q[3] - 1.0) < 1e-5
+
+    def test_90_pitch(self, _clear_state):
+        """Pitch=90° → w=cos(45°), y=sin(45°)."""
+        q = tu._euler_deg_to_quat_wxyz(0, 90, 0)
+        s = math.sin(math.radians(45))
+        c = math.cos(math.radians(45))
+        np.testing.assert_allclose(q, [c, 0, s, 0], atol=1e-6)
+
+
+class TestQuatWxyzToYaw:
+    """Tests for ``_quat_wxyz_to_yaw``."""
+
+    def test_identity_quaternion_yields_zero_yaw(self, _clear_state):
+        yaw = tu._quat_wxyz_to_yaw([1, 0, 0, 0])
+        assert abs(yaw) < 1e-10
+
+    def test_90_deg_yaw(self, _clear_state):
+        """Quaternion for +90° yaw → yaw ≈ π/2."""
+        s = math.sin(math.radians(45))
+        c = math.cos(math.radians(45))
+        yaw = tu._quat_wxyz_to_yaw([c, 0, 0, s])
+        assert abs(yaw - math.pi / 2) < 1e-6
+
+    def test_negative_90_deg_yaw(self, _clear_state):
+        s = math.sin(math.radians(-45))
+        c = math.cos(math.radians(-45))
+        yaw = tu._quat_wxyz_to_yaw([c, 0, 0, s])
+        assert abs(yaw + math.pi / 2) < 1e-6
+
+    def test_accepts_torch_tensor(self, _clear_state):
+        """Should accept a torch tensor as input."""
+        q = torch.tensor([1.0, 0.0, 0.0, 0.0])
+        yaw = tu._quat_wxyz_to_yaw(q)
+        assert abs(yaw) < 1e-10
+
+    def test_accepts_numpy_array(self, _clear_state):
+        q = np.array([1.0, 0.0, 0.0, 0.0])
+        yaw = tu._quat_wxyz_to_yaw(q)
+        assert abs(yaw) < 1e-10
+
+
+class TestQuaternionFromEuler:
+    """Tests for the public ``quaternion_from_euler`` (ROS xyzw convention)."""
+
+    def test_identity(self, _clear_state):
+        q = tu.quaternion_from_euler(0, 0, 0)
+        # ROS convention: [x, y, z, w] → identity = [0, 0, 0, 1]
+        np.testing.assert_allclose(q, [0, 0, 0, 1], atol=1e-6)
+
+    def test_returns_xyzw_order(self, _clear_state):
+        """Verify the output is in xyzw order, not wxyz."""
+        q_wxyz = tu._euler_deg_to_quat_wxyz(0, 0, 90)
+        q_xyzw = tu.quaternion_from_euler(0, 0, 90)
+        np.testing.assert_allclose(q_xyzw, [q_wxyz[1], q_wxyz[2], q_wxyz[3], q_wxyz[0]], atol=1e-6)
+
+    def test_unit_norm(self, _clear_state):
+        q = tu.quaternion_from_euler(30, 45, 60)
+        assert abs(float(np.linalg.norm(q)) - 1.0) < 1e-5
+
+
+class TestNamedPoses:
+    """Tests for the ``ARM_NEUTRAL`` and ``ARM_INIT`` constants."""
+
+    def test_arm_neutral_has_5_elements(self, _clear_state):
+        assert len(tu.ARM_NEUTRAL) == 5
+
+    def test_arm_init_has_5_elements(self, _clear_state):
+        assert len(tu.ARM_INIT) == 5
+
+    def test_arm_init_is_all_zeros(self, _clear_state):
+        assert tu.ARM_INIT == [0.0, 0.0, 0.0, 0.0, 0.0]
+
+    def test_arm_neutral_is_not_init(self, _clear_state):
+        """Neutral should differ from init (otherwise it's a duplicate)."""
+        assert tu.ARM_NEUTRAL != tu.ARM_INIT
+
+
+class TestMoveBaseVelState:
+    """Tests for ``move_base_vel`` / ``stop_base`` state management (no sim)."""
+
+    def test_move_base_vel_sets_state_in_radians(self, _clear_state):
+        tu.move_base_vel(0.1, 0.0, 90)
+        assert tu._state.base_vel_cmd is not None
+        vx, vy, vw_rad = tu._state.base_vel_cmd
+        assert vx == pytest.approx(0.1)
+        assert vy == pytest.approx(0.0)
+        # 90 deg/s → π/2 rad/s
+        assert vw_rad == pytest.approx(math.radians(90))
+
+    def test_move_base_vel_converts_to_floats(self, _clear_state):
+        tu.move_base_vel(1, 2, 45)
+        vx, vy, vw = tu._state.base_vel_cmd
+        assert isinstance(vx, float)
+        assert isinstance(vy, float)
+        assert isinstance(vw, float)
+
+    def test_stop_base_zeros_velocity(self, _clear_state):
+        tu.move_base_vel(0.5, 0.3, 30)
+        tu.stop_base()
+        assert tu._state.base_vel_cmd == (0.0, 0.0, 0.0)
+
+    def test_move_base_vel_negative_rotation(self, _clear_state):
+        tu.move_base_vel(0, 0, -45)
+        _, _, vw = tu._state.base_vel_cmd
+        assert vw == pytest.approx(math.radians(-45))
+
+
+class TestClearFrames:
+    """Tests for ``clear_frames`` (no sim needed)."""
+
+    def test_clear_frames_empties_list(self, _clear_state):
+        tu._state.frames = [1, 2, 3]
+        tu.clear_frames()
+        assert tu._state.frames == []
+
+
+class TestMoveArmJointsValidation:
+    """Tests for ``move_arm_joints`` input validation (no sim needed for the check)."""
+
+    def test_too_few_angles_raises(self, _clear_state):
+        with pytest.raises(ValueError, match="5 elements"):
+            tu.move_arm_joints([0.1, 0.2])
+
+    def test_too_many_angles_raises(self, _clear_state):
+        with pytest.raises(ValueError, match="5 elements"):
+            tu.move_arm_joints([0.1, 0.2, 0.3, 0.4, 0.5, 0.6])
+
+    def test_empty_list_raises(self, _clear_state):
+        with pytest.raises(ValueError, match="5 elements"):
+            tu.move_arm_joints([])
+
+
+class TestArmTrajNames:
+    """Tests for ``_arm_traj_names`` (pure function, no sim needed)."""
+
+    def test_returns_list_of_strings(self, _clear_state):
+        names = tu._arm_traj_names()
+        assert isinstance(names, list)
+        assert len(names) == 5
+        for n in names:
+            assert isinstance(n, str)
+
+    def test_matches_joint_order(self, _clear_state):
+        from hsr_genesis.analytic_ik import JOINT_ORDER
+
+        assert tu._arm_traj_names() == list(JOINT_ORDER)
+
+    def test_expected_joint_names(self, _clear_state):
+        """The 5 arm joints should be in the canonical order."""
+        expected = [
+            "arm_lift_joint",
+            "arm_flex_joint",
+            "arm_roll_joint",
+            "wrist_flex_joint",
+            "wrist_roll_joint",
+        ]
+        assert tu._arm_traj_names() == expected
+
+
+class TestLog:
+    """Tests for ``_log`` (pure function, no sim needed)."""
+
+    def test_prints_tagged_message(self, _clear_state, capsys):
+        tu._log("hello world")
+        captured = capsys.readouterr()
+        assert "[setup:INFO]" in captured.out
+        assert "hello world" in captured.out
+
+    def test_custom_level(self, _clear_state, capsys):
+        tu._log("something went wrong", level="ERROR")
+        captured = capsys.readouterr()
+        assert "[setup:ERROR]" in captured.out
+        assert "something went wrong" in captured.out
+
+
+class TestShowVideoNoFrames:
+    """Tests for ``show_video`` / ``show_frame`` when no frames are captured."""
+
+    def test_show_video_no_frames_prints_message(self, _clear_state, capsys):
+        tu._state.frames = []
+        tu.show_video()
+        captured = capsys.readouterr()
+        assert "No frames" in captured.out
+
+    def test_show_frame_no_frames_prints_message(self, _clear_state, capsys):
+        tu._state.frames = []
+        tu.show_frame()
+        captured = capsys.readouterr()
+        assert "No frames" in captured.out
+
+
+class TestFindUrdf:
+    """Tests for ``_find_urdf``."""
+
+    def test_finds_urdf_in_repo(self, _clear_state):
+        """The URDF should be found relative to the repo root."""
+        path = tu._find_urdf()
+        assert path.exists()
+        assert path.name == "hsrb4s.urdf"
+
+    def test_returns_path_object(self, _clear_state):
+        path = tu._find_urdf()
+        assert isinstance(path, Path)
+
+
+class TestGettersBeforeInit:
+    """Tests that getters return None before ``init_sim``."""
+
+    def test_get_robot_returns_none_before_init(self, _clear_state):
+        assert tu.get_robot() is None
+
+    def test_get_scene_returns_none_before_init(self, _clear_state):
+        assert tu.get_scene() is None
+
+    def test_get_camera_returns_none_before_init(self, _clear_state):
+        assert tu.get_camera() is None
+
+
+# ===========================================================================
+# 2. Integration tests (require GPU + simulator)
+# ===========================================================================
+
+
+@_gpu_required
+class TestInitSim:
+    """Tests for ``init_sim`` and ``reset_sim``."""
+
+    def test_init_sim_populates_state(self, _sim):
+        assert tu._state.scene is not None
+        assert tu._state.hsr is not None
+        assert tu._state.cam is not None
+        assert tu._state.end_effector is not None
+        assert tu._state.motor_idx is not None
+        assert tu._state.head_idx is not None
+        assert tu._state.gripper is not None
+        assert len(tu._state.arm_dofs_idx) == 5
+
+    def test_init_sim_is_idempotent(self, _sim):
+        """Calling init_sim again should be a no-op (not raise)."""
+        scene_before = tu._state.scene
+        tu.init_sim()
+        assert tu._state.scene is scene_before
+
+    def test_get_robot_returns_entity(self, _sim):
+        robot = tu.get_robot()
+        assert robot is tu._state.hsr
+
+    def test_get_scene_returns_scene(self, _sim):
+        assert tu.get_scene() is tu._state.scene
+
+    def test_get_camera_returns_camera(self, _sim):
+        assert tu.get_camera() is tu._state.cam
+
+    def test_end_effector_offset_is_set(self, _sim):
+        """init_sim should set end_effector_offset on the HSR entity."""
+        assert tu._state.hsr.end_effector_offset is not None
+        assert tu._state.hsr.end_effector_offset[2] == pytest.approx(0.09)
+
+    def test_reset_sim_rebuilds(self, _sim):
+        """reset_sim should tear down and rebuild the scene."""
+        old_scene = tu._state.scene
+        tu.reset_sim(dt=0.02, cam_res=(160, 120))
+        assert tu._state.scene is not None
+        # A new scene object should be created (different identity).
+        assert tu._state.scene is not old_scene
+
+
+@_gpu_required
+class TestRunAndStep:
+    """Tests for ``run``, ``step``, and frame capture."""
+
+    def test_run_advances_simulation(self, _sim):
+        """run() should not raise and should produce the right number of steps."""
+        tu.run(0.06, render=False)  # 3 steps at dt=0.02
+        # No exception means success.
+
+    def test_run_with_render_captures_frames(self, _sim):
+        tu.clear_frames()
+        tu.run(0.06, render=True)
+        assert len(tu._state.frames) == 3
+
+    def test_step_captures_frames(self, _sim):
+        tu.clear_frames()
+        tu.step(2, render=True)
+        assert len(tu._state.frames) == 2
+
+    def test_step_no_render_does_not_capture(self, _sim):
+        tu.clear_frames()
+        tu.step(5, render=False)
+        assert len(tu._state.frames) == 0
+
+    def test_clear_frames(self, _sim):
+        tu.run(0.04, render=True)
+        assert len(tu._state.frames) > 0
+        tu.clear_frames()
+        assert tu._state.frames == []
+
+
+@_gpu_required
+class TestBaseControl:
+    """Tests for base velocity control and goal navigation."""
+
+    def test_move_base_vel_then_run_moves_forward(self, _sim):
+        """After commanding forward velocity and stepping, x should increase."""
+        x0, _, _ = tu.get_base_pos()
+        tu.move_base_vel(0.1, 0, 0)
+        tu.run(0.5, render=False)  # 25 steps
+        tu.stop_base()
+        x1, _, _ = tu.get_base_pos()
+        assert x1 > x0, f"base did not move forward: x0={x0}, x1={x1}"
+
+    def test_get_base_pos_returns_three_floats(self, _sim):
+        pos = tu.get_base_pos()
+        assert len(pos) == 3
+        for v in pos:
+            assert isinstance(v, float)
+
+    def test_stop_base_zeros_velocity(self, _sim):
+        tu.move_base_vel(0.5, 0, 0)
+        assert tu._state.base_vel_cmd is not None
+        tu.stop_base()
+        tu.run(0.04, render=False)
+        # After stop, velocity command is (0, 0, 0).
+        assert tu._state.base_vel_cmd == (0.0, 0.0, 0.0)
+
+    def test_move_base_goal_cancels_velocity_command(self, _sim):
+        """move_base_goal should clear any active velocity command."""
+        tu.move_base_vel(0.2, 0, 0)
+        assert tu._state.base_vel_cmd is not None
+        dur = tu.move_base_goal(0.0, 0.0, 0.0, duration=1.0)
+        assert dur == 1.0
+        assert tu._state.base_vel_cmd is None
+
+    def test_move_base_goal_returns_duration(self, _sim):
+        dur = tu.move_base_goal(0.1, 0.0, 10.0, duration=2.5)
+        assert dur == 2.5
+
+
+@_gpu_required
+class TestArmControl:
+    """Tests for arm pose commands and joint control."""
+
+    def test_move_arm_neutral_returns_duration(self, _sim):
+        dur = tu.move_arm_neutral(duration=1.0)
+        assert dur == 1.0
+
+    def test_move_arm_init_returns_duration(self, _sim):
+        dur = tu.move_arm_init(duration=1.5)
+        assert dur == 1.5
+
+    def test_move_arm_joints_returns_duration(self, _sim):
+        dur = tu.move_arm_joints([0.0, -0.5, 0.0, -0.3, 0.0], duration=1.0)
+        assert dur == 1.0
+
+    def test_move_arm_joints_stepping_does_not_raise(self, _sim):
+        tu.move_arm_joints([0.1, -0.3, 0.2, -0.2, 0.1], duration=1.0)
+        tu.run(0.06, render=False)
+
+    def test_move_arm_neutral_stepping_does_not_raise(self, _sim):
+        tu.move_arm_neutral(duration=1.0)
+        tu.run(0.06, render=False)
+
+
+@_gpu_required
+class TestWholeBodyIK:
+    """Tests for ``move_wholebody_ik``."""
+
+    def test_move_wholebody_ik_returns_duration(self, _sim):
+        dur = tu.move_wholebody_ik(0.5, 0.0, 0.3, 0, 90, 0, duration=2.0)
+        assert dur == 2.0
+
+    def test_move_wholebody_ik_cancels_velocity(self, _sim):
+        tu.move_base_vel(0.1, 0, 0)
+        tu.move_wholebody_ik(0.5, 0.0, 0.3, 0, 90, 0)
+        assert tu._state.base_vel_cmd is None
+
+    def test_move_wholebody_ik_stepping_does_not_raise(self, _sim):
+        tu.move_wholebody_ik(0.5, 0.0, 0.3, 0, 90, 0, duration=1.0)
+        tu.run(0.06, render=False)
+
+    def test_get_hand_pos_returns_three_floats(self, _sim):
+        pos = tu.get_hand_pos()
+        assert len(pos) == 3
+        for v in pos:
+            assert isinstance(v, float)
+
+
+@_gpu_required
+class TestForwardKinematics:
+    """Tests for the ``forward_kinematics`` function."""
+
+    def test_returns_dict_of_4x4_transforms(self, _sim):
+        result = tu.forward_kinematics([0.0, 0.0, 0.0, 0.0, 0.0])
+        assert isinstance(result, dict)
+        assert len(result) > 0
+        for name, T in result.items():
+            assert T.shape == (4, 4)
+            # Rotation part should be a valid rotation matrix (det ≈ 1).
+            R = T[:3, :3]
+            det = float(np.linalg.det(R))
+            assert abs(det - 1.0) < 1e-3, f"det(R)={det} for {name}"
+
+    def test_hand_palm_link_present(self, _sim):
+        result = tu.forward_kinematics([0.0, 0.0, 0.0, 0.0, 0.0])
+        assert "hand_palm_link" in result
+
+    def test_base_footprint_at_origin_when_base_zero(self, _sim):
+        result = tu.forward_kinematics([0.0, 0.0, 0.0, 0.0, 0.0], base_xyyaw=(0, 0, 0))
+        T = result["base_footprint"]
+        np.testing.assert_allclose(T[:3, 3], [0, 0, 0], atol=1e-3)
+
+    def test_base_offset_propagates(self, _sim):
+        """Shifting base_xyyaw should shift all link positions."""
+        result0 = tu.forward_kinematics([0.0, -0.5, 0.0, -0.3, 0.0], base_xyyaw=(0, 0, 0))
+        result1 = tu.forward_kinematics([0.0, -0.5, 0.0, -0.3, 0.0], base_xyyaw=(1.0, 0, 0))
+        # All links should shift by ~1m in x.
+        for name in result0:
+            dx = result1[name][0, 3] - result0[name][0, 3]
+            assert abs(dx - 1.0) < 1e-3, f"{name}: dx={dx}"
+
+    def test_torso_lift_raises_hand(self, _sim):
+        """Increasing torso_lift should raise the hand_palm_link z position."""
+        low = tu.forward_kinematics([0.0, 0.0, 0.0, 0.0, 0.0], torso_lift=0.0)
+        high = tu.forward_kinematics([0.0, 0.0, 0.0, 0.0, 0.0], torso_lift=0.1)
+        dz = high["hand_palm_link"][2, 3] - low["hand_palm_link"][2, 3]
+        assert dz > 0.01, f"torso lift did not raise hand: dz={dz}"
+
+
+@_gpu_required
+class TestGripperControl:
+    """Tests for hand position control and force-controlled grasping."""
+
+    def test_move_hand_open_does_not_raise(self, _sim):
+        tu.move_hand(1.0)
+        tu.run(0.04, render=False)
+
+    def test_move_hand_close_does_not_raise(self, _sim):
+        tu.move_hand(0.0)
+        tu.run(0.04, render=False)
+
+    def test_move_hand_deactivates_grasp(self, _sim):
+        tu.grasp_object(3.0)
+        assert tu._state.gripper_active is True
+        tu.move_hand(1.0)
+        assert tu._state.gripper_active is False
+
+    def test_grasp_object_activates_grasp(self, _sim):
+        tu.grasp_object(5.0)
+        assert tu._state.gripper_active is True
+
+    def test_grasp_object_with_run_does_not_raise(self, _sim):
+        tu.grasp_object(3.0)
+        tu.run(0.06, render=False)
+
+    def test_release_object_deactivates_grasp(self, _sim):
+        tu.grasp_object(3.0)
+        assert tu._state.gripper_active is True
+        tu.release_object()
+        assert tu._state.gripper_active is False
+
+    def test_release_object_runs_without_error(self, _sim):
+        tu.release_object()
+        tu.run(0.04, render=False)
+
+
+@_gpu_required
+class TestHeadControl:
+    """Tests for ``move_head_tilt``."""
+
+    def test_move_head_tilt_does_not_raise(self, _sim):
+        tu.move_head_tilt(0.3)
+        tu.run(0.04, render=False)
+
+    def test_move_head_tilt_negative(self, _sim):
+        tu.move_head_tilt(-0.5)
+        tu.run(0.04, render=False)
+
+
+@_gpu_required
+class TestGetObjectPos:
+    """Tests for ``get_object_pos`` using the HSR entity itself."""
+
+    def test_get_object_pos_returns_three_floats(self, _sim):
+        pos = tu.get_object_pos(tu._state.hsr)
+        assert len(pos) == 3
+        for v in pos:
+            assert isinstance(v, float)
+
+
+@_gpu_required
+class TestSpawnBox:
+    """Tests for ``spawn_box``.
+
+    Uses ``_sim_unbuilt`` because Genesis disallows ``add_entity`` after
+    ``scene.build()``.  The scene is built lazily on the first ``run()``.
+    """
+
+    def test_returns_entity(self, _sim_unbuilt):
+        entity = tu.spawn_box((0.5, 0.0, 0.1))
+        assert entity is not None
+
+    def test_entity_at_requested_position(self, _sim_unbuilt):
+        pos = (0.3, 0.2, 0.05)
+        entity = tu.spawn_box(pos)
+        tu.run(0.02, render=False)  # builds scene + one step to settle
+        x, y, z = tu.get_object_pos(entity)
+        assert x == pytest.approx(pos[0], abs=0.01)
+        assert y == pytest.approx(pos[1], abs=0.01)
+
+    def test_custom_size_does_not_raise(self, _sim_unbuilt):
+        entity = tu.spawn_box((0.4, 0.0, 0.1), size=(0.1, 0.2, 0.3))
+        assert entity is not None
+
+    def test_custom_color_does_not_raise(self, _sim_unbuilt):
+        entity = tu.spawn_box((0.4, 0.1, 0.1), color=(0.1, 0.2, 0.3, 1.0))
+        assert entity is not None
+
+
+@_gpu_required
+class TestSpawnSphere:
+    """Tests for ``spawn_sphere`` (uses ``_sim_unbuilt``, see TestSpawnBox)."""
+
+    def test_returns_entity(self, _sim_unbuilt):
+        entity = tu.spawn_sphere((0.5, 0.1, 0.1))
+        assert entity is not None
+
+    def test_entity_at_requested_position(self, _sim_unbuilt):
+        pos = (0.3, -0.2, 0.05)
+        entity = tu.spawn_sphere(pos)
+        tu.run(0.02, render=False)
+        x, y, z = tu.get_object_pos(entity)
+        assert x == pytest.approx(pos[0], abs=0.01)
+        assert y == pytest.approx(pos[1], abs=0.01)
+
+    def test_custom_radius_does_not_raise(self, _sim_unbuilt):
+        entity = tu.spawn_sphere((0.4, 0.0, 0.1), radius=0.08)
+        assert entity is not None
+
+
+@_gpu_required
+class TestSpawnCylinder:
+    """Tests for ``spawn_cylinder`` (uses ``_sim_unbuilt``, see TestSpawnBox)."""
+
+    def test_returns_entity(self, _sim_unbuilt):
+        entity = tu.spawn_cylinder((0.5, -0.1, 0.1))
+        assert entity is not None
+
+    def test_entity_at_requested_position(self, _sim_unbuilt):
+        pos = (0.3, 0.3, 0.05)
+        entity = tu.spawn_cylinder(pos)
+        tu.run(0.02, render=False)
+        x, y, z = tu.get_object_pos(entity)
+        assert x == pytest.approx(pos[0], abs=0.01)
+        assert y == pytest.approx(pos[1], abs=0.01)
+
+    def test_custom_dimensions_do_not_raise(self, _sim_unbuilt):
+        entity = tu.spawn_cylinder((0.4, -0.2, 0.1), radius=0.1, height=0.5)
+        assert entity is not None
+
+
+@_gpu_required
+class TestSaveVideo:
+    """Tests for ``save_video``."""
+
+    def test_save_video_writes_file(self, _sim, tmp_path):
+        tu.clear_frames()
+        tu.run(0.06, render=True)  # 3 frames
+        assert len(tu._state.frames) == 3
+        out = tmp_path / "test_output.mp4"
+        tu.save_video(str(out))
+        assert out.exists()
+        assert out.stat().st_size > 0
+
+    def test_save_video_no_frames_prints_message(self, _sim, capsys, tmp_path):
+        tu.clear_frames()
+        out = tmp_path / "empty.mp4"
+        tu.save_video(str(out))
+        captured = capsys.readouterr()
+        assert "No frames" in captured.out
+        # File should not be created when there are no frames.
+        assert not out.exists()
