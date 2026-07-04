@@ -241,6 +241,11 @@ def _yaw_from_quat_wxyz_batch(quat_wxyz: torch.Tensor) -> torch.Tensor:
     return torch.atan2(siny_cosp, cosy_cosp)
 
 
+def _wrap_to_pi_batch(angles: torch.Tensor) -> torch.Tensor:
+    """Wrap angles to [-pi, pi] (batched)."""
+    return (angles + math.pi) % (2.0 * math.pi) - math.pi
+
+
 def _quat_wxyz_from_yaw_batch(yaw: torch.Tensor, *, device, dtype) -> torch.Tensor:
     if yaw.ndim == 0:
         yaw = yaw.unsqueeze(0)
@@ -395,6 +400,22 @@ class HSRRigidEntity(RigidEntity):
         self._hsr_base_traj_time: torch.Tensor | None = None
         self._hsr_arm_traj_states: list[_ArmTrajectoryState] | None = None
         self._hsr_whole_body_time: torch.Tensor | None = None
+        # Flattened tensor state for vectorized whole-body control.
+        # When trajectories are simple single-waypoint (start→end), we bypass
+        # the per-env Python loop and use batched tensor ops instead.
+        self._hsr_vec_arm_active: torch.Tensor | None = None
+        self._hsr_vec_arm_start_pos: torch.Tensor | None = None
+        self._hsr_vec_arm_end_pos: torch.Tensor | None = None
+        self._hsr_vec_arm_duration: torch.Tensor | None = None
+        self._hsr_vec_arm_start_time: torch.Tensor | None = None
+        self._hsr_vec_arm_done: torch.Tensor | None = None
+        self._hsr_vec_base_active: torch.Tensor | None = None
+        self._hsr_vec_base_start_pos: torch.Tensor | None = None
+        self._hsr_vec_base_end_pos: torch.Tensor | None = None
+        self._hsr_vec_base_duration: torch.Tensor | None = None
+        self._hsr_vec_base_start_time: torch.Tensor | None = None
+        self._hsr_vec_base_done: torch.Tensor | None = None
+        self._hsr_vec_capacity: int = 0
         self._hsr_torso_dof_idx_local: int | None = None
         self._hsr_collision_disable_applied = False
         self._hsr_passive_wheel_friction_applied = False
@@ -943,6 +964,37 @@ class HSRRigidEntity(RigidEntity):
             self._hsr_whole_body_time = torch.zeros((n_envs,), device=gs.device, dtype=gs.tc_float)
             if old is not None and old.numel() > 0:
                 self._hsr_whole_body_time[: old.numel()] = old
+        self._ensure_vec_state(n_envs)
+
+    def _ensure_vec_state(self, n_envs: int) -> None:
+        """Allocate flattened tensor state for vectorized whole-body control."""
+        n_envs = int(n_envs)
+        if n_envs <= self._hsr_vec_capacity:
+            return
+        n_arm = len(self._hsr_arm_dofs_idx_local)
+        def _grow(old, shape):
+            t = torch.zeros(shape, device=gs.device, dtype=gs.tc_float)
+            if old is not None and old.numel() > 0:
+                t[: old.shape[0]] = old
+            return t
+        def _grow_bool(old, n):
+            t = torch.zeros(n, device=gs.device, dtype=torch.bool)
+            if old is not None and old.numel() > 0:
+                t[: old.numel()] = old
+            return t
+        self._hsr_vec_arm_active = _grow_bool(self._hsr_vec_arm_active, n_envs)
+        self._hsr_vec_arm_start_pos = _grow(self._hsr_vec_arm_start_pos, (n_envs, n_arm))
+        self._hsr_vec_arm_end_pos = _grow(self._hsr_vec_arm_end_pos, (n_envs, n_arm))
+        self._hsr_vec_arm_duration = _grow(self._hsr_vec_arm_duration, (n_envs,))
+        self._hsr_vec_arm_start_time = _grow(self._hsr_vec_arm_start_time, (n_envs,))
+        self._hsr_vec_arm_done = _grow_bool(self._hsr_vec_arm_done, n_envs)
+        self._hsr_vec_base_active = _grow_bool(self._hsr_vec_base_active, n_envs)
+        self._hsr_vec_base_start_pos = _grow(self._hsr_vec_base_start_pos, (n_envs, 3))
+        self._hsr_vec_base_end_pos = _grow(self._hsr_vec_base_end_pos, (n_envs, 3))
+        self._hsr_vec_base_duration = _grow(self._hsr_vec_base_duration, (n_envs,))
+        self._hsr_vec_base_start_time = _grow(self._hsr_vec_base_start_time, (n_envs,))
+        self._hsr_vec_base_done = _grow_bool(self._hsr_vec_base_done, n_envs)
+        self._hsr_vec_capacity = n_envs
 
     @staticmethod
     def _make_permutation_vector(names1: Sequence[str], names2: Sequence[str]) -> list[int]:
@@ -1084,6 +1136,45 @@ class HSRRigidEntity(RigidEntity):
                 t0 = float(self._hsr_base_traj_time[int(env)].item())
             ctrl.accept_trajectory(trajectories[i], base_positions[i], start_time=t0)
 
+        # Also populate flattened tensor state for vectorized fast path.
+        self._populate_vec_base_state(envs_idx_arr, trajectories, base_positions, start_times)
+
+    def _populate_vec_base_state(
+        self,
+        envs_idx_arr: torch.Tensor,
+        trajectories: Sequence[Trajectory],
+        base_positions: torch.Tensor,
+        start_times: Sequence[float | None],
+    ) -> None:
+        """Populate flattened base trajectory tensors for the vectorized fast path."""
+        n = int(envs_idx_arr.numel())
+        all_simple = True
+        end_pos = torch.zeros((n, 3), device=gs.device, dtype=gs.tc_float)
+        durations = torch.zeros((n,), device=gs.device, dtype=gs.tc_float)
+        for i in range(n):
+            traj = trajectories[i]
+            positions = to_torch(traj.positions).to(device=gs.device, dtype=gs.tc_float)
+            tfs = to_torch(traj.time_from_start).to(device=gs.device, dtype=gs.tc_float)
+            if positions.ndim != 2 or positions.shape[0] != 1:
+                all_simple = False
+                break
+            end_pos[i] = positions[0]
+            durations[i] = float(tfs[0].item()) if tfs.numel() > 0 else 0.0
+        if not all_simple:
+            self._hsr_vec_base_active[envs_idx_arr] = False
+            return
+        self._hsr_vec_base_start_pos[envs_idx_arr] = base_positions
+        self._hsr_vec_base_end_pos[envs_idx_arr] = end_pos
+        self._hsr_vec_base_duration[envs_idx_arr] = durations
+        times_now = self._hsr_base_traj_time[envs_idx_arr] if self._hsr_base_traj_time is not None else torch.zeros(n, device=gs.device, dtype=gs.tc_float)
+        for i in range(n):
+            if start_times[i] is not None:
+                self._hsr_vec_base_start_time[envs_idx_arr[i]] = float(start_times[i])
+            else:
+                self._hsr_vec_base_start_time[envs_idx_arr[i]] = float(times_now[i].item())
+        self._hsr_vec_base_done[envs_idx_arr] = False
+        self._hsr_vec_base_active[envs_idx_arr] = True
+
     def reset_base_trajectory_batched(self, *, envs_idx) -> None:
         if self._solver.n_envs > 0:
             envs_idx = self._scene._sanitize_envs_idx(envs_idx)
@@ -1094,6 +1185,9 @@ class HSRRigidEntity(RigidEntity):
         assert self._hsr_base_traj_ctrls is not None
         for env in envs_idx_arr.tolist():
             self._hsr_base_traj_ctrls[int(env)].reset_current_trajectory()
+        if self._hsr_vec_base_active is not None:
+            self._hsr_vec_base_active[envs_idx_arr] = False
+            self._hsr_vec_base_done[envs_idx_arr] = False
 
     def step_base_trajectory_batched(
         self,
@@ -1140,25 +1234,96 @@ class HSRRigidEntity(RigidEntity):
         active = torch.zeros((envs_idx_arr.numel(),), device=gs.device, dtype=torch.bool)
         desired_pos = torch.zeros((envs_idx_arr.numel(), 3), device=gs.device, dtype=gs.tc_float)
 
-        for i, env in enumerate(envs_idx_arr.tolist()):
-            ctrl = self._hsr_base_traj_ctrls[int(env)]
-            time_now = float(self._hsr_base_traj_time[int(env)].item())
-            if not ctrl.update_active_trajectory():
-                continue
-            ok, desired, _before_last, _time_from_point = ctrl.sample_desired_state(
-                time_now,
-                current_positions[i],
-                current_velocities[i],
+        # --- Vectorized fast path for single-waypoint base trajectories ---
+        vec_base_active = self._hsr_vec_base_active[envs_idx_arr]
+        if vec_base_active.numel() > 0:
+            use_vec_base = bool(vec_base_active.all().item())
+        else:
+            use_vec_base = False
+        # If none active, skip base trajectory entirely (no loop needed).
+        if not use_vec_base and not vec_base_active.any().item():
+            # No base trajectories active — just step the base controller.
+            if self._hsr_base_control_mode != BaseControlMode.QPOS:
+                base_controller = self.get_base_controller()
+                base_controller.step_batch(dt, envs_idx=envs_idx_arr.tolist())
+            return {"active": active, "command": out}
+        if use_vec_base and self._hsr_base_control_mode != BaseControlMode.QPOS:
+            # Sample desired state (linear interpolation with yaw wrap).
+            times_now_b = self._hsr_base_traj_time[envs_idx_arr]
+            start_times_b = self._hsr_vec_base_start_time[envs_idx_arr]
+            durations_b = self._hsr_vec_base_duration[envs_idx_arr]
+            t_b = times_now_b - start_times_b
+            alpha_b = torch.where(
+                durations_b > 0, t_b / durations_b, torch.ones_like(t_b),
+            ).clamp(0.0, 1.0)
+            alpha_exp_b = alpha_b.unsqueeze(1)
+            start_pos_b = self._hsr_vec_base_start_pos[envs_idx_arr]
+            end_pos_b = self._hsr_vec_base_end_pos[envs_idx_arr]
+            desired_positions = (1.0 - alpha_exp_b) * start_pos_b + alpha_exp_b * end_pos_b
+            # Desired velocity: finite difference during trajectory, zero after.
+            dt_traj = torch.where(durations_b > 0, durations_b, torch.ones_like(durations_b))
+            desired_velocities = (end_pos_b - start_pos_b) / dt_traj.unsqueeze(1)
+            # Zero out velocity after trajectory ends (matches original behavior).
+            done_mask_b = self._hsr_vec_base_done[envs_idx_arr]
+            desired_velocities = torch.where(
+                (t_b >= durations_b).unsqueeze(1),
+                torch.zeros_like(desired_velocities),
+                desired_velocities,
             )
-            if not ok or desired is None:
-                continue
-            if self._hsr_base_control_mode == BaseControlMode.QPOS:
-                desired_pos[i] = desired.positions
-                out[i] = desired.positions
-            else:
-                out[i] = ctrl.get_output_velocity(current_positions[i], desired, dt=dt, current_velocities=current_velocities[i])
-            active[i] = True
-            ctrl.terminate_control_if_stopped(time_now, current_velocities[i])
+
+            # World-frame position error with yaw wrapping.
+            error_pos = desired_positions - current_positions
+            error_pos[:, 2] = _wrap_to_pi_batch(error_pos[:, 2])
+
+            # Feedback gain: [1.0, 1.0, 1.5] (matches OmniBaseTrajectoryControl).
+            feedback_gain = torch.tensor([1.0, 1.0, 1.5], device=gs.device, dtype=gs.tc_float)
+            output_velocity_world = desired_velocities + feedback_gain * error_pos
+
+            # Derivative damping.
+            yaw_dg = 0.3
+            xy_dg = 0.1
+            output_velocity_world[:, 2] = output_velocity_world[:, 2] - yaw_dg * current_velocities[:, 2]
+            output_velocity_world[:, 0] = output_velocity_world[:, 0] - xy_dg * current_velocities[:, 0]
+            output_velocity_world[:, 1] = output_velocity_world[:, 1] - xy_dg * current_velocities[:, 1]
+
+            # RK2 midpoint yaw.
+            yaw_mid = current_positions[:, 2] + 0.5 * current_velocities[:, 2] * dt
+            c = torch.cos(yaw_mid)
+            s = torch.sin(yaw_mid)
+            # R(-yaw) = [[c, s, 0], [-s, c, 0], [0, 0, 1]]
+            body_vx = c * output_velocity_world[:, 0] + s * output_velocity_world[:, 1]
+            body_vy = -s * output_velocity_world[:, 0] + c * output_velocity_world[:, 1]
+            out[:, 0] = body_vx
+            out[:, 1] = body_vy
+            out[:, 2] = output_velocity_world[:, 2]
+            active = torch.ones(envs_idx_arr.numel(), device=gs.device, dtype=torch.bool)
+
+            # Mark done.
+            done_mask_b = self._hsr_vec_base_done[envs_idx_arr]
+            newly_done_b = (t_b >= durations_b) & (~done_mask_b)
+            if newly_done_b.any():
+                self._hsr_vec_base_done[envs_idx_arr[newly_done_b]] = True
+        else:
+            # --- Original per-env loop (multi-waypoint / QPOS fallback) ---
+            for i, env in enumerate(envs_idx_arr.tolist()):
+                ctrl = self._hsr_base_traj_ctrls[int(env)]
+                time_now = float(self._hsr_base_traj_time[int(env)].item())
+                if not ctrl.update_active_trajectory():
+                    continue
+                ok, desired, _before_last, _time_from_point = ctrl.sample_desired_state(
+                    time_now,
+                    current_positions[i],
+                    current_velocities[i],
+                )
+                if not ok or desired is None:
+                    continue
+                if self._hsr_base_control_mode == BaseControlMode.QPOS:
+                    desired_pos[i] = desired.positions
+                    out[i] = desired.positions
+                else:
+                    out[i] = ctrl.get_output_velocity(current_positions[i], desired, dt=dt, current_velocities=current_velocities[i])
+                active[i] = True
+                ctrl.terminate_control_if_stopped(time_now, current_velocities[i])
 
         if self._hsr_base_control_mode == BaseControlMode.QPOS:
             active_envs = envs_idx_arr[active]
@@ -1223,6 +1388,11 @@ class HSRRigidEntity(RigidEntity):
 
         if base_trajectory is not None:
             self.set_base_trajectory_batched(base_trajectory, envs_idx=envs_idx_arr.tolist(), start_time=start_time)
+        else:
+            # No base trajectory for this call — deactivate vec base fast path
+            # so step_base_trajectory_batched skips these envs.
+            self._ensure_vec_state(int(envs_idx_arr.max().item() + 1))
+            self._hsr_vec_base_active[envs_idx_arr] = False
 
         if isinstance(arm_trajectory, JointTrajectory):
             arm_trajs = [arm_trajectory] * int(envs_idx_arr.numel())
@@ -1285,6 +1455,63 @@ class HSRRigidEntity(RigidEntity):
             state.point_before_vel = None
             state.done = False
 
+        # Also populate flattened tensor state for vectorized fast path.
+        self._populate_vec_arm_state(envs_idx_arr, arm_trajs, start_times)
+
+    def _populate_vec_arm_state(
+        self,
+        envs_idx_arr: torch.Tensor,
+        arm_trajs: Sequence[JointTrajectory],
+        start_times: Sequence[float | None],
+    ) -> None:
+        """Populate flattened arm trajectory tensors for the vectorized fast path.
+
+        Only single-waypoint trajectories (one target position with one
+        time_from_start) are supported.  Multi-waypoint trajectories fall
+        back to the per-env Python loop.
+        """
+        n = int(envs_idx_arr.numel())
+        n_arm = len(self._hsr_arm_dofs_idx_local)
+        all_simple = True
+        end_pos = torch.zeros((n, n_arm), device=gs.device, dtype=gs.tc_float)
+        durations = torch.zeros((n,), device=gs.device, dtype=gs.tc_float)
+        for i in range(n):
+            traj = arm_trajs[i]
+            positions = to_torch(traj.positions).to(device=gs.device, dtype=gs.tc_float)
+            tfs = to_torch(traj.time_from_start).to(device=gs.device, dtype=gs.tc_float)
+            if positions.ndim != 2 or positions.shape[0] != 1:
+                all_simple = False
+                break
+            perm = None
+            if traj.joint_names is not None:
+                perm = self._make_permutation_vector(JOINT_ORDER, traj.joint_names)
+            pos = positions[0]
+            if perm:
+                pos = pos[perm]
+            end_pos[i] = pos
+            durations[i] = float(tfs[0].item()) if tfs.numel() > 0 else 0.0
+        if not all_simple:
+            self._hsr_vec_arm_active[envs_idx_arr] = False
+            return
+        # Record current arm pos as start, set end/duration.
+        cur_arm = self.get_dofs_position(
+            dofs_idx_local=self._hsr_arm_dofs_idx_local, envs_idx=envs_idx_arr,
+        )
+        if cur_arm.ndim == 1:
+            cur_arm = cur_arm.unsqueeze(0)
+        self._hsr_vec_arm_start_pos[envs_idx_arr] = cur_arm
+        self._hsr_vec_arm_end_pos[envs_idx_arr] = end_pos
+        self._hsr_vec_arm_duration[envs_idx_arr] = durations
+        # Resolve start times: use provided or current whole-body time.
+        times_now = self._hsr_whole_body_time[envs_idx_arr] if self._hsr_whole_body_time is not None else torch.zeros(n, device=gs.device, dtype=gs.tc_float)
+        for i in range(n):
+            if start_times[i] is not None:
+                self._hsr_vec_arm_start_time[envs_idx_arr[i]] = float(start_times[i])
+            else:
+                self._hsr_vec_arm_start_time[envs_idx_arr[i]] = float(times_now[i].item())
+        self._hsr_vec_arm_done[envs_idx_arr] = False
+        self._hsr_vec_arm_active[envs_idx_arr] = True
+
     def reset_whole_body_trajectory_batched(self, *, envs_idx) -> None:
         if self._solver.n_envs > 0:
             envs_idx = self._scene._sanitize_envs_idx(envs_idx)
@@ -1302,6 +1529,9 @@ class HSRRigidEntity(RigidEntity):
             state.point_before_pos = None
             state.point_before_vel = None
             state.done = False
+        if self._hsr_vec_arm_active is not None:
+            self._hsr_vec_arm_active[envs_idx_arr] = False
+            self._hsr_vec_arm_done[envs_idx_arr] = False
         self.reset_base_trajectory_batched(envs_idx=envs_idx_arr.tolist())
 
     def step_whole_body_trajectory_batched(
@@ -1341,42 +1571,67 @@ class HSRRigidEntity(RigidEntity):
         desired_arm = torch.zeros_like(arm_pos)
         active = torch.zeros((envs_idx_arr.numel(),), device=gs.device, dtype=torch.bool)
 
-        for i, env in enumerate(envs_idx_arr.tolist()):
-            state = self._hsr_arm_traj_states[int(env)]
-            if state.traj is None:
-                continue
-
-            # When trajectory is done, keep commanding the final position
-            # so the arm holds steady while the base may still be moving.
-            if state.done:
-                desired_arm[i] = state.traj.positions[-1]
-                active[i] = True
-                continue
-
-            time_now = float(self._hsr_whole_body_time[int(env)].item())
-            if state.start_time is None:
-                state.start_time = time_now
-            t = time_now - state.start_time
-
-            if not state.sampled_already:
-                state.point_before_pos = arm_pos[i].clone()
-                state.point_before_vel = arm_vel[i].clone()
-                state.sampled_already = True
-
-            pos, _vel, _acc, _before_last, _time_from_point = self._sample_linear_trajectory(
-                t,
-                state.traj.time_from_start,
-                state.traj.positions,
-                state.traj.velocities,
-                state.traj.accelerations,
-                state.point_before_pos,
-                state.point_before_vel,
+        # --- Vectorized fast path for single-waypoint trajectories ---
+        vec_arm_active = self._hsr_vec_arm_active[envs_idx_arr]
+        use_vec = bool(vec_arm_active.all().item()) if vec_arm_active.numel() > 0 else False
+        if use_vec:
+            times_now = self._hsr_whole_body_time[envs_idx_arr]
+            start_times = self._hsr_vec_arm_start_time[envs_idx_arr]
+            durations = self._hsr_vec_arm_duration[envs_idx_arr]
+            done_mask = self._hsr_vec_arm_done[envs_idx_arr]
+            t = times_now - start_times
+            # Clamp alpha to [0, 1]; done trajectories hold end position.
+            alpha = torch.where(
+                durations > 0, t / durations, torch.ones_like(t),
             )
-            desired_arm[i] = pos
-            active[i] = True
+            alpha = alpha.clamp(0.0, 1.0)
+            alpha_exp = alpha.unsqueeze(1)  # (N, 1)
+            start_pos = self._hsr_vec_arm_start_pos[envs_idx_arr]
+            end_pos = self._hsr_vec_arm_end_pos[envs_idx_arr]
+            desired_arm = (1.0 - alpha_exp) * start_pos + alpha_exp * end_pos
+            active = torch.ones(envs_idx_arr.numel(), device=gs.device, dtype=torch.bool)
+            # Mark done
+            newly_done = (t >= durations) & (~done_mask)
+            if newly_done.any():
+                self._hsr_vec_arm_done[envs_idx_arr[newly_done]] = True
+        else:
+            # --- Original per-env loop (multi-waypoint fallback) ---
+            for i, env in enumerate(envs_idx_arr.tolist()):
+                state = self._hsr_arm_traj_states[int(env)]
+                if state.traj is None:
+                    continue
 
-            if t >= float(state.traj.time_from_start[-1].item()):
-                state.done = True
+                # When trajectory is done, keep commanding the final position
+                # so the arm holds steady while the base may still be moving.
+                if state.done:
+                    desired_arm[i] = state.traj.positions[-1]
+                    active[i] = True
+                    continue
+
+                time_now = float(self._hsr_whole_body_time[int(env)].item())
+                if state.start_time is None:
+                    state.start_time = time_now
+                t_env = time_now - state.start_time
+
+                if not state.sampled_already:
+                    state.point_before_pos = arm_pos[i].clone()
+                    state.point_before_vel = arm_vel[i].clone()
+                    state.sampled_already = True
+
+                pos, _vel, _acc, _before_last, _time_from_point = self._sample_linear_trajectory(
+                    t_env,
+                    state.traj.time_from_start,
+                    state.traj.positions,
+                    state.traj.velocities,
+                    state.traj.accelerations,
+                    state.point_before_pos,
+                    state.point_before_vel,
+                )
+                desired_arm[i] = pos
+                active[i] = True
+
+                if t_env >= float(state.traj.time_from_start[-1].item()):
+                    state.done = True
 
         if torch.any(active):
             active_envs = envs_idx_arr[active].tolist()

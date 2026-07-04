@@ -4087,12 +4087,12 @@ class AnalyticIK2:
         function_param = self._hsrb_param if robot == "hsrb" else self._hsrc_param
         self._batch_param_field[None] = function_param
 
-        theta0 = origin_to_base[:, 0, 3]
-        theta1 = origin_to_base[:, 1, 3]
+        theta0 = origin_to_base[:, 0, 3].contiguous()
+        theta1 = origin_to_base[:, 1, 3].contiguous()
 
         _solve_base_yaw_ik_batch_kernel(
             function_param,
-            ref_origin_to_end,
+            ref_origin_to_end.contiguous(),
             theta0,
             theta1,
             self._batch_base_yaw_solution_count,
@@ -4101,9 +4101,9 @@ class AnalyticIK2:
 
         _batch_select_base_yaw_kernel(
             int(n_envs),
-            origin_to_base,
-            init_angles,
-            weight,
+            origin_to_base.contiguous(),
+            init_angles.contiguous(),
+            weight.contiguous(),
             self._batch_base_yaw_solution_count,
             self._batch_base_yaw_solutions,
             function_param,
