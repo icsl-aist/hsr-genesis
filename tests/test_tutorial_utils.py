@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -65,27 +66,14 @@ _gpu_required = pytest.mark.skipif(
 
 @pytest.fixture
 def _clear_state():
-    """Clear tutorial_utils singleton state before and after a test."""
-    tu._state.scene = None
-    tu._state.hsr = None
-    tu._state.cam = None
-    tu._state.frames = []
-    tu._state.base_vel_cmd = None
-    tu._state.gripper_active = False
-    tu._state.gripper = None
-    tu._state.motor_idx = None
-    tu._state.arm_dofs_idx = []
-    tu._state.end_effector = None
-    tu._state.head_idx = None
-    tu._state.built = False
+    """Clear tutorial_utils singleton state before and after a test.
+
+    Uses the shared ``_clear_sim_state()`` reset path (same as ``init_sim``
+    and ``reset_sim``) so state-reset logic stays in one place.
+    """
+    tu._clear_sim_state()
     yield
-    tu._state.scene = None
-    tu._state.hsr = None
-    tu._state.cam = None
-    tu._state.frames = []
-    tu._state.base_vel_cmd = None
-    tu._state.gripper_active = False
-    tu._state.built = False
+    tu._clear_sim_state()
 
 
 @_gpu_required
@@ -105,13 +93,7 @@ def _sim():
     tu._maybe_build()
     yield
     # Tear down: clear state so pure-function tests see a clean slate.
-    tu._state.scene = None
-    tu._state.hsr = None
-    tu._state.cam = None
-    tu._state.frames = []
-    tu._state.base_vel_cmd = None
-    tu._state.gripper_active = False
-    tu._state.built = False
+    tu._clear_sim_state()
 
 
 @_gpu_required
@@ -126,13 +108,7 @@ def _sim_unbuilt():
         gs.init(backend=gs.gpu, precision="32", logging_level="warning")
     tu.init_sim(dt=0.02, cam_res=(160, 120))
     yield
-    tu._state.scene = None
-    tu._state.hsr = None
-    tu._state.cam = None
-    tu._state.frames = []
-    tu._state.base_vel_cmd = None
-    tu._state.gripper_active = False
-    tu._state.built = False
+    tu._clear_sim_state()
 
 
 # ===========================================================================
@@ -497,6 +473,69 @@ class TestFindUrdf:
         assert isinstance(path, Path)
 
 
+class TestNotebookSpawnOrder:
+    """Regression: verify tutorial notebooks don't have ``run()`` followed by
+    ``spawn_*`` in the same scene segment without an intervening ``init_sim()``.
+
+    Each fresh-scene segment must start with ``init_sim()`` so that
+    ``spawn_*`` operates on an unbuilt scene.
+    """
+
+    NB_DIR = Path(__file__).resolve().parent.parent / "examples" / "tutorials"
+
+    def _check_notebook(self, nb_name: str) -> None:
+        import json
+
+        with open(self.NB_DIR / nb_name) as f:
+            nb = json.load(f)
+        sources = [
+            "".join(c["source"]) for c in nb["cells"] if c["cell_type"] == "code"
+        ]
+
+        last_init_idx = -1
+        for i, src in enumerate(sources):
+            if "init_sim(" in src:
+                last_init_idx = i
+
+            has_spawn = any(
+                f"spawn_{s}(" in src for s in ("box", "sphere", "cylinder")
+            )
+            if not has_spawn:
+                continue
+            # Same cell has init_sim() — fine.
+            if "init_sim(" in src:
+                continue
+
+            assert last_init_idx >= 0, (
+                f"{nb_name} cell {i}: spawn_* before any init_sim() call. "
+                f"Call init_sim() first to create a fresh unbuilt scene."
+            )
+            # Match ``run(...)`` as a statement-level call (not a substring
+            # like ``duration_run(``) to avoid false positives.
+            _run_call = re.compile(r"^\s*run\([^)]*\)\s*$", re.MULTILINE)
+            has_run_after_init = any(
+                _run_call.search(sources[j])
+                for j in range(last_init_idx + 1, i)
+            )
+            assert not has_run_after_init, (
+                f"{nb_name} cell {i}: spawn_* without init_sim() after "
+                f"preceding run(). Add init_sim() between them to rebuild "
+                f"the scene. Last init_sim at cell {last_init_idx}."
+            )
+
+    def test_1_basics_colab_spawn_order(self) -> None:
+        """1_basics_colab.ipynb must have init_sim() before each spawn."""
+        self._check_notebook("1_basics_colab.ipynb")
+
+    def test_4_gripper_colab_spawn_order(self) -> None:
+        """4_gripper_colab.ipynb must have init_sim() before each spawn."""
+        self._check_notebook("4_gripper_colab.ipynb")
+
+    def test_6_commands_colab_spawn_order(self) -> None:
+        """6_commands_colab.ipynb must have init_sim() before each spawn."""
+        self._check_notebook("6_commands_colab.ipynb")
+
+
 class TestGettersBeforeInit:
     """Tests that getters return None before ``init_sim``."""
 
@@ -529,11 +568,28 @@ class TestInitSim:
         assert tu._state.gripper is not None
         assert len(tu._state.arm_dofs_idx) == 5
 
-    def test_init_sim_is_idempotent(self, _sim):
-        """Calling init_sim again should be a no-op (not raise)."""
-        scene_before = tu._state.scene
+    def test_init_sim_rebuilds_when_called_twice(self, _sim):
+        """Calling init_sim a second time should rebuild a fresh scene."""
+        first_scene = tu._state.scene
+        first_hsr = tu._state.hsr
+
+        tu.init_sim(dt=0.02, cam_res=(160, 120))
+        second_scene = tu._state.scene
+        second_hsr = tu._state.hsr
+
+        assert first_scene is not None
+        assert second_scene is not None
+        assert first_scene is not second_scene
+        assert first_hsr is not second_hsr
+
+    def test_init_sim_second_call_does_not_raise(self, _sim):
+        """Calling init_sim a second time (without args) does not raise.
+
+        Note: the second call does rebuild the scene (new objects), so the
+        operation is *not* idempotent in the strict sense — this test only
+        checks that no exception is thrown.
+        """
         tu.init_sim()
-        assert tu._state.scene is scene_before
 
     def test_get_robot_returns_entity(self, _sim):
         robot = tu.get_robot()
@@ -768,6 +824,60 @@ class TestHeadControl:
     def test_move_head_tilt_negative(self, _sim):
         tu.move_head_tilt(-0.5)
         tu.run(0.04, render=False)
+
+
+class TestSpawnAfterBuild:
+    """Regression: spawn helpers must raise clear error after scene is built."""
+
+    @staticmethod
+    def _assert_spawn_error(msg: str | None = None) -> None:
+        """All three spawn functions should raise RuntimeError when built=True."""
+        tu._state.built = True
+        # Need a minimal scene mock so spawn_* can be reached (the built guard
+        # runs before scene.add_entity, so a mock is sufficient).
+        class _MockScene:
+            def add_entity(self, *a, **kw):
+                raise AssertionError("should not be called")
+
+        tu._state.scene = _MockScene()
+        for spawn_fn, kwargs in [
+            (tu.spawn_box, {"pos": (0, 0, 0)}),
+            (tu.spawn_sphere, {"pos": (0, 0, 0)}),
+            (tu.spawn_cylinder, {"pos": (0, 0, 0)}),
+        ]:
+            with pytest.raises(RuntimeError) as excinfo:
+                spawn_fn(**kwargs)
+            if msg:
+                assert msg in str(excinfo.value)
+        tu._state.built = False
+        tu._state.scene = None
+
+    def test_all_spawn_raise_runtime_error_when_built_pure(self, _clear_state):
+        """Pure test: set built=True, all spawn functions raise RuntimeError."""
+        self._assert_spawn_error(msg="Cannot spawn")
+
+    @_gpu_required
+    def test_spawn_box_after_run_raises_runtime_error(self, _sim):
+        """Integration test: build scene via run(), then spawn_box raises."""
+        tu.run(0.02, render=False)  # builds scene
+        with pytest.raises(RuntimeError, match="Cannot spawn"):
+            tu.spawn_box((0.5, 0.0, 0.1))
+
+
+class TestSpawnBeforeInit:
+    """Regression: spawn helpers must raise clear error before init_sim()."""
+
+    def test_all_spawn_raise_runtime_error_before_init(self, _clear_state):
+        """Pure test: scene=None, all spawn functions raise RuntimeError."""
+        assert tu._state.scene is None
+        for spawn_fn, kwargs in [
+            (tu.spawn_box, {"pos": (0, 0, 0)}),
+            (tu.spawn_sphere, {"pos": (0, 0, 0)}),
+            (tu.spawn_cylinder, {"pos": (0, 0, 0)}),
+        ]:
+            with pytest.raises(RuntimeError) as excinfo:
+                spawn_fn(**kwargs)
+            assert "init_sim" in str(excinfo.value)
 
 
 @_gpu_required

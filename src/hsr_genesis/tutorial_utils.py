@@ -71,6 +71,27 @@ ARM_INIT = [0.0, 0.0, 0.0, 0.0, 0.0]
 # ---------------------------------------------------------------------------
 
 
+def _clear_sim_state() -> None:
+    """Reset all simulation state to defaults.
+
+    Shared internal path used by both ``init_sim`` (when rebuilding) and
+    ``reset_sim`` (explicit tear-down).
+    """
+    _state.scene = None
+    _state.hsr = None
+    _state.cam = None
+    _state.dt = 0.02
+    _state.frames.clear()
+    _state.base_vel_cmd = None
+    _state.gripper = None
+    _state.gripper_active = False
+    _state.motor_idx = None
+    _state.arm_dofs_idx.clear()
+    _state.end_effector = None
+    _state.head_idx = None
+    _state.built = False
+
+
 def _find_urdf() -> Path:
     """Locate hsrb4s.urdf relative to the package, repo, or Colab clone."""
     import hsr_genesis
@@ -200,12 +221,10 @@ def init_sim(
     spawn functions can add entities before the first :func:`run` / :func:`step`
     call.  The scene is built lazily on the first step (see :func:`_maybe_build`).
 
-    This is idempotent — calling it again after the first call is a no-op
-    (use :func:`reset_sim` to tear down and rebuild).
+    Calling it a second time rebuilds a fresh scene (same as :func:`reset_sim`).
     """
     if _state.scene is not None:
-        print("Simulation already initialized. Use reset_sim() to rebuild.")
-        return
+        _clear_sim_state()
 
     # Genesis init (idempotent guard).
     if not getattr(gs, "_initialized", False):
@@ -311,13 +330,7 @@ def _maybe_build() -> None:
 
 def reset_sim(**kwargs) -> None:
     """Tear down the current simulation and reinitialize."""
-    _state.scene = None
-    _state.hsr = None
-    _state.cam = None
-    _state.frames = []
-    _state.base_vel_cmd = None
-    _state.gripper_active = False
-    _state.built = False
+    _clear_sim_state()
     init_sim(**kwargs)
 
 
@@ -715,6 +728,21 @@ def move_head_tilt(v: float) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _check_not_built() -> None:
+    """Raise clear RuntimeError if spawn_* is called before init_sim() or after build."""
+    if _state.scene is None:
+        raise RuntimeError(
+            "Cannot spawn entities before init_sim() is called. "
+            "Call init_sim() first to create a simulation scene."
+        )
+    if _state.built:
+        raise RuntimeError(
+            "Cannot spawn entities after the scene is built. "
+            "Call spawn_box / spawn_sphere / spawn_cylinder *before* "
+            "the first run() or step() call."
+        )
+
+
 def spawn_box(
     pos: tuple[float, float, float],
     size: tuple[float, float, float] = (0.04, 0.04, 0.04),
@@ -722,6 +750,7 @@ def spawn_box(
     name: str | None = None,
 ):
     """Spawn a box at the given world position. Returns the entity."""
+    _check_not_built()
     entity = _state.scene.add_entity(
         gs.morphs.Box(size=size, pos=pos),
         surface=gs.surfaces.Default(color=color),
@@ -739,6 +768,7 @@ def spawn_sphere(
     name: str | None = None,
 ):
     """Spawn a sphere at the given world position. Returns the entity."""
+    _check_not_built()
     entity = _state.scene.add_entity(
         gs.morphs.Sphere(pos=pos, radius=radius),
         surface=gs.surfaces.Default(color=color),
@@ -757,6 +787,7 @@ def spawn_cylinder(
     name: str | None = None,
 ):
     """Spawn a cylinder at the given world position. Returns the entity."""
+    _check_not_built()
     entity = _state.scene.add_entity(
         gs.morphs.Cylinder(pos=pos, radius=radius, height=height),
         surface=gs.surfaces.Default(color=color),
