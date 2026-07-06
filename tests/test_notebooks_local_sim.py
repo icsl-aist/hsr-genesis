@@ -23,6 +23,7 @@ import re
 from pathlib import Path
 from typing import Any, Callable
 
+import nbformat
 import pytest
 
 TUTORIALS_DIR = Path(__file__).resolve().parents[1] / "examples" / "tutorials"
@@ -226,6 +227,29 @@ def _clear_tutorial_state() -> None:
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+
+def test_all_notebooks_valid_schema() -> None:
+    """Every ``.ipynb`` in the tutorials directory must be valid nbformat v4.
+
+    Regression guard against notebooks with missing required fields such
+    as ``outputs`` on code cells, which break ``nbformat``, ``nbconvert``,
+    and GitHub's notebook renderer.
+    """
+    failures: list[str] = []
+    for nb_path in sorted(TUTORIALS_DIR.glob("*.ipynb")):
+        try:
+            nb = nbformat.read(nb_path, as_version=4)
+            nbformat.validate(nb)
+        except json.JSONDecodeError as e:
+            failures.append(f"{nb_path.name}: invalid JSON: {e}")
+        except nbformat.validator.NotebookValidationError as e:
+            failures.append(f"{nb_path.name}: invalid schema: {e}")
+    if failures:
+        pytest.fail(
+            f"{len(failures)} notebook(s) failed validation:\n"
+            + "\n".join(failures)
+        )
 
 
 @_gpu_required
