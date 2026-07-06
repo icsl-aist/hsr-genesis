@@ -1,4 +1,4 @@
-"""Evaluate trained PPO residual policy on YCB objects.
+"""Evaluate trained PPO policy on YCB objects.
 
 Loads a trained PPO model and evaluates it with the curriculum at the
 final stage (policy_weight from saved curriculum state).
@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -29,6 +30,16 @@ from curriculum import CurriculumManager
 from grasp_params import OBJECT_NAMES
 
 
+def _ensure_genesis_initialized() -> None:
+    if getattr(gs, "_initialized", False):
+        return
+    try:
+        gs.init(backend=gs.gpu)
+    except RuntimeError as exc:
+        print(f"[Genesis] GPU unavailable ({exc}); falling back to CPU.")
+        gs.init(backend=gs.cpu)
+
+
 def evaluate_object(
     model: PPO,
     object_name: str,
@@ -37,31 +48,38 @@ def evaluate_object(
     settle_steps: int,
     seed: int,
     curriculum: CurriculumManager,
+    use_ik_guidance: bool,
 ) -> list[float]:
     """Evaluate the model on a single object. Returns list of per-trial success rates."""
+    _ensure_genesis_initialized()
     env = HSRPickRLEnv(
         n_envs=n_envs,
         object_name=object_name,
         seed=seed,
         settle_steps=settle_steps,
         curriculum=curriculum,
+        use_ik_guidance=use_ik_guidance,
     )
     vec_env = BatchedGenesisVecEnv(env)
 
     rates = []
-    for trial in range(trials):
-        obs = vec_env.reset()
-        done = False
-        steps = 0
-        while not done and steps < 800:
-            action, _ = model.predict(obs, deterministic=True)
-            obs, reward, dones, infos = vec_env.step(action)
-            done = bool(np.all(dones))
-            steps += 1
-        # Success rate across all envs in this trial
-        trial_success = sum(1 for info in infos if info.get("success", False)) / len(infos)
-        rates.append(trial_success)
-        print(f"  {object_name} trial {trial}: {trial_success:.2%} ({steps} steps)")
+    try:
+        for trial in range(trials):
+            obs = vec_env.reset()
+            done = False
+            steps = 0
+            infos = []
+            while not done and steps < 800:
+                action, _ = model.predict(obs, deterministic=True)
+                obs, reward, dones, infos = vec_env.step(action)
+                done = bool(np.all(dones))
+                steps += 1
+            # Success rate across all envs in this trial
+            trial_success = sum(1 for info in infos if info.get("success", False)) / len(infos)
+            rates.append(trial_success)
+            print(f"  {object_name} trial {trial}: {trial_success:.2%} ({steps} steps)")
+    finally:
+        vec_env.close()
     return rates
 
 
@@ -76,13 +94,11 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=12345)
     parser.add_argument("--object", type=str, default=None,
                         help="Specific object or 'all' (default: all)")
+    parser.add_argument("--no-ik-guidance", action="store_true",
+                        help="Evaluate direct PPO baseline without IK reference trajectories")
     args = parser.parse_args()
 
-    try:
-        gs.init(backend=gs.gpu)
-    except RuntimeError as exc:
-        print(f"[Genesis] GPU unavailable ({exc}); falling back to CPU.")
-        gs.init(backend=gs.cpu)
+    _ensure_genesis_initialized()
 
     # Load curriculum
     if args.curriculum and Path(args.curriculum).exists():
@@ -97,6 +113,14 @@ def main() -> None:
     model = PPO.load(args.model, device="auto")
     print(f"Loaded model: {args.model}")
 
+    use_ik_guidance = not args.no_ik_guidance
+    config_path = Path(args.model).with_name("run_config.json")
+    if config_path.exists():
+        with open(config_path) as f:
+            config = json.load(f)
+        use_ik_guidance = bool(config.get("use_ik_guidance", use_ik_guidance))
+        print(f"Loaded run config: use_ik_guidance={use_ik_guidance}")
+
     # Determine objects to eval
     if args.object and args.object != "all":
         objects = [args.object]
@@ -109,7 +133,7 @@ def main() -> None:
     for obj_name in objects:
         rates = evaluate_object(
             model, obj_name, args.envs, args.trials,
-            args.settle_steps, args.seed, curriculum,
+            args.settle_steps, args.seed, curriculum, use_ik_guidance,
         )
         mean_rate = float(np.mean(rates))
         all_rates.append(mean_rate)

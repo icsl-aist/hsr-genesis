@@ -1,7 +1,7 @@
-"""PPO training with IK-guided curriculum for HSR grasp.
+"""PPO training for HSR grasp with optional IK guidance.
 
-Trains a residual policy on top of IK pick trajectories using SB3 PPO.
-A 3-stage curriculum gradually shifts control from pure IK to policy-dominant.
+Trains either a residual policy on top of IK pick trajectories or a direct
+policy baseline without IK guidance using SB3 PPO.
 
 Usage:
     PYTHONPATH=src .venv/bin/python examples/rl/train_ppo_ik_curriculum.py \\
@@ -56,6 +56,7 @@ class CurriculumCallback(BaseCallback):
             obs = env.reset()
             done = False
             steps = 0
+            infos = []
             while not done and steps < 800:
                 action, _ = self.model.predict(obs, deterministic=True)
                 obs, reward, dones, infos = env.step(action)
@@ -89,6 +90,7 @@ def train(
     batch_size: int = 64,
     n_epochs: int = 10,
     gamma: float = 0.99,
+    use_ik_guidance: bool = True,
 ) -> None:
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -107,6 +109,7 @@ def train(
         seed=seed,
         settle_steps=settle_steps,
         curriculum=curriculum,
+        use_ik_guidance=use_ik_guidance,
     )
     vec_env = BatchedGenesisVecEnv(env)
 
@@ -128,20 +131,33 @@ def train(
         device="auto",
     )
 
-    callback = CurriculumCallback(curriculum, eval_episodes=3, verbose=1)
+    callback = CurriculumCallback(curriculum, eval_episodes=3, verbose=1) if use_ik_guidance else None
 
     print(f"[train] Starting PPO training: {total_steps} steps, {n_envs} envs, object={object_name}")
-    print(f"[train] Curriculum: 3 stages, policy_weight = [0.0, 0.3, 0.7]")
+    if use_ik_guidance:
+        print(f"[train] Mode: IK-guided curriculum")
+        print(f"[train] Curriculum: 3 stages, policy_weight = [0.0, 0.3, 0.7]")
+    else:
+        print(f"[train] Mode: direct PPO baseline (no IK guidance)")
     t0 = time.time()
     model.learn(total_timesteps=total_steps, callback=callback)
     dt = time.time() - t0
     print(f"[train] Training complete in {dt:.1f}s")
 
-    model_path = output_path / "ppo_ik_curriculum"
+    run_name = "ppo_ik_curriculum" if use_ik_guidance else "ppo_no_ik_guidance"
+    model_path = output_path / run_name
     model.save(str(model_path))
     curriculum.save(str(output_path / "curriculum_state.json"))
+    with open(output_path / "run_config.json", "w") as f:
+        json.dump({
+            "use_ik_guidance": use_ik_guidance,
+            "object_name": object_name,
+            "n_envs": n_envs,
+            "total_steps": total_steps,
+        }, f, indent=2)
     print(f"[train] Model saved to {model_path}.zip")
     print(f"[train] Curriculum saved to {output_path / 'curriculum_state.json'}")
+    print(f"[train] Run config saved to {output_path / 'run_config.json'}")
     print(f"[train] Final stage: {curriculum.stage}, policy_weight: {curriculum.policy_weight:.1f}")
 
 
@@ -158,7 +174,13 @@ def main() -> None:
     parser.add_argument("--n-steps", type=int, default=2048)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--n-epochs", type=int, default=10)
+    parser.add_argument("--no-ik-guidance", action="store_true",
+                        help="Train direct PPO baseline without IK reference trajectories")
     args = parser.parse_args()
+
+    output_dir = args.output_dir
+    if output_dir == "results/ppo_ik_curriculum" and args.no_ik_guidance:
+        output_dir = "results/ppo_no_ik_guidance"
 
     train(
         n_envs=args.envs,
@@ -166,11 +188,12 @@ def main() -> None:
         object_name=args.object,
         settle_steps=args.settle_steps,
         seed=args.seed,
-        output_dir=args.output_dir,
+        output_dir=output_dir,
         learning_rate=args.lr,
         n_steps=args.n_steps,
         batch_size=args.batch_size,
         n_epochs=args.n_epochs,
+        use_ik_guidance=not args.no_ik_guidance,
     )
 
 

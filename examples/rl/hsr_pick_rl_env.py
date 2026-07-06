@@ -1,8 +1,10 @@
-"""Batched Gymnasium env for PPO residual policy training on IK pick.
+"""Batched Gymnasium env for PPO training on HSR pick.
 
 Wraps N Genesis parallel envs as a single Gymnasium env with batched
-obs/action. The policy outputs 9D residual corrections (delta arm 5D +
-delta base 3D + gripper effort 1D) added to IK-computed targets.
+obs/action. In IK-guided mode, the policy outputs 9D residual corrections
+(delta arm 5D + delta base 3D + gripper effort 1D) added to IK-computed
+targets. In direct-policy mode, the same action space drives arm/base step
+targets without an IK reference trajectory.
 """
 from __future__ import annotations
 
@@ -23,7 +25,7 @@ from gymnasium import spaces
 
 from stable_baselines3.common.vec_env.base_vec_env import VecEnv, VecEnvObs, VecEnvStepReturn
 
-from ycb_pick_ik_parallel import HSRPickEnv, HAND_QUAT, LIFT_THRESHOLD
+from ycb_pick_ik_parallel import HSRPickEnv, GRIPPER_EFFORT, HAND_QUAT, LIFT_THRESHOLD
 from ik_planner import IKPlanner, IKPlan, MAX_STEPS, APPROACH_START, DESCEND_START, GRASP_START, LIFT_START
 from curriculum import CurriculumManager
 
@@ -69,11 +71,13 @@ class HSRPickRLEnv(gym.Env):
         seed: int = 0,
         settle_steps: int = 30,
         curriculum: CurriculumManager | None = None,
+        use_ik_guidance: bool = True,
     ) -> None:
         super().__init__()
         self.n_envs = n_envs
         self.settle_steps = settle_steps
         self.curriculum = curriculum or CurriculumManager()
+        self.use_ik_guidance = use_ik_guidance
 
         # Build the underlying HSRPickEnv (no viewer for training)
         self._pick_env = HSRPickEnv(
@@ -87,7 +91,7 @@ class HSRPickRLEnv(gym.Env):
         self.envs_all = self._pick_env.envs_all
 
         # IK planner (uses CMA-ES optimized params if available)
-        self._planner = IKPlanner(object_name=object_name)
+        self._planner = IKPlanner(object_name=object_name) if use_ik_guidance else None
 
         # Gymnasium spaces (batched: shape = (n_envs, dim))
         self.observation_space = spaces.Box(
@@ -111,6 +115,9 @@ class HSRPickRLEnv(gym.Env):
         siny_cosp = 2.0 * (w * z + x * y)
         cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
         return torch.atan2(siny_cosp, cosy_cosp)
+
+    def _policy_weight(self) -> float:
+        return self.curriculum.policy_weight if self.use_ik_guidance else 1.0
 
     def get_obs(self) -> np.ndarray:
         """Build 32D observation for all envs. Returns (n_envs, 32) numpy."""
@@ -165,7 +172,7 @@ class HSRPickRLEnv(gym.Env):
         motor_pos = motor_pos.squeeze(-1) if motor_pos.shape[-1] == 1 else motor_pos[:, 0]
 
         # Curriculum blend
-        pw = torch.full((self.n_envs,), self.curriculum.policy_weight,
+        pw = torch.full((self.n_envs,), self._policy_weight(),
                         device=gs.device, dtype=gs.tc_float)
 
         # Step progress
@@ -194,15 +201,21 @@ class HSRPickRLEnv(gym.Env):
         return obs.detach().cpu().numpy()
 
     def reset(self, *, seed=None, options=None):
-        """Reset all envs: new object placement, compute IK plan."""
+        """Reset all envs: new object placement and optional IK plan."""
         super().reset(seed=seed)
         env = self._pick_env
 
         # Reset underlying env (random object placement + settle)
         env.reset(settle_steps=self.settle_steps)
 
-        # Compute IK plan for this episode
-        self._plan = self._planner.plan(env)
+        # Compute IK plan for this episode when guidance is enabled.
+        if self.use_ik_guidance:
+            assert self._planner is not None
+            self._plan = self._planner.plan(env)
+            ik_success = self._plan.ik_success.cpu().numpy()
+        else:
+            self._plan = None
+            ik_success = np.zeros(self.n_envs, dtype=bool)
 
         # Reset episode state
         self._step = 0
@@ -218,11 +231,14 @@ class HSRPickRLEnv(gym.Env):
         )
 
         obs = self.get_obs()
-        info = {"ik_success": self._plan.ik_success.cpu().numpy()}
+        info = {"ik_success": ik_success}
         return obs, info
 
     def _set_phase_trajectory(self, phase: int):
         """Set the whole-body trajectory for the current phase, using IK targets."""
+        if not self.use_ik_guidance or self._plan is None:
+            return
+
         env = self._pick_env
         arm_target, base_target = IKPlanner.get_phase_targets(self._plan, phase)
 
@@ -263,6 +279,60 @@ class HSRPickRLEnv(gym.Env):
             start_time=None,
         )
 
+    def _direct_targets_from_action(self, action: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Convert direct-policy action into next arm/base targets."""
+        env = self._pick_env
+
+        arm_pos = env.hsr.get_dofs_position(
+            dofs_idx_local=env.arm_dofs_idx, envs_idx=self.envs_all,
+        )
+        if arm_pos.ndim == 1:
+            arm_pos = arm_pos.unsqueeze(0)
+
+        base_pos = env.hsr.get_pos(envs_idx=self.envs_all)
+        base_quat = env.hsr.get_quat(envs_idx=self.envs_all)
+        if base_pos.ndim == 1:
+            base_pos = base_pos.unsqueeze(0)
+            base_quat = base_quat.unsqueeze(0)
+        base_yaw = self._yaw_from_quat(base_quat)
+        base_xy_yaw = torch.stack([base_pos[:, 0], base_pos[:, 1], base_yaw], dim=-1)
+
+        arm_target = (arm_pos + action[:, :5] * ARM_RESIDUAL_SCALE).clamp(-math.pi, math.pi)
+        base_target = base_xy_yaw + action[:, 5:8] * BASE_RESIDUAL_SCALE
+        return arm_target, base_target
+
+    def _set_direct_action_trajectory(self, action: torch.Tensor):
+        """Drive arm and base directly from policy action without IK guidance."""
+        env = self._pick_env
+        arm_target, base_target = self._direct_targets_from_action(action)
+
+        from hsr_genesis.hsr_rigid_entity import JointTrajectory
+        from hsr_genesis.base_controller import Trajectory
+        from hsr_genesis.analytic_ik import JOINT_ORDER
+
+        t = torch.tensor([self.dt], device=gs.device, dtype=gs.tc_float)
+        arm_trajs = [
+            JointTrajectory(
+                positions=arm_target[i].unsqueeze(0),
+                time_from_start=t,
+                joint_names=list(JOINT_ORDER),
+            )
+            for i in range(self.n_envs)
+        ]
+        base_trajs = [
+            Trajectory(
+                positions=base_target[i].unsqueeze(0),
+                time_from_start=t,
+            )
+            for i in range(self.n_envs)
+        ]
+        env.hsr.set_whole_body_trajectory_batched(
+            arm_trajectory=arm_trajs,
+            base_trajectory=base_trajs,
+            envs_idx=self.envs_all,
+            start_time=None,
+        )
+
     def _apply_residual(self, action: torch.Tensor):
         """Apply policy residual by overriding arm position target after trajectory step.
 
@@ -270,9 +340,10 @@ class HSRPickRLEnv(gym.Env):
         the arm target with IK_target + residual * policy_weight.
         """
         env = self._pick_env
-        pw = self.curriculum.policy_weight
+        pw = self._policy_weight()
         if pw == 0.0:
             return  # No residual at stage 0
+        assert self._plan is not None
 
         phase = IKPlanner.get_phase(self._step)
         arm_target, _base_target = IKPlanner.get_phase_targets(self._plan, phase)
@@ -305,8 +376,8 @@ class HSRPickRLEnv(gym.Env):
                 )
             # Set gripper force goal at start of grasp phase
             if new_phase == 2:
-                pw = self.curriculum.policy_weight
-                cmaes_effort = self._plan.gripper_effort
+                pw = self._policy_weight()
+                cmaes_effort = self._plan.gripper_effort if self._plan is not None else GRIPPER_EFFORT
                 if pw == 0.0:
                     effort = torch.full((self.n_envs,), cmaes_effort, device=gs.device, dtype=gs.tc_float)
                 else:
@@ -323,7 +394,8 @@ class HSRPickRLEnv(gym.Env):
         """Check if object lifted above threshold."""
         env = self._pick_env
         obj_z = env._obj_pos()[:, 2]
-        success = obj_z > (self._plan.obj_init_z + LIFT_THRESHOLD)
+        obj_init_z = self._plan.obj_init_z if self._plan is not None else env.obj_init_z
+        success = obj_z > (obj_init_z + LIFT_THRESHOLD)
         self._success = self._success | success
 
     def step(self, action: np.ndarray):
@@ -352,11 +424,15 @@ class HSRPickRLEnv(gym.Env):
         if phase in (2, 3):
             env.gripper.step_apply_force(self.dt, envs_idx=self.envs_all)
 
+        if not self.use_ik_guidance:
+            # In non-IK mode, policy directly sets the next arm/base target each step.
+            self._set_direct_action_trajectory(action_t)
+
         # Step trajectory controller (smooth IK motion for arm + base)
         env.hsr.step_whole_body_trajectory_batched(self.dt, envs_idx=self.envs_all)
 
         # Apply residual correction AFTER trajectory controller (override arm target)
-        if old_phase == new_phase:  # Don't override on transition steps
+        if self.use_ik_guidance and old_phase == new_phase:  # Don't override on transition steps
             self._apply_residual(action_t)
 
         env.scene.step()
@@ -388,6 +464,15 @@ class HSRPickRLEnv(gym.Env):
     def get_success_rate(self) -> float:
         """Return current episode success rate (for curriculum eval)."""
         return float(self._success.float().mean())
+
+    def close(self) -> None:
+        pick_env = getattr(self, "_pick_env", None)
+        scene = getattr(pick_env, "scene", None)
+        if scene is not None:
+            del scene
+        self._pick_env = None
+        if getattr(gs, "_initialized", False):
+            gs.destroy()
 
 
 class BatchedGenesisVecEnv(VecEnv):
@@ -428,6 +513,7 @@ class BatchedGenesisVecEnv(VecEnv):
         self._actions = actions.copy()
 
     def step_wait(self) -> VecEnvStepReturn:
+        assert self._actions is not None
         obs, rewards, terminated, truncated, info = self.env.step(self._actions)
         # Combine terminated and truncated into dones for SB3
         dones = np.logical_or(terminated, truncated).astype(bool)
@@ -448,7 +534,7 @@ class BatchedGenesisVecEnv(VecEnv):
         return obs, rewards, dones, infos
 
     def close(self) -> None:
-        pass
+        self.env.close()
 
     def get_attr(self, attr_name: str, indices=None):
         if indices is None:
