@@ -1,16 +1,28 @@
-"""Colab bootstrap (package-relative wrapper).
+"""Standalone Colab bootstrap (zero heavy deps, no ``hsr_genesis`` import).
 
 On a fresh Colab runtime, ``genesis-world`` / ``torch`` / ``numpy`` are not
-installed yet and neither is the ``hsr-genesis`` package itself.  This module
-has **no top-level imports** beyond Python stdlib, but is *package-relative*,
-so it cannot be imported before ``hsr_genesis`` is on ``sys.path``.
+installed yet and neither is the ``hsr-genesis`` package itself.  This file
+lives at the **repo root** (not under ``src/hsr_genesis/``) so it can be
+fetched and executed by a notebook's **very first cell** — before the
+package has been installed.
 
-For pre-install usage (notebook first cell), use the **standalone** copy at
-the repository root instead (see ``colab_setup.py``).  Notebooks should fetch
-that file via ``urllib`` and ``exec()`` it — see the docstring there.
+Usage in a notebook first-cell (fetch from raw GitHub)::
 
-Once ``hsr_genesis`` is installed, ``from hsr_genesis.colab_bootstrap import
-setup_colab`` works normally.
+    import urllib.request
+    url = "https://raw.githubusercontent.com/icsl-aist/hsr-genesis/main/colab_setup.py"
+    exec(urllib.request.urlopen(url).read())
+    setup_colab()
+
+After that cell completes, ``import hsr_genesis`` and the rest will work.
+
+If the repo is already cloned (e.g. local Jupyter), you can also import it
+by path::
+
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("colab_setup", "colab_setup.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    mod.setup_colab()
 """
 
 from __future__ import annotations
@@ -43,18 +55,10 @@ def setup_colab(
     genesis_version: str = "0.4.6",
     force_reinstall: bool = False,
 ) -> None:
-    """One-call Colab setup: install deps, clone repo (with submodules), configure EGL.
+    """One-call Colab setup: install deps, clone repo, configure EGL.
 
-    This consolidates the three repetitive setup cells (pip install, git clone,
-    EGL ICD config) into a single idempotent call with friendly logging.
-
-    Safe to re-run: skips work already done unless ``force_reinstall`` is True.
-
-    Args:
-        repo_url: Git URL to clone.
-        repo_dir: Where to clone the repo on Colab.
-        genesis_version: Pinned genesis-world version (must match pyproject.toml).
-        force_reinstall: If True, re-run pip install even if already installed.
+    Idempotent — safe to re-run.  See ``src/hsr_genesis/colab_bootstrap.py``
+    for the package-relative equivalent (identical logic).
     """
     import importlib
 
@@ -74,7 +78,6 @@ def setup_colab(
             _log(f"  {pkg} not found, will install", "WARN")
             need_install = True
 
-    # Always pin setuptools (torch on Colab requires <82).
     try:
         import setuptools
 
@@ -93,7 +96,7 @@ def setup_colab(
             "-m",
             "pip",
             "install",
-            f"setuptools<82",
+            "setuptools<82",
             "jedi",
             f"genesis-world=={genesis_version}",
             "mediapy",
@@ -116,7 +119,6 @@ def setup_colab(
 
     if repo_path.exists() and (repo_path / ".git").exists():
         _log("  Repo already cloned.", "OK")
-        # Ensure submodules are initialized.
         meshes_dir = repo_path / "data" / "urdf" / "hsrb_meshes"
         if not meshes_dir.exists() or not any(meshes_dir.iterdir() if meshes_dir.exists() else []):
             _log("  Submodules missing, fetching them...", "WARN")
@@ -157,7 +159,6 @@ def setup_colab(
     else:
         _log("  hsr-genesis installed.", "OK")
 
-    # Always add src to sys.path as fallback (per AGENTS.md).
     src_dir = str(repo_path / "src")
     if src_dir not in sys.path:
         sys.path.insert(0, src_dir)
@@ -174,7 +175,6 @@ def setup_colab(
         _log("  Try: Runtime \u2192 Restart runtime, then re-run this cell.", "ERROR")
         raise
 
-    # Verify URDF and meshes exist.
     urdf = repo_path / "data" / "urdf" / "hsrb4s.urdf"
     meshes = repo_path / "data" / "urdf" / "hsrb_meshes"
     if not urdf.exists():
@@ -189,7 +189,7 @@ def setup_colab(
         _log("  Run: !git -C /content/hsr-genesis submodule update --init --recursive", "ERROR")
         raise FileNotFoundError(f"Meshes not found: {meshes}")
 
-    # --- Step 5: EGL ICD config (for headless GPU rendering) ---
+    # --- Step 5: EGL ICD config ---
     _log("Configuring NVIDIA EGL ICD...")
     icd_path = "/usr/share/glvnd/egl_vendor.d/10_nvidia.json"
     icd_content = (
@@ -207,7 +207,7 @@ def setup_colab(
         _log(f"  Cannot write {icd_path} (permission denied).", "WARN")
         _log("  GPU rendering may fail. See troubleshoot notebook.", "WARN")
 
-    # --- Step 6: check GPU availability ---
+    # --- Step 6: check GPU ---
     _log("Checking GPU availability...")
     try:
         result = subprocess.run(
