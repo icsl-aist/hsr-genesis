@@ -338,6 +338,135 @@ class TestLog:
         assert "something went wrong" in captured.out
 
 
+class TestColabBootstrap:
+    """Tests for ``colab_bootstrap`` standalone module.
+
+    On a fresh Colab runtime, genesis / torch / numpy are not installed.
+    The bootstrap module must be importable without them so that
+    ``setup_colab()`` can install deps first.
+    """
+
+    def test_no_heavy_deps_imported_at_module_level(self):
+        """``colab_bootstrap`` must NOT import genesis, torch, numpy, or
+        ``hsr_genesis`` at *module level* — those aren't available on a fresh
+        Colab runtime before ``setup_colab()`` runs.
+
+        Imports inside function bodies (e.g. ``setup_colab()`` → ``import
+        hsr_genesis`` after deps are installed) are fine — they execute only
+        when the function is called, not at import time.
+
+        This is a static AST check so it works regardless of test environment.
+        """
+        import ast
+        import inspect
+        from hsr_genesis import colab_bootstrap
+
+        source = inspect.getsource(colab_bootstrap)
+        tree = ast.parse(source)
+
+        # Only check module-level body statements, not nested function/lambda bodies.
+        imports: set[str] = set()
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    imports.add(alias.name.split(".")[0])
+            elif isinstance(node, ast.ImportFrom):
+                if node.module:
+                    imports.add(node.module.split(".")[0])
+
+        forbidden = {"genesis", "torch", "numpy", "hsr_genesis"}
+        heavy = imports & forbidden
+        assert not heavy, (
+            f"colab_bootstrap imports forbidden deps at module level: {heavy}"
+        )
+
+    def test_setup_colab_importable_from_bootstrap(self):
+        """``setup_colab`` must be importable from ``colab_bootstrap``."""
+        from hsr_genesis.colab_bootstrap import setup_colab
+
+        assert callable(setup_colab)
+
+    def test_setup_colab_accepts_keyword_args(self):
+        """``setup_colab`` must accept its documented keyword arguments."""
+        from hsr_genesis.colab_bootstrap import setup_colab
+        import inspect
+
+        sig = inspect.signature(setup_colab)
+        for param in ("repo_url", "repo_dir", "genesis_version", "force_reinstall"):
+            assert param in sig.parameters, f"missing parameter: {param}"
+
+
+class TestNotebookBootstrapPattern:
+    """Verify every tutorial notebook's first import cell uses the standalone
+    ``colab_bootstrap`` module instead of ``tutorial_utils``.
+
+    Importing from ``tutorial_utils`` triggers ``import genesis`` at module
+    level, which fails on a fresh Colab runtime.
+    """
+
+    EXEMPT: set[str] = {
+        "7_troubleshoot_colab.ipynb",  # manual sys.path approach
+        "IK_grasp_hsr_colab.ipynb",  # inline clone, no setup_colab
+    }
+
+    def _colab_notebooks(self) -> list[Path]:
+        nb_dir = Path(__file__).resolve().parent.parent / "examples" / "tutorials"
+        return sorted(nb_dir.glob("*_colab.ipynb"))
+
+    def test_first_import_cell_uses_colab_bootstrap(self):
+        """The first code cell that imports ``setup_colab`` must reference
+        ``colab_bootstrap``, not ``tutorial_utils``."""
+        import json
+
+        for nb_path in self._colab_notebooks():
+            if nb_path.name in self.EXEMPT:
+                continue
+            with open(nb_path) as f:
+                nb = json.load(f)
+
+            found_import_setup = False
+            for cell in nb["cells"]:
+                if cell["cell_type"] != "code":
+                    continue
+                src = "".join(cell["source"])
+                if "import" not in src or "setup_colab" not in src:
+                    continue
+                found_import_setup = True
+
+                # Must use colab_bootstrap, not tutorial_utils
+                assert (
+                    "colab_bootstrap" in src
+                ), (
+                    f"{nb_path.name}: imports setup_colab from tutorial_utils, "
+                    f"not colab_bootstrap.\n  Got: {src.strip()[:160]}"
+                )
+                break  # only check the first such cell
+
+            if not found_import_setup:
+                # Not all notebooks use setup_colab — skip silently
+                pass
+
+    def test_all_colab_notebooks_covered(self):
+        """Every non-exempt notebook should contain a ``setup_colab`` call."""
+        import json
+        from pathlib import Path
+
+        nb_dir = Path(__file__).resolve().parent.parent / "examples" / "tutorials"
+        exempt_clone = {"IK_grasp_hsr_colab.ipynb", "7_troubleshoot_colab.ipynb"}
+        for nb_path in sorted(nb_dir.glob("*_colab.ipynb")):
+            if nb_path.name in exempt_clone:
+                continue
+            with open(nb_path) as f:
+                nb = json.load(f)
+            full_text = "".join(
+                "".join(c["source"]) for c in nb["cells"] if c["cell_type"] == "code"
+            )
+            assert "setup_colab" in full_text, (
+                f"{nb_path.name} does not call setup_colab — "
+                f"should it be added to EXEMPT?"
+            )
+
+
 class TestShowVideoNoFrames:
     """Tests for ``show_video`` / ``show_frame`` when no frames are captured."""
 
