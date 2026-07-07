@@ -39,7 +39,6 @@ def _collect_cells() -> list:
     cells.append(_md(_OBJECTIVES))
     cells.append(_md(_SETUP_HEADING))
     cells.append(_code(_SETUP_CODE))
-    cells.append(_code(_GPU_INIT))
 
     # ------------------------------------------------------------------
     # Section 1 — Recap single-env idiom (Task 4)
@@ -137,16 +136,22 @@ if "google.colab" in sys.modules:
 import numpy as np
 import torch
 import genesis as gs
+
+# Genesis must be initialized BEFORE importing hsr_genesis (some classes
+# introspect Genesis internals at import time).
+gs.init(backend=gs.gpu)
+device = gs.device
+print(f"Genesis device: {device}")
+print(f"PyTorch CUDA available: {torch.cuda.is_available()}")
+
 from hsr_genesis.hsr_rigid_entity import HSRBURDF
 from hsr_genesis import tutorial_utils  # for the recap cell — what tutorials 1–7 taught you
 """
 
-_GPU_INIT = """# Initialize Genesis on GPU if available; fall back to CPU.
-gs.init(backend=gs.gpu)
-device = gs.device
-print(f"Genesis device: {device}")
-
-# Quick sanity: ensure torch sees the same device.
+_GPU_INIT = """# Already initialized gs in the setup cell above; this cell is a placeholder
+# for tutorial readers who may have skipped straight here.
+# If you see this printed, the setup cell ran successfully.
+print(f"Genesis device: {gs.device}")
 print(f"PyTorch CUDA available: {torch.cuda.is_available()}")
 """
 _RECAP_HEADING = """## 2. Recap — the single-env API you already know
@@ -165,7 +170,8 @@ Every call above has an implicit `envs_idx=0`. The cell below reproduces a tiny 
 """
 
 _RECAP_SINGLE_ENV = """# --- Recap: 1 HSR, 1 target, 1 scene.step() per Python iteration ---
-tutorial_utils.init_sim(n_envs=1)   # single env (default)
+tutorial_utils.init_sim()   # single env (default); scene is NOT yet built
+tutorial_utils.step(render=False)   # one no-op step triggers scene.build()
 
 # Re-create the HSR handle the way tutorial_utils does internally (so we can
 # call set_qpos / inverse_kinematics directly in later sections).
@@ -245,7 +251,8 @@ scene = gs.Scene(
 _ = scene.add_entity(gs.morphs.Plane())
 hsr = scene.add_entity(
     # Use tutorial_utils to find the URDF path (works on Colab and locally)
-    HSRBURDF(file=str(tutorial_utils._find_urdf()), robot="hsrb", base_mode="planar")
+    HSRBURDF(file=str(tutorial_utils._find_urdf()), robot="hsrb", base_mode="planar",
+             links_to_keep=["hand_palm_link"], end_effector_frame="hand_palm_link")
 )
 scene.build(n_envs=N, env_spacing=(3.0, 3.0))
 print(f"Built scene with n_envs={N}; hsr entity = {type(hsr).__name__}")
@@ -371,9 +378,8 @@ N = 8   # number of envs
 
 # --- (a) Single-env baseline: loop N scenes --------------------------------
 # Re-init a fresh single-env scene (matches recap cell idiom).
-tutorial_utils.init_sim(n_envs=1)
-hsr_s = tutorial_utils._state.hsr
-# Warm-up one step so timing excludes first-call compilation overhead.
+tutorial_utils.init_sim()
+# Warm-up one step triggers scene.build() and excludes first-call compilation overhead.
 for _ in range(5):
     tutorial_utils.step(render=False)
 
@@ -392,7 +398,10 @@ scene_b = gs.Scene(
     show_viewer=False,
 )
 _ = scene_b.add_entity(gs.morphs.Plane())
-hsr_b = scene_b.add_entity(HSRBURDF(file=str(tutorial_utils._find_urdf()), robot="hsrb", base_mode="planar"))
+hsr_b = scene_b.add_entity(HSRBURDF(file=str(tutorial_utils._find_urdf()), robot="hsrb",
+                                   base_mode="planar",
+                                   links_to_keep=["hand_palm_link"],
+                                   end_effector_frame="hand_palm_link"))
 scene_b.build(n_envs=N, env_spacing=(3.0, 3.0))
 envs_all_b = torch.arange(N, device=device, dtype=gs.tc_int)
 
