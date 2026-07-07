@@ -188,9 +188,48 @@ for _ in range(60):
     tutorial_utils.step(render=False)
 print(f"Single-env arm reached target: qpos shape = {qpos_single.shape}")
 """
-_WHY_BATCHED = "# TODO: Task 5"
-_DIAGRAM = "# TODO: Task 5"
-_CORRESPONDENCE_TABLE = "# TODO: Task 5"
+_WHY_BATCHED = """## 3. Why not just loop N times?
+
+A natural thought: "If 8 single-env `scene.step()` calls work, can I just call them in a Python loop?" Three reasons the GPU batched API wins:
+
+**1. Per-call kernel-launch overhead.** Every `scene.step()` enqueues a batch of CUDA kernels and waits for them to finish before returning control to Python. The CPU↔GPU synchronization dominates wall time for small scenes. With N=8 and ~5 ms of physics per step, 70%+ of the step time is overhead. One batched `scene.step()` pays the kernel-launch + sync cost once.
+
+**2. Per-env tensors live on the GPU.** The single-env style pulls qpos/user state back to Python every step (a `.cpu()` round trip). In RL training you read `qpos` thousands of times per second. Batched tensors stay on `gs.device`; the only host transfers happen at the boundary of a feature (e.g. logging).
+
+**3. One physics kernel beats N.** Genesis' batched rigid-body solver sees all N envs as a single contiguous block and works them in one parallel kernel rather than N serial ones. This is the actual hardware utilization win — the GPU sees more parallelism to fill its SMs.
+"""
+
+_DIAGRAM = """```
+Single-env, N=8 (Python loop):              Batched, N=8 (one call):
+
+  for i in range(8):                         scene.build(n_envs=8)
+      scene.step()                           envs_idx = torch.arange(8)
+                                              hsr.set_qpos(q, envs_idx=envs_idx)
+  ┌──┐ ┌──┐ ┌──┐ ┌──┐ ┌──┐ ┌──┐ ┌──┐ ┌──┐     scene.step()
+  │k1│ │k1│ │k1│ │k1│ │k1│ │k1│ │k1│ │k1│   ┌──────────────────────────────┐
+  └──┘ └──┘ └──┘ └──┘ └──┘ └──┘ └──┘ └──┘   │     one kernel, 8 envs     │
+   ↑    ↑    ↑    ↑    ↑    ↑    ↑    ↑     └──────────────────────────────┘
+   8 sync points with Python                  1 sync point with Python
+```
+"""
+
+_CORRESPONDENCE_TABLE = """## 4. The one-to-one correspondence
+
+Every single-env call you learned in tutorials 1–7 maps to one batched call. The mental switch is a single parameter: instead of `envs_idx=0` (or implied), pass `envs_idx=envs_all` where `envs_all = torch.arange(N, device=gs.device)`.
+
+| Single-env (tutorials 1–7) | Batched (Section 5 onward) |
+| --- | --- |
+| `init_sim()` builds `scene.build(n_envs=1)` | `scene.build(n_envs=N, env_spacing=(3.0,3.0))` |
+| `tutorial_utils.step(n)` loops `scene.step()` n times | `for _ in range(n): scene.step()` (same call, advances **all** envs) |
+| `move_arm_neutral()` / `move_arm_joints(j)` | `hsr.set_whole_body_trajectory_batched(...)` + `hsr.step_whole_body_trajectory_batched(dt, envs_idx=envs_all)` |
+| `move_base_vel(v)` / `move_base_goal(p)` | `hsr.set_base_trajectory_batched(traj, envs_idx=envs_all)` + `hsr.step_base_trajectory_batched(dt, envs_idx=envs_all)` |
+| `grasp_object(o)` / `move_hand(p)` | `hsr.step_gripper_batched(dt, envs_idx=envs_all)` |
+| `hsr.get_qpos()` → `(dof,)` tensor | `hsr.get_qpos(envs_idx=envs_all)` → `(N, dof)` tensor |
+| `hsr.set_qpos(q)` | `hsr.set_qpos(q, envs_idx=envs_all)` where `q` is `(N, dof)` |
+| `hsr.inverse_kinematics(link, pos=p, quat=q)` | same call, but `pos` is `(N,3)`, `quat` is `(N,4)`, `envs_idx=envs_all` |
+
+> **Rule of thumb:** Every batched tensor lives on `gs.device`. Never call `.item()` / `.cpu()` inside the hot loop — move to host once, at the boundary of a feature.
+"""
 _BUILD_SCENE_HEADING = "# TODO: Task 6"
 _BUILD_SCENE_CODE = "# TODO: Task 6"
 _ENTITY_GRAPH_NOTE = "# TODO: Task 6"
