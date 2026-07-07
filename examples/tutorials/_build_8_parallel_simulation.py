@@ -308,10 +308,57 @@ hand_pos = hsr.get_link("hand_palm_link").get_pos(envs_idx=envs_all)  # (N, 3)
 err = (hand_pos - offsets).norm(dim=-1)
 print(f"per-env hand position error (m): mean={err.mean().item():.4f}  max={err.max().item():.4f}")
 """
-_BATCHED_CONTROLLERS_HEADING = "# TODO: Task 8"
-_BATCHED_CONTROLLERS_NOTE = "# TODO: Task 8"
-_WHOLE_BODY_TRAJECTORY_DEMO = "# TODO: Task 8"
-_GRIPPER_BATCHED_DEMO = "# TODO: Task 8"
+_BATCHED_CONTROLLERS_HEADING = """## 7. The `_batched` controller layer
+
+Tutorials 3–4 taught you `move_arm_*`, `move_base_*`, and `grasp_object`. In RL scripts we usually don't drive qpos directly — we use the controller layer that mirrors what `move_arm_*` did for you, but in batched form. The correspondence is:
+
+| Tutorial 3–4 call | Batched equivalent |
+| --- | --- |
+| `move_arm_neutral()`, `move_arm_joints(j)` | `hsr.set_whole_body_trajectory_batched(...)` + `hsr.step_whole_body_trajectory_batched(dt, envs_idx=envs_all)` |
+| `move_base_vel(v)`, `move_base_goal(p)` | `hsr.set_base_trajectory_batched(traj, envs_idx=envs_all)` + `hsr.step_base_trajectory_batched(dt, envs_idx=envs_all)` |
+| `grasp_object(o)`, `move_hand(p)` | `hsr.step_gripper_batched(dt, envs_idx=envs_all)` |
+
+`JointTrajectory` and `Trajectory` are the same types tutorials 3–4 used internally; you can pass either one trajectory (broadcast to all envs) or a list of N trajectories (per-env).
+"""
+
+_BATCHED_CONTROLLERS_NOTE = """**Why show this here?** Notebooks 9 (CMA-ES) and 10 (PPO) keep the controller running across thousands of steps. Knowing this layer exists — and that it's the same call you made in tutorials 3–4 with `envs_idx` added — matters more than memorizing any single signature. The next cell runs one batched whole-body trajectory step."""
+
+_WHOLE_BODY_TRAJECTORY_DEMO = """# Build a tiny batched whole-body trajectory and step it.
+# JointTrajectory / Trajectory are tutorial 3 types — same ones used internally by move_arm_*.
+from hsr_genesis.hsr_rigid_entity import JointTrajectory
+
+# Build a one-waypoint arm trajectory: every env returns to its "init" pose.
+arm_dof = len(hsr._hsr_arm_dofs_idx_local)
+traj = JointTrajectory(
+    time_from_start=torch.tensor([0.0, 1.0], device=device),
+    positions=torch.zeros(2, arm_dof, device=device),  # (2 time steps, arm_dof)
+)
+
+hsr.reset_whole_body_trajectory_batched(envs_idx=envs_all)
+hsr.set_whole_body_trajectory_batched(
+    arm_trajectory=traj,
+    base_trajectory=None,           # no base motion in this demo
+    envs_idx=envs_all,
+)
+
+# Step until the trajectory reports inactive across all envs.
+for step_i in range(100):
+    state = hsr.step_whole_body_trajectory_batched(dt=0.02, envs_idx=envs_all)
+    scene.step()
+    if not state["active"].any():
+        print(f"whole-body trajectory settled after {step_i + 1} steps")
+        break
+print(f"final state keys = {list(state.keys())}, active = {state['active'].tolist()}")
+"""
+
+_GRIPPER_BATCHED_DEMO = """# Batched gripper — corresponds to grasp_object / move_hand from tutorial 4.
+gripper_batch = hsr.get_gripper_batched()   # HSRBGripperControllerBatch (lazy-init, n_envs=N)
+# Start a grasp-force goal on all envs (same API as gripper_controller.step_apply_force
+# from tutorial 4 — only the input is per-env now).
+state = hsr.step_gripper_batched(dt=0.02, envs_idx=envs_all)
+print(f"gripper batched state keys = {list(state.keys())}")
+scene.step()
+"""
 _BENCHMARK_HEADING = "# TODO: Task 9"
 _BENCHMARK_CODE = "# TODO: Task 9"
 _BATCHED_RESULT_FRAME = "# TODO: Task 9"
