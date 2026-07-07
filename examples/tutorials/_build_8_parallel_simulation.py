@@ -98,9 +98,32 @@ def _collect_cells() -> list:
 # the first task; later tasks replace these with real content.
 # ---------------------------------------------------------------------------
 
-_BADGE_TITLE = "# TODO: Task 2"
-_OBJECTIVES = "# TODO: Task 2"
-_SETUP_HEADING = "# TODO: Task 2"
+_BADGE_TITLE = (
+    '<a href="https://colab.research.google.com/github/icsl-aist/hsr-genesis/blob/main/examples/tutorials/8_parallel_simulation_colab.ipynb" target="_parent"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a>\n\n'
+    "# 8. 並列シミュレーション / Parallel Simulation on GPU\n"
+)
+
+_OBJECTIVES = """## Overview / 概要
+
+This notebook bridges tutorials 1–7 (single-env `tutorial_utils.step()` control) with notebooks 9–10 (CMA-ES and PPO, which use GPU batched parallel sim). After completing it you will be able to:
+
+- Build N parallel environments with `scene.build(n_envs=N)` — one scene, N parallel copies of every entity
+- Use `envs_idx` (a `torch.Tensor` of env indices on `gs.device`) to drive all envs in a single Python call
+- Identify the one-to-one correspondence between the single-env API you already know (`move_arm_*`, `move_base_*`, `grasp_object`) and the batched `*_batched` controller methods
+- Measure the speedup of one batched `scene.step()` call vs N separate single-env calls
+
+このノートブックは、チュートリアル 1–7(単一環境の `tutorial_utils.step()` 制御)と、チュートリアル 9–10(CMA-ES・PPO、GPU 並列シミュレーション使用)の橋渡しをします。完了すると以下ができるようになります:
+
+- `scene.build(n_envs=N)` で N 個の並列環境を構築(1 シーン、N 個の並列コピー)
+- `envs_idx`(`gs.device` 上の env インデックスの `torch.Tensor`)で全環境を 1 回の Python 呼び出しで制御
+- 既知の単一環境 API(`move_arm_*`, `move_base_*`, `grasp_object`)とバッチ化 `_batched` メソッドの対応関係
+- バッチ化 `scene.step()` 1 回が N 回の単一環境呼び出しに比べてどれくらい速いかを計測
+"""
+
+_SETUP_HEADING = """## 1. Setup / セットアップ
+
+The Colab bootstrap below mirrors tutorials 1–7. The only change from prior notebooks: starting in Section 4 we will **not** call `tutorial_utils.step(n)` — we call `scene.step()` directly so we can drive multiple envs in one Python call.
+"""
 _SETUP_CODE = "# TODO: Task 3"
 _GPU_INIT = "# TODO: Task 3"
 _RECAP_HEADING = "# TODO: Task 4"
