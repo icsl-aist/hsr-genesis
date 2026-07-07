@@ -154,7 +154,9 @@ _GPU_INIT = """# Already initialized gs in the setup cell above; this cell is a 
 print(f"Genesis device: {gs.device}")
 print(f"PyTorch CUDA available: {torch.cuda.is_available()}")
 """
-_RECAP_HEADING = """## 2. Recap — the single-env API you already know
+_RECAP_HEADING = """## 2. Recap — the single-env API / 振り返り — 単一環境API
+
+チュートリアル1〜7では、`tutorial_utils`を使って1台のロボットを操作する方法を学びました。
 
 Tutorials 1–7 taught you to drive one robot through `tutorial_utils`:
 
@@ -194,15 +196,29 @@ for _ in range(60):
     tutorial_utils.step(render=False)
 print(f"Single-env arm reached target: qpos shape = {qpos_single.shape}")
 """
-_WHY_BATCHED = """## 3. Why not just loop N times?
+_WHY_BATCHED = """## 3. Why not just loop N times? / なぜ単純にN回ループしないのか?
+
+「もし単一環境の `scene.step()` が動くなら、PythonのループでN回呼べばいいのでは？」という自然な疑問が浮かびます。GPUバッチAPIが優れている理由は次の3つです:
 
 A natural thought: "If 8 single-env `scene.step()` calls work, can I just call them in a Python loop?" Three reasons the GPU batched API wins:
 
-**1. Per-call kernel-launch overhead.** Every `scene.step()` enqueues a batch of CUDA kernels and waits for them to finish before returning control to Python. The CPU↔GPU synchronization dominates wall time for small scenes. With N=8 and ~5 ms of physics per step, 70%+ of the step time is overhead. One batched `scene.step()` pays the kernel-launch + sync cost once.
+**1. Per-call kernel-launch overhead / 呼び出しごとのカーネル起動オーバーヘッド**
 
-**2. Per-env tensors live on the GPU.** The single-env style pulls qpos/user state back to Python every step (a `.cpu()` round trip). In RL training you read `qpos` thousands of times per second. Batched tensors stay on `gs.device`; the only host transfers happen at the boundary of a feature (e.g. logging).
+`scene.step()`を呼ぶたびに、CUDAカーネルのバッチがエンキューされ、Pythonに制御が戻る前に完了を待ちます。CPU↔GPUの同期が、小規模シーンではウォールタイムの大部分を占めます。N=8で1ステップあたり約5msの物理計算の場合、ステップ時間の70%以上がオーバーヘッドです。1回のバッチ化`scene.step()`は、カーネル起動＋同期のコストを1回だけ支払います。
 
-**3. One physics kernel beats N.** Genesis' batched rigid-body solver sees all N envs as a single contiguous block and works them in one parallel kernel rather than N serial ones. This is the actual hardware utilization win — the GPU sees more parallelism to fill its SMs.
+Every `scene.step()` enqueues a batch of CUDA kernels and waits for them to finish before returning control to Python. The CPU↔GPU synchronization dominates wall time for small scenes. With N=8 and ~5 ms of physics per step, 70%+ of the step time is overhead. One batched `scene.step()` pays the kernel-launch + sync cost once.
+
+**2. Per-env tensors live on the GPU / 環境ごとのテンソルはGPU上に存在**
+
+単一環境スタイルでは、毎ステップPython側にqpos/状態を引き出します（`.cpu()`のラウンドトリップ）。RL学習では`qpos`を1秒に何千回も読み取ります。バッチ化テンソルは`gs.device`上に留まり、ホスト転送は機能の境界（例：ログ出力）でのみ発生します。
+
+The single-env style pulls qpos/user state back to Python every step (a `.cpu()` round trip). In RL training you read `qpos` thousands of times per second. Batched tensors stay on `gs.device`; the only host transfers happen at the boundary of a feature (e.g. logging).
+
+**3. One physics kernel beats N / 1つの物理カーネルがNに勝る**
+
+Genesisのバッチ化剛体ソルバは、N個の全環境を1つの連続ブロックとして扱い、N個の逐次カーネルではなく1つの並列カーネルで処理します。これが実際のハードウェア活用における利点です — GPUはより多くの並列性を利用してSMを満たすことができます。
+
+Genesis' batched rigid-body solver sees all N envs as a single contiguous block and works them in one parallel kernel rather than N serial ones. This is the actual hardware utilization win — the GPU sees more parallelism to fill its SMs.
 """
 
 _DIAGRAM = """```
@@ -219,7 +235,9 @@ Single-env, N=8 (Python loop):              Batched, N=8 (one call):
 ```
 """
 
-_CORRESPONDENCE_TABLE = """## 4. The one-to-one correspondence
+_CORRESPONDENCE_TABLE = """## 4. The one-to-one correspondence / 1対1の対応
+
+チュートリアル1〜7で学んだすべての単一環境呼び出しには、対応するバッチ化呼び出しが1つずつ存在します。考え方の切り替えは1つのパラメータだけです：`envs_idx=0`（または暗黙の指定）の代わりに、`envs_idx=envs_all`（`envs_all = torch.arange(N, device=gs.device)`）を渡します。
 
 Every single-env call you learned in tutorials 1–7 maps to one batched call. The mental switch is a single parameter: instead of `envs_idx=0` (or implied), pass `envs_idx=envs_all` where `envs_all = torch.arange(N, device=gs.device)`.
 
@@ -234,9 +252,12 @@ Every single-env call you learned in tutorials 1–7 maps to one batched call. T
 | `hsr.set_qpos(q)` | `hsr.set_qpos(q, envs_idx=envs_all)` where `q` is `(N, dof)` |
 | `hsr.inverse_kinematics(link, pos=p, quat=q)` | same call, but `pos` is `(N,3)`, `quat` is `(N,4)`, `envs_idx=envs_all` |
 
-> **Rule of thumb:** Every batched tensor lives on `gs.device`. Never call `.item()` / `.cpu()` inside the hot loop — move to host once, at the boundary of a feature.
+> **経験則 / Rule of thumb:** すべてのバッチ化テンソルは `gs.device` 上に置きます。ホットループ内で `.item()` や `.cpu()` を呼ばないでください — ホスト転送は高コストであり、バッチAPIのGPU償却効果を損なわせます。  
+> Every batched tensor lives on `gs.device`. Never call `.item()` / `.cpu()` inside the hot loop — move to host once, at the boundary of a feature.
 """
-_BUILD_SCENE_HEADING = """## 5. Building N parallel environments
+_BUILD_SCENE_HEADING = """## 5. Building N parallel environments / N個の並列環境の構築
+
+1つの環境で使ったものと同じ`gs.Scene(...)`です。唯一のバッチ化独自の点は`scene.build(n_envs=N)`で発生します：Genesisが内部でエンティティグラフをN回複製します。`build()`後、`hsr`への単一のPythonハンドルは**すべてのN個のコピー**を指します — すべてのメソッド呼び出しは、`envs_idx`で絞り込まない限り、すべての環境に適用されます。
 
 The same `gs.Scene(...)` you used for one env. The only batched-ism happens at `scene.build(n_envs=N)`: Genesis clones the entity graph N times internally. After `build()`, your single Python handle to `hsr` refers to **all N copies** — every method call touches every environment unless you index it down with `envs_idx`.
 """
@@ -258,7 +279,7 @@ scene.build(n_envs=N, env_spacing=(3.0, 3.0))
 print(f"Built scene with n_envs={N}; hsr entity = {type(hsr).__name__}")
 """
 
-_ENTITY_GRAPH_NOTE = """**Key mental model:** There is one `hsr` Python object. Genesis holds N parallel copies of the HSR internally; `hsr.get_qpos(envs_idx=envs_all)` returns a `(N, dof)` tensor that covers all of them in one kernel call. The same applies to every batched method — `set_qpos`, `inverse_kinematics`, `step_whole_body_trajectory_batched`, etc."""
+_ENTITY_GRAPH_NOTE = """**Key mental model / 重要なメンタルモデル:** `hsr`のPythonオブジェクトは1つだけです。Genesisは内部でN個の並列コピーを保持しており、`hsr.get_qpos(envs_idx=envs_all)`は1回のカーネル呼び出しでそれらすべてをカバーする`(N, dof)`テンソルを返します。これは`set_qpos`、`inverse_kinematics`、`step_whole_body_trajectory_batched`など、すべてのバッチ化メソッドに当てはまります。There is one `hsr` Python object. Genesis holds N parallel copies of the HSR internally; `hsr.get_qpos(envs_idx=envs_all)` returns a `(N, dof)` tensor that covers all of them in one kernel call. The same applies to every batched method — `set_qpos`, `inverse_kinematics`, `step_whole_body_trajectory_batched`, etc."""
 
 _ENVS_IDX_CODE = """# The single mental switch: a torch tensor of env indices on gs.device.
 envs_all = torch.arange(N, device=device, dtype=gs.tc_int)
@@ -267,7 +288,9 @@ print(f"envs_all = {envs_all}   (shape={tuple(envs_all.shape)}, device={envs_all
 # Single-env access still works — pass an int (e.g. envs_idx=0) for one env.
 # Batched access — pass the full tensor (or any subset of env indices).
 """
-_BATCHED_IK_HEADING = """## 6. Batched IK reach — N distinct targets, one solve
+_BATCHED_IK_HEADING = """## 6. Batched IK reach — N distinct targets, one solve / バッチ化IK到達 — N個の異なる目標を一度に
+
+チュートリアル3では、**1つの**目標に対して`move_wholebody_ik(...)`を呼び出しました。ここではNに拡張します：異なる目標位置の`(N,3)`テンソルと目標姿勢の`(N,4)`テンソルを定義し、`inverse_kinematics`をまったく同じ方法で呼び出します — 入力がバッチ化テンソルになり、`envs_idx`が整数ではなくテンソルになっただけです。
 
 In tutorial 3 you called `move_wholebody_ik(...)` for **one** target. Here we extend to N: define a `(N,3)` tensor of distinct target positions and a `(N,4)` tensor of target orientations, then call `inverse_kinematics` exactly the same way — only the inputs are batched tensors and `envs_idx` is a tensor instead of an int.
 """
@@ -315,7 +338,9 @@ hand_pos = hsr.get_link("hand_palm_link").get_pos(envs_idx=envs_all)  # (N, 3)
 err = (hand_pos - offsets).norm(dim=-1)
 print(f"per-env hand position error (m): mean={err.mean().item():.4f}  max={err.max().item():.4f}")
 """
-_BATCHED_CONTROLLERS_HEADING = """## 7. The `_batched` controller layer
+_BATCHED_CONTROLLERS_HEADING = """## 7. The `_batched` controller layer / `_batched`コントローラレイヤー
+
+チュートリアル3〜4では`move_arm_*`、`move_base_*`、`grasp_object`を学びました。RLスクリプトでは通常、qposを直接操作するのではなく、`move_arm_*`の機能をバッチ化したコントローラレイヤーを使用します。対応関係は次の通りです。
 
 Tutorials 3–4 taught you `move_arm_*`, `move_base_*`, and `grasp_object`. In RL scripts we usually don't drive qpos directly — we use the controller layer that mirrors what `move_arm_*` did for you, but in batched form. The correspondence is:
 
@@ -328,7 +353,7 @@ Tutorials 3–4 taught you `move_arm_*`, `move_base_*`, and `grasp_object`. In R
 `JointTrajectory` and `Trajectory` are the same types tutorials 3–4 used internally; you can pass either one trajectory (broadcast to all envs) or a list of N trajectories (per-env).
 """
 
-_BATCHED_CONTROLLERS_NOTE = """**Why show this here?** Notebooks 9 (CMA-ES) and 10 (PPO) keep the controller running across thousands of steps. Knowing this layer exists — and that it's the same call you made in tutorials 3–4 with `envs_idx` added — matters more than memorizing any single signature. The next cell runs one batched whole-body trajectory step."""
+_BATCHED_CONTROLLERS_NOTE = """**Why show this here? / なぜここで説明する?** ノートブック9（CMA-ES）と10（PPO）では、コントローラを何千ステップも動作させ続けます。このレイヤーの存在 — そしてそれがチュートリアル3〜4で`envs_idx`を追加したのと同じ呼び出しであること — を理解することが、個々のシグネチャを暗記するよりも重要です。Notebooks 9 (CMA-ES) and 10 (PPO) keep the controller running across thousands of steps. Knowing this layer exists — and that it's the same call you made in tutorials 3–4 with `envs_idx` added — matters more than memorizing any single signature. The next cell runs one batched whole-body trajectory step."""
 
 _WHOLE_BODY_TRAJECTORY_DEMO = """# Build a tiny batched whole-body trajectory and step it.
 # JointTrajectory / Trajectory are tutorial 3 types — same ones used internally by move_arm_*.
@@ -366,7 +391,9 @@ state = hsr.step_gripper_batched(dt=0.02, envs_idx=envs_all)
 print(f"gripper batched state keys = {list(state.keys())}")
 scene.step()
 """
-_BENCHMARK_HEADING = """## 8. Benchmark — N single-env calls vs 1 batched call
+_BENCHMARK_HEADING = """## 8. Benchmark — N single-env calls vs 1 batched call / ベンチマーク — 単一環境N回 vs バッチ1回
+
+同じ物理計算量（N台のロボットがそれぞれKステップ実行）を2通りの方法で比較：(a) チュートリアルユーティリティの単一環境イディオムを、毎回新しいシーンでN回逐次実行；(b) `scene.build(n_envs=N)`で構築し、1回の`scene.step()`を反復ごとに実行。ウォールクロック比は、無料のColab GPUでも少なくとも3倍になるはずです。
 
 Same physics work (N robots each stepping for K steps), two ways: (a) the tutorial_utils single-env idiom, run N times in sequence with a fresh scene each; (b) one `scene.build(n_envs=N)` and one `scene.step()` per iteration. Wall-clock ratio should be at least 3× on a free Colab GPU.
 """
@@ -436,7 +463,7 @@ try:
 except Exception as exc:
     print(f"(render skipped: {exc})")
 """
-_FORWARD_POINTER = """## 9. What's next
+_FORWARD_POINTER = """## 9. What's next / 次のステップ
 
 You now understand the **mechanics** of parallel sim:
 
@@ -444,20 +471,20 @@ You now understand the **mechanics** of parallel sim:
 - `envs_idx` is a tensor, not an int — same API surface, batched inputs
 - All N envs advance in one `scene.step()` call
 
-**Notebook 9 — Grasp Learning with CMA-ES** adds only two new pieces of vocabulary on top of this:
+**Notebook 9 — Grasp Learning with CMA-ES / ノートブック9 — CMA-ES把持学習** adds only two new pieces of vocabulary on top of this:
 
 - A *fitness* function that scores each env's grasp outcome (success / failure / quality)
 - An evolutionary optimizer (CMA-ES) that proposes N parameter sets per generation and uses the per-env fitness to evolve
 
-**Notebook 10 — Grasp Learning with PPO + IK Curriculum** swaps the optimizer for a PPO RL loop and adds *observation* / *action* / *reward* tensors — but expects exactly the same `scene.build(n_envs=N)` + `envs_idx` mechanics you just learned.
+**Notebook 10 — Grasp Learning with PPO + IK Curriculum / ノートブック10 — PPO+IKカリキュラム把持学習** swaps the optimizer for a PPO RL loop and adds *observation* / *action* / *reward* tensors — but expects exactly the same `scene.build(n_envs=N)` + `envs_idx` mechanics you just learned.
 """
 
-_RECAP_BULLETS = """## Recap
+_RECAP_BULLETS = """## Recap / まとめ
 
-- **`envs_idx` is the only mental switch.** Same `inverse_kinematics` / `set_qpos` / `step_*` calls — use an int for one env, a `torch.Tensor` for many.
-- **`scene.build(n_envs=N)` clones the entity graph.** One Python handle controls every env after `build()`.
-- **`*_batched` methods mirror the single-env controllers** from tutorials 3–4: `set_whole_body_trajectory_batched` ↔ `move_arm_*`, `step_base_trajectory_batched` ↔ `move_base_*`, `step_gripper_batched` ↔ `grasp_object` / `move_hand`.
-- **Keep tensors on `gs.device`.** Avoid `.item()` / `.cpu()` inside the hot loop — host transfers are expensive and break the GPU amortization the batched API exists to provide.
+- **`envs_idx` is the only mental switch.** `envs_idx`が唯一の考え方の切り替えです。同じ`inverse_kinematics` / `set_qpos` / `step_*`の呼び出し — 1つの環境には整数を、多数の環境には`torch.Tensor`を使います。Same `inverse_kinematics` / `set_qpos` / `step_*` calls — use an int for one env, a `torch.Tensor` for many.
+- **`scene.build(n_envs=N)` clones the entity graph / `scene.build(n_envs=N)`がエンティティグラフを複製:** `build()`後に1つのPythonハンドルですべての環境を制御できます。One Python handle controls every env after `build()`.
+- **`*_batched` methods mirror the single-env controllers / `*_batched`メソッドは単一環境コントローラに対応:** チュートリアル3〜4から: `set_whole_body_trajectory_batched` ↔ `move_arm_*`, `step_base_trajectory_batched` ↔ `move_base_*`, `step_gripper_batched` ↔ `grasp_object` / `move_hand`。from tutorials 3–4: `set_whole_body_trajectory_batched` ↔ `move_arm_*`, `step_base_trajectory_batched` ↔ `move_base_*`, `step_gripper_batched` ↔ `grasp_object` / `move_hand`.
+- **Keep tensors on `gs.device`.** テンソルは`gs.device`上に保持します。ホットループ内で`.item()` / `.cpu()`を避けてください — ホスト転送は高コストで、バッチAPIのGPU償却効果を損なわせます。Avoid `.item()` / `.cpu()` inside the hot loop — host transfers are expensive and break the GPU amortization the batched API exists to provide.
 """
 
 
