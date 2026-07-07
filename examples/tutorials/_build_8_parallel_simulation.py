@@ -230,10 +230,36 @@ Every single-env call you learned in tutorials 1–7 maps to one batched call. T
 
 > **Rule of thumb:** Every batched tensor lives on `gs.device`. Never call `.item()` / `.cpu()` inside the hot loop — move to host once, at the boundary of a feature.
 """
-_BUILD_SCENE_HEADING = "# TODO: Task 6"
-_BUILD_SCENE_CODE = "# TODO: Task 6"
-_ENTITY_GRAPH_NOTE = "# TODO: Task 6"
-_ENVS_IDX_CODE = "# TODO: Task 6"
+_BUILD_SCENE_HEADING = """## 5. Building N parallel environments
+
+The same `gs.Scene(...)` you used for one env. The only batched-ism happens at `scene.build(n_envs=N)`: Genesis clones the entity graph N times internally. After `build()`, your single Python handle to `hsr` refers to **all N copies** — every method call touches every environment unless you index it down with `envs_idx`.
+"""
+
+_BUILD_SCENE_CODE = """N = 8  # try 16, 32, 64 on Colab Pro
+
+scene = gs.Scene(
+    sim_options=gs.options.SimOptions(dt=0.02),
+    rigid_options=gs.options.RigidOptions(use_gjk_collision=True),
+    show_viewer=False,
+)
+_ = scene.add_entity(gs.morphs.Plane())
+hsr = scene.add_entity(
+    # Use tutorial_utils to find the URDF path (works on Colab and locally)
+    HSRBURDF(file=str(tutorial_utils._find_urdf()), robot="hsrb", base_mode="planar")
+)
+scene.build(n_envs=N, env_spacing=(3.0, 3.0))
+print(f"Built scene with n_envs={N}; hsr entity = {type(hsr).__name__}")
+"""
+
+_ENTITY_GRAPH_NOTE = """**Key mental model:** There is one `hsr` Python object. Genesis holds N parallel copies of the HSR internally; `hsr.get_qpos(envs_idx=envs_all)` returns a `(N, dof)` tensor that covers all of them in one kernel call. The same applies to every batched method — `set_qpos`, `inverse_kinematics`, `step_whole_body_trajectory_batched`, etc."""
+
+_ENVS_IDX_CODE = """# The single mental switch: a torch tensor of env indices on gs.device.
+envs_all = torch.arange(N, device=device, dtype=gs.tc_int)
+print(f"envs_all = {envs_all}   (shape={tuple(envs_all.shape)}, device={envs_all.device})")
+
+# Single-env access still works — pass an int (e.g. envs_idx=0) for one env.
+# Batched access — pass the full tensor (or any subset of env indices).
+"""
 _BATCHED_IK_HEADING = "# TODO: Task 7"
 _DEFINE_TARGETS_CODE = "# TODO: Task 7"
 _BATCHED_IK_SOLVE = "# TODO: Task 7"
