@@ -149,8 +149,45 @@ print(f"Genesis device: {device}")
 # Quick sanity: ensure torch sees the same device.
 print(f"PyTorch CUDA available: {torch.cuda.is_available()}")
 """
-_RECAP_HEADING = "# TODO: Task 4"
-_RECAP_SINGLE_ENV = "# TODO: Task 4"
+_RECAP_HEADING = """## 2. Recap — the single-env API you already know
+
+Tutorials 1–7 taught you to drive one robot through `tutorial_utils`:
+
+| What you called | What it does internally |
+| --- | --- |
+| `init_sim()` | Builds a `gs.Scene` with **one** HSR entity, calls `scene.build()` |
+| `step(n=1)` or `run(seconds)` | Calls `scene.step()` n times in a Python loop |
+| `move_arm_neutral()`, `move_arm_joints(j)`, `move_wholebody_ik(...)` | Sets one trajectory on the HSR's single controller, steps in a loop |
+| `move_base_vel(v)`, `move_base_goal(p)` | Same — base controller of the single HSR |
+| `grasp_object(o)`, `move_hand(p)` | Single-env gripper controller |
+
+Every call above has an implicit `envs_idx=0`. The cell below reproduces a tiny end-to-end example: build the scene, reach one target with IK, step.
+"""
+
+_RECAP_SINGLE_ENV = """# --- Recap: 1 HSR, 1 target, 1 scene.step() per Python iteration ---
+tutorial_utils.init_sim(n_envs=1)   # single env (default)
+
+# Re-create the HSR handle the way tutorial_utils does internally (so we can
+# call set_qpos / inverse_kinematics directly in later sections).
+hsr_single = tutorial_utils._state.hsr   # internal attribute; safe to expose in tutorial
+
+ik_link = hsr_single.get_link("hand_palm_link")
+target_pos_single = torch.tensor([0.6, 0.0, 0.9], device=device)
+target_quat_single = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device)  # identity wxyz
+
+# Single-env IK call — no envs_idx argument; returns (dof,) qpos tensor.
+qpos_single = hsr_single.inverse_kinematics(
+    link=ik_link,
+    pos=target_pos_single,
+    quat=target_quat_single,
+)
+hsr_single.set_qpos(qpos_single)
+
+# Step the sim long enough to settle.
+for _ in range(60):
+    tutorial_utils.step(render=False)
+print(f"Single-env arm reached target: qpos shape = {qpos_single.shape}")
+"""
 _WHY_BATCHED = "# TODO: Task 5"
 _DIAGRAM = "# TODO: Task 5"
 _CORRESPONDENCE_TABLE = "# TODO: Task 5"
