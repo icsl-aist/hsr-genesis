@@ -359,9 +359,74 @@ state = hsr.step_gripper_batched(dt=0.02, envs_idx=envs_all)
 print(f"gripper batched state keys = {list(state.keys())}")
 scene.step()
 """
-_BENCHMARK_HEADING = "# TODO: Task 9"
-_BENCHMARK_CODE = "# TODO: Task 9"
-_BATCHED_RESULT_FRAME = "# TODO: Task 9"
+_BENCHMARK_HEADING = """## 8. Benchmark — N single-env calls vs 1 batched call
+
+Same physics work (N robots each stepping for K steps), two ways: (a) the tutorial_utils single-env idiom, run N times in sequence with a fresh scene each; (b) one `scene.build(n_envs=N)` and one `scene.step()` per iteration. Wall-clock ratio should be at least 3× on a free Colab GPU.
+"""
+
+_BENCHMARK_CODE = """import time
+
+K = 50  # steps per env
+N = 8   # number of envs
+
+# --- (a) Single-env baseline: loop N scenes --------------------------------
+# Re-init a fresh single-env scene (matches recap cell idiom).
+tutorial_utils.init_sim(n_envs=1)
+hsr_s = tutorial_utils._state.hsr
+# Warm-up one step so timing excludes first-call compilation overhead.
+for _ in range(5):
+    tutorial_utils.step(render=False)
+
+t0 = time.perf_counter()
+for _env_i in range(N):
+    for _ in range(K):
+        tutorial_utils.step(render=False)
+single_env_total = time.perf_counter() - t0
+print(f"(a) single-env x {N} envs x {K} steps: {single_env_total:.3f} s")
+
+# --- (b) Batched: one scene.step() per iteration ---------------------------
+# Re-init the batched scene (matches cell in Section 5).
+scene_b = gs.Scene(
+    sim_options=gs.options.SimOptions(dt=0.02),
+    rigid_options=gs.options.RigidOptions(use_gjk_collision=True),
+    show_viewer=False,
+)
+_ = scene_b.add_entity(gs.morphs.Plane())
+hsr_b = scene_b.add_entity(HSRBURDF(file=str(tutorial_utils._find_urdf()), robot="hsrb", base_mode="planar"))
+scene_b.build(n_envs=N, env_spacing=(3.0, 3.0))
+envs_all_b = torch.arange(N, device=device, dtype=gs.tc_int)
+
+# Warm-up
+for _ in range(5):
+    scene_b.step()
+
+t0 = time.perf_counter()
+for _ in range(K):
+    scene_b.step()
+batched_total = time.perf_counter() - t0
+print(f"(b) batched {N} envs x {K} steps: {batched_total:.3f} s")
+
+speedup = single_env_total / batched_total
+print(f"speedup (a)/(b) = {speedup:.2f}x")
+assert speedup >= 3.0, f"Expected >=3x speedup, got {speedup:.2f}x — see markdown note about Colab tier"
+print("PASS: speedup >= 3x")
+"""
+
+_BATCHED_RESULT_FRAME = """# Capture and save a frame showing all N arms reached different targets.
+# (Render is optional — depends on headless / EGL backend availability.)
+try:
+    cam = scene_b.add_camera(res=(640, 480), pos=(8.0, -3.0, 4.0), lookat=(0.0, 0.0, 0.5), fov=30)
+    for _ in range(5):
+        scene_b.step()
+    rgb = cam.render()
+    import matplotlib.pyplot as plt
+    plt.imshow(rgb)
+    plt.axis("off")
+    plt.title(f"{N} parallel HSRs")
+    plt.show()
+except Exception as exc:
+    print(f"(render skipped: {exc})")
+"""
 _FORWARD_POINTER = "# TODO: Task 10"
 _RECAP_BULLETS = "# TODO: Task 10"
 
