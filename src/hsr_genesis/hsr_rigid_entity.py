@@ -2138,10 +2138,10 @@ class HSRRigidEntity(RigidEntity):
                         to_torch=True,
                     )
                     if torch.is_tensor(results):
-                        results[fail_idx] = fb_res
-                        sol[fail_idx] = fb_sol
-                        o2b[fail_idx] = fb_o2b_out
-                        o2e[fail_idx] = fb_o2e
+                        results[fail_idx] = fb_res[fail_idx]
+                        sol[fail_idx] = fb_sol[fail_idx]
+                        o2b[fail_idx] = fb_o2b_out[fail_idx]
+                        o2e[fail_idx] = fb_o2e[fail_idx]
                     else:
                         for fb_j, orig_i in enumerate(fail_idx.tolist()):
                             fb_ok = bool(fb_res[fb_j].item() > 0) if torch.is_tensor(fb_res) else fb_res[fb_j] == IKResult.SUCCESS

@@ -19,6 +19,7 @@ import sys
 import time
 from pathlib import Path
 
+import numpy as np
 import torch
 
 import genesis as gs
@@ -80,18 +81,20 @@ class GraspProblem(Problem):
 
         # Denormalize: [0,1] → actual param ranges.
         # Each object shares the same 4-param bounds, repeated 7 times.
-        lo = PARAM_BOUNDS[:, 0].repeat(N_OBJECTS).to(raw.device)  # (28,)
-        hi = PARAM_BOUNDS[:, 1].repeat(N_OBJECTS).to(raw.device)  # (28,)
+        lo = PARAM_BOUNDS[:, 0].repeat(N_OBJECTS).to(device=raw.device)  # (28,)
+        hi = PARAM_BOUNDS[:, 1].repeat(N_OBJECTS).to(device=raw.device)  # (28,)
         scaled = raw.clamp(0.0, 1.0) * (hi - lo) + lo  # (n, 28)
         clipped = scaled.reshape(n, N_OBJECTS, N_PARAMS)
         # Round grasp_hold_steps (index 3) to int.
         clipped[..., 3] = torch.round(clipped[..., 3])
+        # Move entire batch to Genesis device once (washes CPU→GPU per-object cost).
+        clipped = clipped.to(device=gs.device, dtype=gs.tc_float)
 
-        success_per_obj = torch.zeros(n, N_OBJECTS, dtype=torch.float32)
+        success_per_obj = torch.zeros(n, N_OBJECTS, dtype=torch.float32, device=gs.device)
 
         for obj_idx, obj_name in enumerate(OBJECT_NAMES):
             env = self._get_env(obj_name)
-            params_for_obj = clipped[:, obj_idx, :].to(device=gs.device, dtype=gs.tc_float)
+            params_for_obj = clipped[:, obj_idx, :]  # already on gs.device
             env.grasp_params = params_for_obj
             result = env.run_pick_pipeline(settle_steps=self.settle_steps)
             success_per_obj[:, obj_idx] = result["success_per_env"]
@@ -133,6 +136,8 @@ def train(
     lo_all = PARAM_BOUNDS[:, 0].repeat(N_OBJECTS)
     hi_all = PARAM_BOUNDS[:, 1].repeat(N_OBJECTS)
     defaults_norm = (PARAM_DEFAULTS.repeat(N_OBJECTS) - lo_all) / (hi_all - lo_all)
+    # Move to Problem device so center_init matches the population device.
+    defaults_norm = defaults_norm.to(device=gs.device, dtype=gs.tc_float)
 
     cmaes = CMAES(
         problem=problem,

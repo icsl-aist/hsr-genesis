@@ -242,6 +242,7 @@ class HSRPickEnv:
             [n_steps * self.dt], device=gs.device, dtype=gs.tc_float,
         )
         names = list(JOINT_ORDER)
+        # API-bound: set_whole_body_trajectory_batched expects list[JointTrajectory] per env.
         arm_trajs = [
             JointTrajectory(
                 positions=arm_pos[i].unsqueeze(0),
@@ -298,37 +299,31 @@ class HSRPickEnv:
     # ------------------------------------------------------------------
 
     def _ik(self, goal_pos: torch.Tensor, *, init_qpos=None):
-        """IK to ``goal_pos`` (n_envs, 3), per-env single-env analytic solver.
+        """IK to ``goal_pos`` (n_envs, 3) using batched analytic solver.
 
-        The batched base-yaw IK kernel currently rejects non-contiguous
-        tensors, so we loop over envs and call the single-env analytic
-        solver (which converges to ~1e-7 m).  Returns (qpos (n_envs, n_qs),
-        success_mask (n_envs,)).
+        ``inverse_kinematics`` uses ``torch.as_tensor`` internally (which
+        accepts non-contiguous memory), so a single batched call replaces
+        the per-env loop.  Returns (qpos (n_envs, n_qs), success_mask
+        (n_envs,)).
         """
-        quat = torch.tensor(HAND_QUAT, device=gs.device, dtype=gs.tc_float)
-        success = torch.zeros(self.n_envs, device=gs.device, dtype=torch.bool)
-        qpos_list = []
-        for i in range(self.n_envs):
-            ik_init = init_qpos[i] if init_qpos is not None else None
-            qpos_i, error_i = self.hsr.inverse_kinematics(
-                link=self.ee_link,
-                pos=goal_pos[i],
-                quat=quat,
-                init_qpos=ik_init,
-                max_samples=200,
-                max_solver_iters=150,
-                max_step_size=0.7,
-                respect_joint_limit=False,
-                envs_idx=[i],
-                return_error=True,
-            )
-            if qpos_i.ndim == 1:
-                qpos_list.append(qpos_i)
-            else:
-                qpos_list.append(qpos_i[0])
-            pos_err = error_i[:3].norm()
-            success[i] = torch.isfinite(pos_err) & (pos_err < 0.02)
-        qpos = torch.stack(qpos_list, dim=0)
+        quat = torch.tensor(
+            HAND_QUAT, device=gs.device, dtype=gs.tc_float,
+        ).expand(self.n_envs, -1).contiguous()
+
+        qpos, error = self.hsr.inverse_kinematics(
+            link=self.ee_link,
+            pos=goal_pos.contiguous(),
+            quat=quat,
+            init_qpos=init_qpos.contiguous() if init_qpos is not None else None,
+            max_samples=200,
+            max_solver_iters=150,
+            max_step_size=0.7,
+            respect_joint_limit=False,
+            envs_idx=self.envs_all,
+            return_error=True,
+        )
+        pos_err = error[:, :3].norm(dim=1)
+        success = torch.isfinite(pos_err) & (pos_err < 0.02)
         return qpos, success
 
     def _qpos_to_arm_and_base(self, qpos: torch.Tensor):
@@ -353,7 +348,7 @@ class HSRPickEnv:
         from hsr_genesis.analytic_ik import JOINT_ORDER
 
         t = torch.tensor([duration], device=gs.device, dtype=gs.tc_float)
-        # Per-env arm trajectory (list of JointTrajectory).
+        # API-bound: set_whole_body_trajectory_batched expects list[JointTrajectory] per env.
         arm_trajs = [
             JointTrajectory(
                 positions=arm_positions[i].unsqueeze(0),
@@ -382,6 +377,7 @@ class HSRPickEnv:
         from hsr_genesis.analytic_ik import JOINT_ORDER
 
         t = torch.tensor([duration], device=gs.device, dtype=gs.tc_float)
+        # API-bound: set_whole_body_trajectory_batched expects list[JointTrajectory] per env.
         arm_trajs = [
             JointTrajectory(
                 positions=arm_positions[i].unsqueeze(0),
@@ -514,6 +510,7 @@ class HSRPickEnv:
             avg_steps = float("nan")
             avg_time = float("nan")
         return {
+            "success_per_env": succeeded.float(),
             "success_rate": n_succ / self.n_envs,
             "n_success": n_succ,
             "n_envs": self.n_envs,

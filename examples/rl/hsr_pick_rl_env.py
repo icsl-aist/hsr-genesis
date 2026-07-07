@@ -110,6 +110,16 @@ class HSRPickRLEnv(gym.Env):
         self._success = torch.zeros(n_envs, device=gs.device, dtype=torch.bool)
         self._success_reward_given = torch.zeros(n_envs, device=gs.device, dtype=torch.bool)
 
+        # GPU obs cache: keep GPU tensor reference before .cpu().numpy()
+        # so internal callers can access without a CPU round-trip.
+        self._last_obs_gpu: torch.Tensor | None = None
+        # Pinned memory buffer for async GPU→CPU obs transfer.
+        self._use_pinned = str(gs.device) != "cpu"
+        if self._use_pinned:
+            self._obs_buf = torch.zeros(
+                n_envs, OBS_DIM, device="cpu", dtype=gs.tc_float, pin_memory=True,
+            )
+
     def _yaw_from_quat(self, quat: torch.Tensor) -> torch.Tensor:
         w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
         siny_cosp = 2.0 * (w * z + x * y)
@@ -198,6 +208,12 @@ class HSRPickRLEnv(gym.Env):
             phase_onehot,            # 5
         ], dim=-1)  # Total: 32
 
+        self._last_obs_gpu = obs  # cache GPU tensor for internal access
+        if self._use_pinned:
+            # Async copy into pinned buffer; synchronize before reading.
+            self._obs_buf.copy_(obs, non_blocking=True)
+            torch.cuda.synchronize()
+            return self._obs_buf.numpy()
         return obs.detach().cpu().numpy()
 
     def reset(self, *, seed=None, options=None):
@@ -257,6 +273,7 @@ class HSRPickRLEnv(gym.Env):
             duration = (MAX_STEPS - LIFT_START) * self.dt
 
         t = torch.tensor([duration], device=gs.device, dtype=gs.tc_float)
+        # API-bound: set_whole_body_trajectory_batched expects list[JointTrajectory] per env.
         arm_trajs = [
             JointTrajectory(
                 positions=arm_target[i].unsqueeze(0),
@@ -311,6 +328,7 @@ class HSRPickRLEnv(gym.Env):
         from hsr_genesis.analytic_ik import JOINT_ORDER
 
         t = torch.tensor([self.dt], device=gs.device, dtype=gs.tc_float)
+        # API-bound: set_whole_body_trajectory_batched expects list[JointTrajectory] per env.
         arm_trajs = [
             JointTrajectory(
                 positions=arm_target[i].unsqueeze(0),
@@ -398,17 +416,21 @@ class HSRPickRLEnv(gym.Env):
         success = obj_z > (obj_init_z + LIFT_THRESHOLD)
         self._success = self._success | success
 
-    def step(self, action: np.ndarray):
+    def step(self, action: np.ndarray | torch.Tensor):
         """Take one sim step with the given residual action.
 
         Args:
-            action: (n_envs, 9) numpy array in [-1, 1]
+            action: (n_envs, 9) numpy array or torch.Tensor in [-1, 1].
+                    torch.Tensor kept on GPU when already on gs.device.
 
         Returns:
             obs (n_envs, 32), reward (n_envs,), terminated (n_envs,), truncated (n_envs,), info
         """
         env = self._pick_env
-        action_t = torch.tensor(action, device=gs.device, dtype=gs.tc_float)
+        if isinstance(action, torch.Tensor):
+            action_t = action.to(device=gs.device, dtype=gs.tc_float, non_blocking=True)
+        else:
+            action_t = torch.tensor(action, device=gs.device, dtype=gs.tc_float)
         self._prev_action = action_t.clone()
 
         # Check for phase transition
