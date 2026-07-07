@@ -124,8 +124,31 @@ _SETUP_HEADING = """## 1. Setup / セットアップ
 
 The Colab bootstrap below mirrors tutorials 1–7. The only change from prior notebooks: starting in Section 4 we will **not** call `tutorial_utils.step(n)` — we call `scene.step()` directly so we can drive multiple envs in one Python call.
 """
-_SETUP_CODE = "# TODO: Task 3"
-_GPU_INIT = "# TODO: Task 3"
+_SETUP_CODE = """# Open this notebook on Colab for full GPU support.
+# Run this cell first.
+import sys
+if "google.colab" in sys.modules:
+    import urllib.request
+    exec(urllib.request.urlopen(
+        "https://raw.githubusercontent.com/icsl-aist/hsr-genesis/main/examples/tutorials/colab_setup.py"
+    ).read(), globals())
+    setup_colab()
+
+import numpy as np
+import torch
+import genesis as gs
+from hsr_genesis.hsr_rigid_entity import HSRBURDF
+from hsr_genesis import tutorial_utils  # for the recap cell — what tutorials 1–7 taught you
+"""
+
+_GPU_INIT = """# Initialize Genesis on GPU if available; fall back to CPU.
+gs.init(backend=gs.gpu)
+device = gs.device
+print(f"Genesis device: {device}")
+
+# Quick sanity: ensure torch sees the same device.
+print(f"PyTorch CUDA available: {torch.cuda.is_available()}")
+"""
 _RECAP_HEADING = "# TODO: Task 4"
 _RECAP_SINGLE_ENV = "# TODO: Task 4"
 _WHY_BATCHED = "# TODO: Task 5"
