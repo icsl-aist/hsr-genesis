@@ -260,10 +260,54 @@ print(f"envs_all = {envs_all}   (shape={tuple(envs_all.shape)}, device={envs_all
 # Single-env access still works — pass an int (e.g. envs_idx=0) for one env.
 # Batched access — pass the full tensor (or any subset of env indices).
 """
-_BATCHED_IK_HEADING = "# TODO: Task 7"
-_DEFINE_TARGETS_CODE = "# TODO: Task 7"
-_BATCHED_IK_SOLVE = "# TODO: Task 7"
-_BATCHED_STEP_RENDER = "# TODO: Task 7"
+_BATCHED_IK_HEADING = """## 6. Batched IK reach — N distinct targets, one solve
+
+In tutorial 3 you called `move_wholebody_ik(...)` for **one** target. Here we extend to N: define a `(N,3)` tensor of distinct target positions and a `(N,4)` tensor of target orientations, then call `inverse_kinematics` exactly the same way — only the inputs are batched tensors and `envs_idx` is a tensor instead of an int.
+"""
+
+_DEFINE_TARGETS_CODE = """ik_link = hsr.get_link("hand_palm_link")
+
+# One target per env: arrange them on a circle around each env's origin so that
+# visually you'll see N arms each reaching a different point in their own copy.
+import math
+angles = torch.linspace(0.0, 2 * math.pi, N + 1, device=device)[:N]
+offsets = torch.stack([
+    0.55 + 0.1 * torch.cos(angles),   # x
+    0.1 * torch.sin(angles),          # y
+    torch.full((N,), 0.9, device=device),  # z
+], dim=-1)  # shape (N, 3)
+
+# Repeat the identity quaternion N times.
+target_quat_batched = torch.tensor(
+    [[1.0, 0.0, 0.0, 0.0]] * N, device=device, dtype=gs.tc_float
+)  # shape (N, 4)
+
+print(f"target_pos shape={tuple(offsets.shape)}, target_quat shape={tuple(target_quat_batched.shape)}")
+"""
+
+_BATCHED_IK_SOLVE = """# The SAME call as in the recap cell — envs_idx is now a tensor and inputs are batched.
+qpos_batched = hsr.inverse_kinematics(
+    link=ik_link,
+    pos=offsets,
+    quat=target_quat_batched,
+    envs_idx=envs_all,
+)
+print(f"qpos_batched shape={tuple(qpos_batched.shape)}  (expected (N, dof))")
+
+# Set all N envs at once.
+hsr.set_qpos(qpos_batched, envs_idx=envs_all)
+print("All N arms commanded to IK solutions.")
+"""
+
+_BATCHED_STEP_RENDER = """# ONE scene.step() advances every env. 60 steps to let arms settle visually.
+for _ in range(60):
+    scene.step()
+
+# Verify the per-env hand position matches the requested targets.
+hand_pos = hsr.get_link("hand_palm_link").get_pos(envs_idx=envs_all)  # (N, 3)
+err = (hand_pos - offsets).norm(dim=-1)
+print(f"per-env hand position error (m): mean={err.mean().item():.4f}  max={err.max().item():.4f}")
+"""
 _BATCHED_CONTROLLERS_HEADING = "# TODO: Task 8"
 _BATCHED_CONTROLLERS_NOTE = "# TODO: Task 8"
 _WHOLE_BODY_TRAJECTORY_DEMO = "# TODO: Task 8"
