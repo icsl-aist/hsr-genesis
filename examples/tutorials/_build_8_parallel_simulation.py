@@ -427,8 +427,29 @@ try:
 except Exception as exc:
     print(f"(render skipped: {exc})")
 """
-_FORWARD_POINTER = "# TODO: Task 10"
-_RECAP_BULLETS = "# TODO: Task 10"
+_FORWARD_POINTER = """## 9. What's next
+
+You now understand the **mechanics** of parallel sim:
+
+- `scene.build(n_envs=N)` clones the entity graph once
+- `envs_idx` is a tensor, not an int — same API surface, batched inputs
+- All N envs advance in one `scene.step()` call
+
+**Notebook 9 — Grasp Learning with CMA-ES** adds only two new pieces of vocabulary on top of this:
+
+- A *fitness* function that scores each env's grasp outcome (success / failure / quality)
+- An evolutionary optimizer (CMA-ES) that proposes N parameter sets per generation and uses the per-env fitness to evolve
+
+**Notebook 10 — Grasp Learning with PPO + IK Curriculum** swaps the optimizer for a PPO RL loop and adds *observation* / *action* / *reward* tensors — but expects exactly the same `scene.build(n_envs=N)` + `envs_idx` mechanics you just learned.
+"""
+
+_RECAP_BULLETS = """## Recap
+
+- **`envs_idx` is the only mental switch.** Same `inverse_kinematics` / `set_qpos` / `step_*` calls — use an int for one env, a `torch.Tensor` for many.
+- **`scene.build(n_envs=N)` clones the entity graph.** One Python handle controls every env after `build()`.
+- **`*_batched` methods mirror the single-env controllers** from tutorials 3–4: `set_whole_body_trajectory_batched` ↔ `move_arm_*`, `step_base_trajectory_batched` ↔ `move_base_*`, `step_gripper_batched` ↔ `grasp_object` / `move_hand`.
+- **Keep tensors on `gs.device`.** Avoid `.item()` / `.cpu()` inside the hot loop — host transfers are expensive and break the GPU amortization the batched API exists to provide.
+"""
 
 
 def main() -> None:
