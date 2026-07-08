@@ -434,6 +434,16 @@ class HSRRigidEntity(RigidEntity):
             except Exception:
                 continue
 
+    def _solver_n_envs(self) -> int:
+        """Compatibility helper: safely read ``solver.n_envs`` across Genesis versions.
+
+        Genesis 0.4.x exposes ``n_envs`` as a property (returns 0 pre-build).
+        Genesis 1.x sets it as an instance attribute during ``build()``, so
+        accessing it before build raises ``AttributeError``.  This helper
+        returns 0 when the attribute is missing (pre-build or renamed).
+        """
+        return int(getattr(self._solver, "n_envs", 0) or 0)
+
     @property
     def end_effector_offset(self) -> list[float] | None:
         if self._hsr_local_point is None:
@@ -453,7 +463,7 @@ class HSRRigidEntity(RigidEntity):
 
     def get_gripper_batched(self) -> HSRBGripperControllerBatch:
         if self._hsr_gripper_batch is None:
-            n_envs = int(getattr(self._solver, "n_envs", 1) or 1)
+            n_envs = max(self._solver_n_envs(), 1)
             self._hsr_gripper_batch = HSRBGripperControllerBatch(self, n_envs=n_envs)
         return self._hsr_gripper_batch
 
@@ -1094,13 +1104,15 @@ class HSRRigidEntity(RigidEntity):
         envs_idx,
         start_time: float | Sequence[float] | None = None,
     ) -> None:
-        if self._solver.n_envs > 0:
+        if self._solver_n_envs() > 0:
             envs_idx = self._scene._sanitize_envs_idx(envs_idx)
         envs_idx_arr = torch.as_tensor(envs_idx, device=gs.device, dtype=gs.tc_int).reshape(-1)
         if envs_idx_arr.numel() == 0:
             return
 
-        self._ensure_base_traj_state(int(envs_idx_arr.max().item() + 1))
+        n_envs_needed = int(envs_idx_arr.max().item() + 1)
+        self._ensure_base_traj_state(n_envs_needed)
+        self._ensure_vec_state(n_envs_needed)
         assert self._hsr_base_traj_ctrls is not None
         assert self._hsr_base_traj_time is not None
 
@@ -1176,7 +1188,7 @@ class HSRRigidEntity(RigidEntity):
         self._hsr_vec_base_active[envs_idx_arr] = True
 
     def reset_base_trajectory_batched(self, *, envs_idx) -> None:
-        if self._solver.n_envs > 0:
+        if self._solver_n_envs() > 0:
             envs_idx = self._scene._sanitize_envs_idx(envs_idx)
         envs_idx_arr = torch.as_tensor(envs_idx, device=gs.device, dtype=gs.tc_int).reshape(-1)
         if envs_idx_arr.numel() == 0:
@@ -1200,7 +1212,7 @@ class HSRRigidEntity(RigidEntity):
         self._hsr_apply_high_friction_links()
         self._hsr_apply_default_gains()
         self._hsr_apply_head_hold()
-        if self._solver.n_envs > 0:
+        if self._solver_n_envs() > 0:
             envs_idx = self._scene._sanitize_envs_idx(envs_idx)
         envs_idx_arr = torch.as_tensor(envs_idx, device=gs.device, dtype=gs.tc_int).reshape(-1)
         if envs_idx_arr.numel() == 0:
@@ -1346,7 +1358,7 @@ class HSRRigidEntity(RigidEntity):
                     dim=-1,
                 )
                 # Explicitly set position and yaw to avoid qpos ordering ambiguity.
-                if self._solver.n_envs == 0:
+                if self._solver_n_envs() == 0:
                     pos_arg = base_pos[0] if base_pos.ndim == 2 else base_pos
                     quat_arg = quat[0] if quat.ndim == 2 else quat
                     self.set_pos(pos_arg, envs_idx=None, zero_velocity=False)
@@ -1377,7 +1389,7 @@ class HSRRigidEntity(RigidEntity):
         envs_idx,
         start_time: float | Sequence[float] | None = None,
     ) -> None:
-        if self._solver.n_envs > 0:
+        if self._solver_n_envs() > 0:
             envs_idx = self._scene._sanitize_envs_idx(envs_idx)
         envs_idx_arr = torch.as_tensor(envs_idx, device=gs.device, dtype=gs.tc_int).reshape(-1)
         if envs_idx_arr.numel() == 0:
@@ -1513,7 +1525,7 @@ class HSRRigidEntity(RigidEntity):
         self._hsr_vec_arm_active[envs_idx_arr] = True
 
     def reset_whole_body_trajectory_batched(self, *, envs_idx) -> None:
-        if self._solver.n_envs > 0:
+        if self._solver_n_envs() > 0:
             envs_idx = self._scene._sanitize_envs_idx(envs_idx)
         envs_idx_arr = torch.as_tensor(envs_idx, device=gs.device, dtype=gs.tc_int).reshape(-1)
         if envs_idx_arr.numel() == 0:
@@ -1545,7 +1557,7 @@ class HSRRigidEntity(RigidEntity):
         self._hsr_apply_high_friction_links()
         self._hsr_apply_default_gains()
         self._hsr_apply_head_hold()
-        if self._solver.n_envs > 0:
+        if self._solver_n_envs() > 0:
             envs_idx = self._scene._sanitize_envs_idx(envs_idx)
         envs_idx_arr = torch.as_tensor(envs_idx, device=gs.device, dtype=gs.tc_int).reshape(-1)
         if envs_idx_arr.numel() == 0:
@@ -1936,7 +1948,7 @@ class HSRRigidEntity(RigidEntity):
         if pos is None and quat is None:
             gs.raise_exception("Either pos or quat must be provided for IK.")
 
-        if self._solver.n_envs > 0:
+        if self._solver_n_envs() > 0:
             envs_idx = self._scene._sanitize_envs_idx(envs_idx)
 
         qs_idx_local = self._ensure_arm_qs_idx()

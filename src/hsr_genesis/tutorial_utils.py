@@ -490,6 +490,7 @@ def _set_arm_trajectory(arm_angles: list[float], duration: float) -> float:
     """Internal: set an arm-only trajectory (no base motion)."""
     from hsr_genesis.hsr_rigid_entity import JointTrajectory
 
+    _maybe_build()
     positions = torch.tensor([arm_angles], device=gs.device, dtype=gs.tc_float)
     arm_traj = JointTrajectory(
         positions=positions,
