@@ -451,6 +451,7 @@ def move_base_goal(x: float, y: float, theta: float, duration: float = 3.0) -> f
     """
     from hsr_genesis.base_controller import Trajectory
 
+    _maybe_build()
     # Cancel any velocity command.
     _state.base_vel_cmd = None
 
@@ -465,6 +466,7 @@ def move_base_goal(x: float, y: float, theta: float, duration: float = 3.0) -> f
 
 def get_base_pos() -> tuple[float, float, float]:
     """Return the current base position as (x, y, yaw_deg)."""
+    _maybe_build()
     pos = _state.hsr.get_pos()
     quat = _state.hsr.get_quat()
     if isinstance(pos, torch.Tensor):
@@ -554,6 +556,7 @@ def move_wholebody_ik(
     from hsr_genesis.hsr_rigid_entity import JointTrajectory
     from hsr_genesis.base_controller import Trajectory
 
+    _maybe_build()
     # Cancel velocity command.
     _state.base_vel_cmd = None
 
@@ -595,6 +598,7 @@ def move_wholebody_ik(
 
 def get_hand_pos() -> tuple[float, float, float]:
     """Return the current end-effector (hand_palm_link) position as (x, y, z)."""
+    _maybe_build()
     pos = _state.end_effector.get_pos()
     if isinstance(pos, torch.Tensor):
         pos = pos.detach().cpu().numpy()
@@ -626,6 +630,7 @@ def forward_kinematics(
         "wrist_flex_link",
         "hand_palm_link",
     ]
+    _maybe_build()
     name_to_local = {link.name: i for i, link in enumerate(_state.hsr.links)}
     link_indices = [name_to_local[n] for n in link_names if n in name_to_local]
 
@@ -685,6 +690,7 @@ def move_hand(v: float) -> None:
     Args:
         v: 0.0 = closed, 1.0 = open.
     """
+    _maybe_build()
     hand_cmd = torch.tensor([[float(v)]], device=gs.device, dtype=gs.tc_float)
     _state.hsr.control_dofs_position(hand_cmd, dofs_idx_local=[_state.motor_idx])
     # Deactivate force-based grasping if it was active.
@@ -697,6 +703,7 @@ def grasp_object(effort: float = 3.0) -> None:
     The grasp remains active during subsequent :func:`run` / :func:`step` calls
     until :func:`move_hand` or :func:`release_object` is called.
     """
+    _maybe_build()
     eff = torch.tensor([effort], device=gs.device, dtype=gs.tc_float)
     active = torch.tensor([True], device=gs.device, dtype=torch.bool)
     _state.gripper.set_apply_force_goal(effort=eff, active_mask=active, envs_idx=[0])
@@ -719,6 +726,7 @@ def move_head_tilt(v: float) -> None:
 
     Negative = look down, positive = look up.
     """
+    _maybe_build()
     head_cmd = torch.tensor([[float(v)]], device=gs.device, dtype=gs.tc_float)
     _state.hsr.control_dofs_position(head_cmd, dofs_idx_local=[_state.head_idx])
 
