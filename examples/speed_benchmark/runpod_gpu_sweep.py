@@ -278,7 +278,7 @@ def run_gpu_benchmark(
         bench_cmd = BENCHMARK_SCRIPT_TEMPLATE.format(
             envs=envs_str, trials=trials, settle_steps=settle_steps,
         )
-        rc, out, err = ssh_run(host, port, key, bench_cmd, timeout=1800)
+        rc, out, err = ssh_run(host, port, key, bench_cmd, timeout=7200)
         print(f"  Remote output (tail):")
         for line in out.split("\n")[-30:]:
             print(f"    {line}")

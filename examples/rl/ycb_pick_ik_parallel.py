@@ -322,6 +322,10 @@ class HSRPickEnv:
             envs_idx=self.envs_all,
             return_error=True,
         )
+        if error.ndim == 1:
+            error = error.unsqueeze(0)
+        if qpos.ndim == 1:
+            qpos = qpos.unsqueeze(0)
         pos_err = error[:, :3].norm(dim=1)
         success = torch.isfinite(pos_err) & (pos_err < 0.02)
         return qpos, success
