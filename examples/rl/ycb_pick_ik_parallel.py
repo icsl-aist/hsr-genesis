@@ -119,6 +119,7 @@ class HSRPickEnv:
         show_viewer: bool = False,
         seed: int = 0,
         disable_visualizer: bool = False,
+        grasp_params: torch.Tensor | None = None,
     ) -> None:
         self.n_envs = int(n_envs)
         self.dt = 0.02
@@ -206,6 +207,10 @@ class HSRPickEnv:
             (self.n_envs,), -1, device=gs.device, dtype=torch.long,
         )
         self.total_steps = torch.zeros(self.n_envs, device=gs.device, dtype=torch.long)
+
+        # Per-env grasp params (n_envs, 4) or None for module defaults.
+        # Columns: [pre_grasp_height, grasp_offset_z, gripper_effort, grasp_hold_steps]
+        self.grasp_params = grasp_params
 
     # ------------------------------------------------------------------
     # Helpers
@@ -440,9 +445,27 @@ class HSRPickEnv:
             print(f"  [debug] obj_pos after settle: {obj_pos.tolist()}")
             print(f"  [debug] obj_init_z: {self.obj_init_z.tolist()}")
 
+        # Resolve per-env grasp params (or fall back to module defaults).
+        gp = self.grasp_params
+        if gp is not None and gp.shape[0] == 1:
+            gp = gp.expand(self.n_envs, -1).clone()
+        if gp is None:
+            pre_grasp_h = PRE_GRASP_HEIGHT
+            grasp_offset_z = GRASP_OFFSET_Z
+            effort = torch.full(
+                (self.n_envs,), GRIPPER_EFFORT,
+                device=gs.device, dtype=gs.tc_float,
+            )
+            grasp_hold_steps = GRASP_HOLD_STEPS
+        else:
+            pre_grasp_h = gp[:, 0]
+            grasp_offset_z = gp[:, 1]
+            effort = gp[:, 2].to(dtype=gs.tc_float)
+            grasp_hold_steps = int(gp[:, 3].max().item())
+
         # --- Phase 1: approach (pre-grasp hover above the object) ---
         pre_grasp = obj_pos.clone()
-        pre_grasp[:, 2] += PRE_GRASP_HEIGHT
+        pre_grasp[:, 2] += pre_grasp_h
         qpos, ik_ok = self._ik(pre_grasp)
         arm, base = self._qpos_to_arm_and_base(qpos)
         if debug:
@@ -457,7 +480,7 @@ class HSRPickEnv:
 
         # --- Phase 2: descend to grasp pose ---
         grasp = obj_pos.clone()
-        grasp[:, 2] += GRASP_OFFSET_Z
+        grasp[:, 2] += grasp_offset_z
         cur_qpos = self.hsr.get_qpos(envs_idx=self.envs_all)
         if cur_qpos.ndim == 1:
             cur_qpos = cur_qpos.unsqueeze(0)
@@ -473,12 +496,11 @@ class HSRPickEnv:
             print(f"  [debug] after descend obj: {self._obj_pos().tolist()}")
 
         # --- Phase 3: close gripper ---
-        effort = torch.full((self.n_envs,), GRIPPER_EFFORT, device=gs.device, dtype=gs.tc_float)
         active = torch.ones(self.n_envs, device=gs.device, dtype=torch.bool)
         self.gripper.set_apply_force_goal(
             effort=effort, active_mask=active, envs_idx=self.envs_all,
         )
-        self._run_gripper_hold(GRASP_HOLD_STEPS)
+        self._run_gripper_hold(grasp_hold_steps)
         if debug:
             print(f"  [debug] after grasp obj: {self._obj_pos().tolist()}")
 
