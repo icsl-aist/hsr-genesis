@@ -79,11 +79,11 @@ GRIPPER_EFFORT = 3.0        # N applied when closing
 LIFT_THRESHOLD = 0.05       # success: object raised this much above start
 
 # Phase durations (seconds).
-APPROACH_DURATION = 4.0
-DESCEND_DURATION = 2.0
-GRASP_HOLD_STEPS = 300      # ~6 s at dt=0.02
-LIFT_DURATION = 2.0
-LIFT_HOLD_STEPS = 100
+APPROACH_DURATION = 3.0
+DESCEND_DURATION = 1.5
+GRASP_HOLD_STEPS = 200      # ~4 s at dt=0.02
+LIFT_DURATION = 1.5
+LIFT_HOLD_STEPS = 50
 
 HAND_QUAT = np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32)  # palm-down
 
@@ -437,7 +437,7 @@ class HSRPickEnv:
         )
 
     def _run_phase(self, duration: float, *, open_hand_first: bool = False) -> None:
-        n_steps = int(duration / self.dt) + 50
+        n_steps = int(duration / self.dt) + 30
         for step in range(n_steps):
             self.hsr.step_whole_body_trajectory_batched(self.dt, envs_idx=self.envs_all)
             if step == 0 and open_hand_first:
@@ -549,7 +549,7 @@ class HSRPickEnv:
         if debug:
             print(f"  [debug] lift IK success: {ik_ok.tolist()}")
         self._set_arm_only(arm, LIFT_DURATION)
-        self._run_gripper_hold(int(LIFT_DURATION / self.dt) + 50)
+        self._run_gripper_hold(int(LIFT_DURATION / self.dt) + 30)
         # Hold a bit more to confirm the lift.
         self._run_gripper_hold(LIFT_HOLD_STEPS)
         # Final success check to catch the last few steps.
