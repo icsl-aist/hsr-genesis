@@ -142,6 +142,7 @@ class HSRPickEnv:
             sim_options=gs.options.SimOptions(dt=self.dt, substeps=4),
             rigid_options=gs.options.RigidOptions(use_gjk_collision=True),
             show_viewer=show_viewer,
+            show_FPS=False,
         )
         scene.add_entity(gs.morphs.Plane())
 
