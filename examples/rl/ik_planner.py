@@ -14,19 +14,19 @@ import torch
 import genesis as gs
 
 
-# Phase durations in steps (900 total at dt=0.02 = 18s)
-# Matches original pipeline timing: approach 4s+50, descend 2s+50, grasp 300, lift 4s+50+100
-APPROACH_STEPS = 250   # 5.0s (4.0s + 50 settle)
-DESCEND_STEPS = 150    # 3.0s (2.0s + 50 settle)
-GRASP_STEPS = 300      # 6.0s (gripper close + hold)
-LIFT_STEPS = 200       # 4.0s (lift motion + settle + success check)
+# Phase durations in steps (640 total at dt=0.02 = 12.8s)
+# Matches optimized CMA-ES pipeline timing: approach 3s+30, descend 1.5s+30, grasp 200, lift 1.5s+30+50
+APPROACH_STEPS = 180   # 3.6s (3.0s + 30 settle)
+DESCEND_STEPS = 105    # 2.1s (1.5s + 30 settle)
+GRASP_STEPS = 200      # 4.0s (gripper close + hold)
+LIFT_STEPS = 155       # 3.1s (lift motion + settle + success check)
 
 # Phase boundaries (start step for each phase)
 APPROACH_START = 0
-DESCEND_START = APPROACH_STEPS      # 250
-GRASP_START = DESCEND_START + DESCEND_STEPS  # 400
-LIFT_START = GRASP_START + GRASP_STEPS       # 700
-MAX_STEPS = LIFT_START + LIFT_STEPS          # 800
+DESCEND_START = APPROACH_STEPS      # 180
+GRASP_START = DESCEND_START + DESCEND_STEPS  # 285
+LIFT_START = GRASP_START + GRASP_STEPS       # 485
+MAX_STEPS = LIFT_START + LIFT_STEPS          # 640
 
 # Fixed grasp params for IK planning (can be overridden by CMA-ES results)
 PRE_GRASP_HEIGHT = 0.15

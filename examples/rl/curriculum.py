@@ -22,12 +22,12 @@ class CurriculumStage:
 # Stage 1: 70% IK + 30% policy
 # Stage 2: 30% IK + 70% policy (terminal)
 STAGES = [
-    CurriculumStage(ik_weight=1.0, policy_weight=0.0, advance_threshold=0.0, consecutive_needed=1, warmup_steps=10_000),
+    CurriculumStage(ik_weight=1.0, policy_weight=0.0, advance_threshold=0.0, consecutive_needed=1, warmup_steps=5_000),
     CurriculumStage(ik_weight=0.7, policy_weight=0.3, advance_threshold=0.50, consecutive_needed=2, warmup_steps=0),
     CurriculumStage(ik_weight=0.3, policy_weight=0.7, advance_threshold=0.0, consecutive_needed=999, warmup_steps=0),
 ]
 
-EVAL_INTERVAL = 10_000  # sim steps between eval rounds
+EVAL_INTERVAL = 5_000  # sim steps between eval rounds
 
 
 class CurriculumManager:

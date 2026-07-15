@@ -86,7 +86,7 @@ def train(
     seed: int = 0,
     output_dir: str = "results/ppo_ik_curriculum",
     learning_rate: float = 3e-4,
-    n_steps: int = 2048,
+    n_steps: int = 1024,
     batch_size: int = 64,
     n_epochs: int = 10,
     gamma: float = 0.99,
@@ -171,7 +171,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output-dir", type=str, default="results/ppo_ik_curriculum")
     parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--n-steps", type=int, default=2048)
+    parser.add_argument("--n-steps", type=int, default=1024)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--n-epochs", type=int, default=10)
     parser.add_argument("--no-ik-guidance", action="store_true",
