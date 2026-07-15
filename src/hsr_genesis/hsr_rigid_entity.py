@@ -422,7 +422,7 @@ class HSRRigidEntity(RigidEntity):
         self._hsr_high_friction_applied = False
         self._hsr_head_hold_applied = False
         self._hsr_debug_log_counter = 0
-        self._hsr_debug_log_every = 120
+        self._hsr_debug_log_every = 0
         self._hsr_head_dofs_idx_local = []
         for name in ("head_pan_joint", "head_tilt_joint"):
             try:
