@@ -21,7 +21,12 @@ OBJECT_NAMES = [
 N_OBJECTS = len(OBJECT_NAMES)
 SOLUTION_LENGTH = N_PARAMS * N_OBJECTS  # 28
 
-# (lower, upper) bounds for each param.
+# (lower, upper) bounds for each param.  ``device="cpu"`` is explicit
+# because ``gs.init(backend=gs.gpu)`` mutates torch's *global* default
+# device to "cuda", and this module is typically imported after that call
+# — without an explicit device, these constants would silently end up on
+# the GPU, breaking CPU-side EvoTorch code that mixes them with CPU
+# tensors (see GraspProblem in the CMA-ES tutorial notebook).
 PARAM_BOUNDS = torch.tensor(
     [
         [0.05, 0.30],   # pre_grasp_height (m)
@@ -30,12 +35,14 @@ PARAM_BOUNDS = torch.tensor(
         [100, 500],     # grasp_hold_steps (int)
     ],
     dtype=torch.float32,
+    device="cpu",
 )
 
 # Default values (current hardcoded constants from ycb_pick_ik_parallel.py).
 PARAM_DEFAULTS = torch.tensor(
     [0.15, 0.02, 3.0, 300],
     dtype=torch.float32,
+    device="cpu",
 )
 
 

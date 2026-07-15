@@ -164,14 +164,17 @@ class HSRPickEnv:
             visualize_contact=False,
         )
 
-        from hsr_genesis.sdf_parser import load_sdf_model
-        model_dir = MODELS_DIR / object_name
-        if not model_dir.exists():
-            raise FileNotFoundError(f"YCB model not found: {model_dir}")
-        obj_urdf = load_sdf_model(model_dir)
-        self.obj = scene.add_entity(
-            gs.morphs.URDF(file=obj_urdf, pos=(0.5, 0.0, OBJ_Z), fixed=False),
+        # Maps env idx -> index into self.objects for the "active" object in
+        # that env.  Single-object envs are all active on object 0; the
+        # multi-object subclass overrides this (inside _build_objects) with
+        # a round-robin split, so this default must be set *before*
+        # _build_objects runs.
+        self.env_object_idx = torch.zeros(
+            self.n_envs, device=gs.device, dtype=torch.long,
         )
+        self.object_names = [object_name]
+        self.objects = self._build_objects(scene, self.object_names)
+        self.obj = self.objects[0]
 
         if disable_visualizer:
             scene._visualizer.build = lambda: None
@@ -220,8 +223,50 @@ class HSRPickEnv:
     def _rand(self, shape) -> torch.Tensor:
         return torch.rand(shape, generator=self.rng, device=gs.device, dtype=gs.tc_float)
 
+    def _build_objects(self, scene, object_names: list[str]) -> list:
+        """Add one URDF entity per name.  Override to customize placement."""
+        from hsr_genesis.sdf_parser import load_sdf_model
+
+        entities = []
+        for name in object_names:
+            model_dir = MODELS_DIR / name
+            if not model_dir.exists():
+                raise FileNotFoundError(f"YCB model not found: {model_dir}")
+            obj_urdf = load_sdf_model(model_dir)
+            entities.append(
+                scene.add_entity(
+                    gs.morphs.URDF(file=obj_urdf, pos=(0.5, 0.0, OBJ_Z), fixed=False),
+                )
+            )
+        return entities
+
     def _obj_pos(self) -> torch.Tensor:
-        return self.obj.get_pos(envs_idx=self.envs_all)
+        if len(self.objects) == 1:
+            return self.obj.get_pos(envs_idx=self.envs_all)
+        # Multi-object scene: gather each env's "active" object position.
+        pos = torch.zeros(self.n_envs, 3, device=gs.device, dtype=gs.tc_float)
+        for k, obj_entity in enumerate(self.objects):
+            mask = self.env_object_idx == k
+            if mask.any():
+                pos[mask] = obj_entity.get_pos(envs_idx=self.envs_all)[mask]
+        return pos
+
+    def _random_object_pose(self):
+        """Sample a random in-reach object pose per env: (pos, quat)."""
+        theta = OBJ_ANG_MIN + (OBJ_ANG_MAX - OBJ_ANG_MIN) * self._rand((self.n_envs,))
+        radius = OBJ_RADIUS_MIN + (OBJ_RADIUS_MAX - OBJ_RADIUS_MIN) * self._rand((self.n_envs,))
+        x = radius * torch.cos(theta)
+        y = radius * torch.sin(theta)
+        z = torch.full((self.n_envs,), OBJ_Z, device=gs.device, dtype=gs.tc_float)
+        pos = torch.stack([x, y, z], dim=-1)
+        yaw = (self._rand((self.n_envs,)) * 2.0 - 1.0) * math.pi
+        half = yaw * 0.5
+        quat = torch.stack(
+            [torch.cos(half), torch.zeros_like(half),
+             torch.zeros_like(half), torch.sin(half)],
+            dim=-1,
+        )
+        return pos, quat
 
     def _settle(self, n_steps: int) -> None:
         """Hold the robot at its current pose while objects settle."""
@@ -277,19 +322,7 @@ class HSRPickEnv:
 
     def reset(self, settle_steps: int = 200) -> None:
         # Random object pose per env, in front of the robot within arm reach.
-        theta = OBJ_ANG_MIN + (OBJ_ANG_MAX - OBJ_ANG_MIN) * self._rand((self.n_envs,))
-        radius = OBJ_RADIUS_MIN + (OBJ_RADIUS_MAX - OBJ_RADIUS_MIN) * self._rand((self.n_envs,))
-        x = radius * torch.cos(theta)
-        y = radius * torch.sin(theta)
-        z = torch.full((self.n_envs,), OBJ_Z, device=gs.device, dtype=gs.tc_float)
-        pos = torch.stack([x, y, z], dim=-1)
-        yaw = (self._rand((self.n_envs,)) * 2.0 - 1.0) * math.pi
-        half = yaw * 0.5
-        quat = torch.stack(
-            [torch.cos(half), torch.zeros_like(half),
-             torch.zeros_like(half), torch.sin(half)],
-            dim=-1,
-        )
+        pos, quat = self._random_object_pose()
         self.obj.set_pos(pos, envs_idx=self.envs_all, zero_velocity=True, relative=False)
         self.obj.set_quat(quat, envs_idx=self.envs_all, zero_velocity=True, relative=False)
 
@@ -544,6 +577,112 @@ class HSRPickEnv:
             "avg_steps_to_success": avg_steps,
             "avg_time_to_success": avg_time,
         }
+
+
+class HSRMultiObjectPickEnv(HSRPickEnv):
+    """Fused-scene variant: spawns every object once and gives each env a
+    single "active" object (round-robin across env indices), parking the
+    other objects far from the robot workspace.  This evaluates all objects
+    in one batched ``run_pick_pipeline()`` call instead of rebuilding a
+    scene and re-running the pipeline once per object.
+    """
+
+    # Grid spacing (meters) between parked objects, chosen to stay well
+    # outside OBJ_RADIUS_MAX (arm reach) and to keep parked objects from
+    # touching each other.
+    _PARK_SPACING = 1.0
+    _PARK_ORIGIN = (3.0, 3.0)
+
+    def __init__(
+        self,
+        *,
+        n_envs: int,
+        object_names: list[str] | None = None,
+        show_viewer: bool = False,
+        seed: int = 0,
+        disable_visualizer: bool = False,
+        grasp_params: torch.Tensor | None = None,
+    ) -> None:
+        names = list(object_names) if object_names else list(YCB_MODELS)
+        self._multi_object_names = names
+        super().__init__(
+            n_envs=n_envs,
+            object_name=names[0],  # unused: _build_objects is overridden
+            show_viewer=show_viewer,
+            seed=seed,
+            disable_visualizer=disable_visualizer,
+            grasp_params=grasp_params,
+        )
+
+    def _build_objects(self, scene, object_names: list[str]) -> list:
+        # Ignore the single-name list from the base __init__ and spawn all
+        # requested objects instead.
+        entities = super()._build_objects(scene, self._multi_object_names)
+
+        n_objects = len(entities)
+        self.env_object_idx = torch.arange(
+            self.n_envs, device=gs.device, dtype=torch.long,
+        ) % n_objects
+        self.object_names = list(self._multi_object_names)
+
+        park_xy = torch.tensor(
+            [
+                [
+                    self._PARK_ORIGIN[0] + self._PARK_SPACING * k,
+                    self._PARK_ORIGIN[1],
+                ]
+                for k in range(n_objects)
+            ],
+            device=gs.device, dtype=gs.tc_float,
+        )
+        park_z = torch.full((n_objects, 1), OBJ_Z, device=gs.device, dtype=gs.tc_float)
+        self.park_pos = torch.cat([park_xy, park_z], dim=-1)  # (n_objects, 3)
+        self.park_quat = torch.tensor(
+            [1.0, 0.0, 0.0, 0.0], device=gs.device, dtype=gs.tc_float,
+        )
+        return entities
+
+    def reset(self, settle_steps: int = 200) -> None:
+        active_pos, active_quat = self._random_object_pose()
+        for k, obj_entity in enumerate(self.objects):
+            mask = self.env_object_idx == k
+            pos_k = self.park_pos[k].unsqueeze(0).expand(self.n_envs, 3).clone()
+            quat_k = self.park_quat.unsqueeze(0).expand(self.n_envs, 4).clone()
+            pos_k[mask] = active_pos[mask]
+            quat_k[mask] = active_quat[mask]
+            obj_entity.set_pos(pos_k, envs_idx=self.envs_all, zero_velocity=True, relative=False)
+            obj_entity.set_quat(quat_k, envs_idx=self.envs_all, zero_velocity=True, relative=False)
+
+        self.steps_to_success[:] = -1
+        self.total_steps[:] = 0
+
+        self._settle(settle_steps)
+        self.obj_init_z = self._obj_pos()[:, 2]
+
+    def get_per_object_summary(self) -> dict:
+        """Break down ``get_eval_summary()`` results by assigned object."""
+        succeeded = self.steps_to_success >= 0
+        summary = {}
+        for k, name in enumerate(self.object_names):
+            mask = self.env_object_idx == k
+            n = int(mask.sum().item())
+            n_succ = int((succeeded & mask).sum().item())
+            if n_succ > 0:
+                steps = self.steps_to_success[mask & succeeded].to(torch.float32)
+                avg_steps = float(steps.mean().item())
+                avg_time = avg_steps * self.dt
+            else:
+                avg_steps = float("nan")
+                avg_time = float("nan")
+            summary[name] = {
+                "success_per_env": succeeded[mask].float(),
+                "success_rate": (n_succ / n) if n > 0 else float("nan"),
+                "n_success": n_succ,
+                "n_envs": n,
+                "avg_steps_to_success": avg_steps,
+                "avg_time_to_success": avg_time,
+            }
+        return summary
 
 
 # ---------------------------------------------------------------------------
