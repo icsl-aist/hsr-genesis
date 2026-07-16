@@ -129,7 +129,7 @@ import sys
 if "google.colab" in sys.modules:
     import urllib.request
     exec(urllib.request.urlopen(
-        "https://raw.githubusercontent.com/icsl-aist/hsr-genesis/main/examples/tutorials/colab_setup.py"
+        "https://raw.githubusercontent.com/icsl-aist/hsr-genesis/main/colab_setup.py"
     ).read(), globals())
     setup_colab()
 
