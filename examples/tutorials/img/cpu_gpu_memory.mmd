@@ -1,0 +1,9 @@
+flowchart LR
+    subgraph CPU["CPU memory (host)"]
+        A["Python vars\nNumPy arrays"]
+    end
+    subgraph GPU["GPU memory (device)"]
+        B["Tensors on gs.device"]
+    end
+    A -- "PCIe bus (~5-10 μs/transfer)" --> B
+    B -- "PCIe bus" --> A

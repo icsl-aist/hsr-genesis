@@ -1,0 +1,14 @@
+digraph ppo_algorithm {
+    rankdir=TB;
+    bgcolor="transparent";
+    node [shape=box, style="rounded,filled", fillcolor="#ECECFF", color="#9370DB", fontname="Helvetica", fontsize=11, margin=0.2, width=5.5];
+    edge [color="#333333", penwidth=1.5, arrowsize=0.8];
+
+    A [label="1. Rollout: collect T steps with current policy π_θ\n(s_t, a_t, r_t, s_{t+1}) for t = 1..T"];
+    B [label="2. Compute GAE advantages Â_t and returns R_t\nÂ_t = δ_t + (γλ)δ_{t+1} + (γλ)²δ_{t+2} + ...\nδ_t = r_t + γV(s_{t+1}) - V(s_t)"];
+    C [label="3. Update policy π_θ for K epochs:\nratio = π_θ(a|s) / π_θ_old(a|s)\nL_clip = E[ min(ratio·Â, clip(ratio, 1±ε)·Â) ]\nL_VF = E[ (V_θ(s) - R_t)² ]   (value loss)\nL_ent = H[π_θ]   (entropy bonus)\nLoss = -L_clip + c₁·L_VF - c₂·L_ent"];
+
+    A -> B;
+    B -> C;
+    C -> A [label="repeat from 1", constraint=false, style=dashed, color="#555555"];
+}

@@ -1,0 +1,7 @@
+flowchart LR
+    O["Observation (32D)"] --> P["PPO MLP"]
+    P --> R["9D residual action (tanh, [-1,1])"]
+    IK["IK Planner"] --> T["phase targets"]
+    R --> S(["sim step"])
+    T --> S
+    S --> O
