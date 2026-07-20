@@ -76,7 +76,6 @@ def _clear_state():
     tu._clear_sim_state()
 
 
-@_gpu_required
 @pytest.fixture
 def _sim():
     """Function-scoped initialized simulation.
@@ -85,6 +84,8 @@ def _sim():
     to call even if a prior test left state populated.  If a ``_clear_state``
     test ran in between, ``init_sim`` will rebuild the scene.
     """
+    if not _check_gpu():
+        pytest.skip("tutorial_utils integration tests require a GPU-capable Taichi backend")
     if not getattr(gs, "_initialized", False):
         gs.init(backend=gs.gpu, precision="32", logging_level="warning")
     tu.init_sim(dt=0.02, cam_res=(160, 120))
@@ -96,7 +97,6 @@ def _sim():
     tu._clear_sim_state()
 
 
-@_gpu_required
 @pytest.fixture
 def _sim_unbuilt():
     """Like ``_sim`` but does NOT build the scene.
@@ -104,6 +104,8 @@ def _sim_unbuilt():
     Used by spawn tests that need to add entities before the first
     ``run()`` / ``step()`` call (Genesis disallows ``add_entity`` after build).
     """
+    if not _check_gpu():
+        pytest.skip("tutorial_utils integration tests require a GPU-capable Taichi backend")
     if not getattr(gs, "_initialized", False):
         gs.init(backend=gs.gpu, precision="32", logging_level="warning")
     tu.init_sim(dt=0.02, cam_res=(160, 120))
