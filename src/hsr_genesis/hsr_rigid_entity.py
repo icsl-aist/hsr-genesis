@@ -421,6 +421,7 @@ class HSRRigidEntity(RigidEntity):
         self._hsr_passive_wheel_friction_applied = False
         self._hsr_high_friction_applied = False
         self._hsr_head_hold_applied = False
+        self._hsr_arm_hold_applied = False
         self._hsr_debug_log_counter = 0
         self._hsr_debug_log_every = 0
         self._hsr_head_dofs_idx_local = []
@@ -935,6 +936,66 @@ class HSRRigidEntity(RigidEntity):
         self.control_dofs_position(head_pos, dofs_idx_local=self._hsr_head_dofs_idx_local, envs_idx=[0])
         self._hsr_head_hold_applied = True
 
+    def _hsr_apply_arm_hold(self) -> None:
+        """Hold the arm (and torso) at its current position when no trajectory is active.
+
+        The arm PD gains are set by ``_hsr_apply_default_gains``, but a
+        position target is only commanded from ``step_whole_body_trajectory_batched``
+        when a trajectory is active.  Before the first trajectory is set
+        (or after ``reset_whole_body_trajectory_batched``), the arm has gains
+        but no target, so it falls under gravity.  This samples the current
+        arm/torso joint positions once and commands them as a persistent
+        position target — the same technique used by ``_hsr_apply_head_hold``
+        for the head joints.
+
+        The arm_lift and torso targets are shifted by the gravity feed-forward
+        (matching the trajectory controller) so the hold doesn't sag.
+        """
+        if self._hsr_arm_hold_applied:
+            return
+        if not self._hsr_arm_dofs_idx_local:
+            self._hsr_arm_hold_applied = True
+            return
+        if self._scene is None or self._scene.sim is None:
+            return
+        arm_pos = self.get_dofs_position(
+            dofs_idx_local=self._hsr_arm_dofs_idx_local, envs_idx=[0],
+        )
+        if isinstance(arm_pos, torch.Tensor) and arm_pos.ndim > 1:
+            arm_pos = arm_pos[0]
+        arm_pos = to_torch(arm_pos).reshape(1, -1).clone()
+
+        # Embed arm_lift gravity feed-forward into the position target so
+        # the PD controller produces PD + FF (see trajectory controller docs).
+        arm_ff_val = self._arm_lift_gravity_compensation_force()
+        arm_pos[:, self._hsr_arm_lift_order_idx] = (
+            arm_pos[:, self._hsr_arm_lift_order_idx] + arm_ff_val / self._hsr_arm_lift_kp
+        )
+        self.control_dofs_position(
+            arm_pos,
+            dofs_idx_local=self._hsr_arm_dofs_idx_local,
+            envs_idx=[0],
+        )
+
+        # Hold the torso at its current position with gravity + arm-reaction FF.
+        torso_idx = self._ensure_torso_dof_idx()
+        if torso_idx is not None:
+            torso_pos = self.get_dofs_position(dofs_idx_local=[torso_idx], envs_idx=[0])
+            if isinstance(torso_pos, torch.Tensor) and torso_pos.ndim > 1:
+                torso_pos = torso_pos[0]
+            torso_pos = to_torch(torso_pos).reshape(-1, 1)
+            torso_ff = (
+                self._torso_lift_gravity_compensation_force()
+                + arm_ff_val  # arm_lift reaction on the torso
+            )
+            torso_pos = torso_pos + torso_ff / self._hsr_torso_kp
+            self.control_dofs_position(
+                torso_pos,
+                dofs_idx_local=[torso_idx],
+                envs_idx=[0],
+            )
+        self._hsr_arm_hold_applied = True
+
     def _ensure_base_traj_state(self, n_envs: int) -> None:
         n_envs = int(n_envs)
         if self._hsr_base_traj_ctrls is None:
@@ -1212,6 +1273,7 @@ class HSRRigidEntity(RigidEntity):
         self._hsr_apply_high_friction_links()
         self._hsr_apply_default_gains()
         self._hsr_apply_head_hold()
+        self._hsr_apply_arm_hold()
         if self._solver_n_envs() > 0:
             envs_idx = self._scene._sanitize_envs_idx(envs_idx)
         envs_idx_arr = torch.as_tensor(envs_idx, device=gs.device, dtype=gs.tc_int).reshape(-1)
@@ -1544,6 +1606,9 @@ class HSRRigidEntity(RigidEntity):
         if self._hsr_vec_arm_active is not None:
             self._hsr_vec_arm_active[envs_idx_arr] = False
             self._hsr_vec_arm_done[envs_idx_arr] = False
+        # Re-enable the arm hold so the arm doesn't fall between the reset
+        # and the next trajectory being commanded.
+        self._hsr_arm_hold_applied = False
         self.reset_base_trajectory_batched(envs_idx=envs_idx_arr.tolist())
 
     def step_whole_body_trajectory_batched(
@@ -1557,6 +1622,7 @@ class HSRRigidEntity(RigidEntity):
         self._hsr_apply_high_friction_links()
         self._hsr_apply_default_gains()
         self._hsr_apply_head_hold()
+        self._hsr_apply_arm_hold()
         if self._solver_n_envs() > 0:
             envs_idx = self._scene._sanitize_envs_idx(envs_idx)
         envs_idx_arr = torch.as_tensor(envs_idx, device=gs.device, dtype=gs.tc_int).reshape(-1)
