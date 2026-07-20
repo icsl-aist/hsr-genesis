@@ -392,8 +392,15 @@ class TestNotebookBootstrapPattern:
         return sorted(nb_dir.glob("*_colab.ipynb"))
 
     def test_first_import_cell_uses_colab_bootstrap(self):
-        """The first code cell that imports ``setup_colab`` must reference
-        ``colab_bootstrap``, not ``tutorial_utils``."""
+        """The first code cell that imports ``setup_colab`` must not import
+        it from ``tutorial_utils`` (which triggers ``import genesis`` at
+        module level and fails on a fresh Colab runtime).
+
+        Accepted patterns:
+        1. ``from hsr_genesis.colab_bootstrap import setup_colab``
+        2. URL-fetch: ``exec(urllib.request.urlopen(...colab_setup.py...).read())``
+           followed by ``setup_colab()``
+        """
         import json
 
         for nb_path in self._colab_notebooks():
@@ -411,12 +418,13 @@ class TestNotebookBootstrapPattern:
                     continue
                 found_import_setup = True
 
-                # Must use colab_bootstrap, not tutorial_utils
+                # Must NOT import setup_colab from tutorial_utils.
                 assert (
                     "colab_bootstrap" in src
+                    or "colab_setup.py" in src
                 ), (
                     f"{nb_path.name}: imports setup_colab from tutorial_utils, "
-                    f"not colab_bootstrap.\n  Got: {src.strip()[:160]}"
+                    f"not colab_bootstrap or colab_setup.py.\n  Got: {src.strip()[:160]}"
                 )
                 break  # only check the first such cell
 
