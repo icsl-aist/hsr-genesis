@@ -25,4 +25,25 @@ package-dir = {"" = "src"}
 where = ["src"]
 include = ["hsr_genesis", "hsr_genesis.*"]
 
+# Pytest config — intentionally overrides the Genesis upstream pyproject.toml
+# (which sets --numprocesses=auto / --dist=worksteal). hsr-genesis tests
+# initialize Genesis on the GPU; running multiple xdist workers on a single
+# GPU corrupts the quadrants kernel-compilation cache lock and makes losing
+# workers fall back to CPU, raising:
+#   QuadrantsCompilationError: qd.block.shared_array is not supported for arch Arch.x64
+# Keep tests serial by default. Opt into parallelism explicitly with
+# `pytest -n auto` when you have multiple GPUs or are running CPU-only tests.
+[tool.pytest.ini_options]
+addopts = [
+    "--color=yes",
+    "--import-mode=importlib",
+    "--durations=0",
+    "--durations-min=100.0",
+]
+filterwarnings = [
+    "ignore::_pytest.warning_types.PytestUnknownMarkWarning",
+    "ignore::DeprecationWarning",
+]
+log_cli_level = "WARNING"
+
 
