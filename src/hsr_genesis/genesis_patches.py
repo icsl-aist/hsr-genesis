@@ -147,6 +147,49 @@ def apply_raycaster_ignore_patch() -> None:
     raycaster_mod._hsr_ignore_patch = True
 
 
+def apply_rasterizer_camera_render_lock_patch() -> None:
+    """Hold the interactive viewer's render_lock across RasterizerCameraSensor renders.
+
+    Genesis 0.4.6 ``RasterizerCameraSensor._render_current_state`` temporarily
+    subtracts ``envs_offset`` from every rigid node's pose (so each env renders
+    at the local origin relative to the camera) and restores the poses after
+    the offscreen render. On Linux the interactive viewer runs in a background
+    thread by default (``run_in_thread=True``), and its ``on_draw`` can fire
+    while the poses are still at the origin — outside the offscreen render's
+    own ``render_lock`` window. This causes the viewer to intermittently draw
+    all robots gathered at the origin, which is reported as flickering in
+    https://github.com/icsl-aist/hsr-genesis/issues/10.
+
+    This patch wraps ``_render_current_state`` so the viewer's ``render_lock``
+    (an ``RLock`` — safe for the nested acquisition performed inside the
+    offscreen render) is held across the entire save -> render -> restore
+    sequence. When there is no interactive viewer (offscreen-only mode) the
+    patch is a no-op.
+    """
+    import genesis as gs
+    from genesis.engine.sensors.camera import RasterizerCameraSensor
+
+    if getattr(RasterizerCameraSensor._render_current_state, "_hsr_render_lock_patch", False):
+        return
+
+    _orig_render_current_state = RasterizerCameraSensor._render_current_state
+
+    def _render_current_state(self):
+        renderer = self._shared_metadata.renderer
+        viewer = getattr(renderer, "_viewer", None)
+        # ``viewer.lock`` is a ViewerLock wrapping the pyrender viewer's
+        # ``render_lock`` (an RLock). Only the interactive viewer needs
+        # serialization; offscreen-only renderers have no viewer and no race.
+        if viewer is None or getattr(viewer, "lock", None) is None:
+            return _orig_render_current_state(self)
+
+        with viewer.lock:
+            return _orig_render_current_state(self)
+
+    _render_current_state._hsr_render_lock_patch = True
+    RasterizerCameraSensor._render_current_state = _render_current_state
+
+
 def apply_runtime_patches() -> None:
     """Apply HSR runtime patches after ``gs.init()``."""
     import genesis as gs
@@ -176,6 +219,7 @@ def apply_runtime_patches() -> None:
     from . import force_torque as _force_torque  # noqa: F401
 
     apply_planar_rrt_patch()
+    apply_rasterizer_camera_render_lock_patch()
 
 
 def apply_planar_rrt_patch() -> None:
