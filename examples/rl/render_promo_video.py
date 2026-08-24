@@ -92,7 +92,7 @@ def render_promo(
     seed: int = 0,
     settle_steps: int = 30,
     max_hold_frames: int = 600,
-    linger_frames: int = 30,
+    linger_frames: int = 15,
 ) -> None:
     """Render the promo video.
 
@@ -166,8 +166,8 @@ def render_promo(
     # override head control targets.
     pick_env = env._pick_env
     hsr = pick_env.hsr
-    head_pan_target = 0.5   # rad — pan toward arm side
-    head_tilt_target = 0.52  # rad — tilt down (joint max is 0.52)
+    head_pan_target = 0.5    # rad — pan toward arm side
+    head_tilt_target = -0.8  # rad — tilt DOWN toward object (negative = down)
     head_dofs = [13, 17]
     head_targets = torch.tensor(
         [head_pan_target, head_tilt_target],
@@ -278,7 +278,7 @@ def main() -> None:
     parser.add_argument("--settle-steps", type=int, default=30)
     parser.add_argument("--max-hold-frames", type=int, default=600,
                         help="Max frames to hold at close-up waiting for grasp success")
-    parser.add_argument("--linger-frames", type=int, default=30,
+    parser.add_argument("--linger-frames", type=int, default=15,
                         help="Frames to linger after success before craning")
     args = parser.parse_args()
 
