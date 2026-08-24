@@ -195,7 +195,7 @@ class HSRPickEnv:
         else:
             self.camera = None
 
-        if disable_visualizer:
+        if disable_visualizer and camera_config is None:
             scene._visualizer.build = lambda: None
         scene.build(n_envs=self.n_envs, env_spacing=(3.0, 3.0))
         self.scene = scene
