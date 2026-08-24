@@ -205,13 +205,20 @@ def render_promo(
     closeup_pos, closeup_lookat = crane_path(0.0, keyframes)
     success_count = 0
 
-    # --- Phase 1: Multiple close-up grasp trials ---
+    # --- Phase 1: Close-up grasp trials ---
+    # All trials except the last use fixed close-up camera.
+    # The last trial starts at close-up and cranes out while the robot
+    # continues grasping — blending into the fleet reveal.
+    crane_start_frame = None  # set when crane begins (last trial)
+
     for trial in range(num_closeup_trials):
         if frames_recorded >= total_frames:
             break
+        is_last_trial = (trial == num_closeup_trials - 1)
         trial_success = False
         print(f"[promo]   Trial {trial+1}/{num_closeup_trials}: "
-              f"fast-forwarding {skip_approach_frames} approach frames...")
+              f"fast-forwarding {skip_approach_frames} approach frames..."
+              f"{' (with crane)' if is_last_trial else ''}")
 
         # Fast-forward through the boring approach/descend phase without recording
         for skip_idx in range(skip_approach_frames):
@@ -222,23 +229,53 @@ def render_promo(
             _set_head_pose()
         print(f"[promo]     Now recording grasp + lift phase...")
 
+        # For the last trial, crane starts here and runs for the remaining frames
+        if is_last_trial:
+            crane_start_frame = frames_recorded
+            crane_total = total_frames - frames_recorded
+            print(f"[promo]     Crane starts now, {crane_total} frames remaining")
+
         for trial_idx in range(max_trial_frames - skip_approach_frames):
             if frames_recorded >= total_frames:
                 break
-            obs, dones, infos = _step_and_render(closeup_pos, closeup_lookat)
+
+            # Last trial: interpolate camera along crane path
+            if is_last_trial and crane_start_frame is not None:
+                t_norm = (frames_recorded - crane_start_frame) / max(crane_total - 1, 1)
+                cam_pos, cam_lookat = crane_path(t_norm, keyframes)
+            else:
+                cam_pos, cam_lookat = closeup_pos, closeup_lookat
+
+            obs, dones, infos = _step_and_render(cam_pos, cam_lookat)
+            # Reset all envs when most are done, so grasps keep going
+            if is_last_trial and dones.sum() > n_envs * 0.5:
+                obs = vec_env.reset()
+                _set_head_pose()
             frames_recorded += 1
 
             if infos[0].get("success", False):
                 trial_success = True
                 success_count += 1
                 print(f"[promo]     env0 success at recorded frame {trial_idx}!")
-                # Brief linger
+                # Brief linger (camera keeps craning if last trial)
                 for linger_idx in range(linger_frames):
                     if frames_recorded >= total_frames:
                         break
-                    obs, dones, infos = _step_and_render(closeup_pos, closeup_lookat)
+                    if is_last_trial and crane_start_frame is not None:
+                        t_norm = (frames_recorded - crane_start_frame) / max(crane_total - 1, 1)
+                        cam_pos, cam_lookat = crane_path(t_norm, keyframes)
+                    else:
+                        cam_pos, cam_lookat = closeup_pos, closeup_lookat
+                    obs, dones, infos = _step_and_render(cam_pos, cam_lookat)
+                    if is_last_trial and dones.sum() > n_envs * 0.5:
+                        obs = vec_env.reset()
+                        _set_head_pose()
                     frames_recorded += 1
-                break
+                if is_last_trial:
+                    # Last trial: keep craning for remaining frames after success
+                    break
+                else:
+                    break
 
             if trial_idx % 60 == 0:
                 elapsed = time.time() - t0
@@ -248,8 +285,8 @@ def render_promo(
         if not trial_success:
             print(f"[promo]     No success in trial {trial+1}")
 
-        # Reset all envs for a new random object position
-        if frames_recorded < total_frames:
+        # Reset all envs for a new random object position (not on last trial)
+        if not is_last_trial and frames_recorded < total_frames:
             obs = vec_env.reset()
             _set_head_pose()
             print(f"[promo]     Reset for next trial (total frames: {frames_recorded})")
@@ -257,14 +294,20 @@ def render_promo(
     print(f"[promo] Phase 1 done: {success_count}/{num_closeup_trials} successes, "
           f"{frames_recorded} frames used")
 
-    # --- Phase 2: Crane from close-up to wide fleet reveal ---
+    # --- Phase 2: Continue crane if not started yet, or fill remaining frames ---
     crane_frames = total_frames - frames_recorded
     if crane_frames < 60:
         crane_frames = 60  # ensure at least 2s of crane
-    print(f"[promo] Phase 2: Craning over {crane_frames} frames")
+    if crane_start_frame is not None:
+        # Crane already ran during last trial; just fill remaining frames
+        print(f"[promo] Phase 2: Continuing crane for {crane_frames} remaining frames")
+    else:
+        print(f"[promo] Phase 2: Craning over {crane_frames} frames")
 
     for frame_idx in range(crane_frames):
-        t_norm = frame_idx / max(crane_frames - 1, 1)
+        t_norm = (frames_recorded - (crane_start_frame or 0)) / max(
+            (total_frames - (crane_start_frame or 0)) - 1, 1)
+        t_norm = min(t_norm, 1.0)
         cam_pos, cam_lookat = crane_path(t_norm, keyframes)
         obs, dones, infos = _step_and_render(cam_pos, cam_lookat)
         # Reset all envs when most are done, so grasps keep going during crane
