@@ -115,11 +115,16 @@ def main() -> None:
 
     use_ik_guidance = not args.no_ik_guidance
     config_path = Path(args.model).with_name("run_config.json")
+    training_time_s = None
     if config_path.exists():
         with open(config_path) as f:
             config = json.load(f)
         use_ik_guidance = bool(config.get("use_ik_guidance", use_ik_guidance))
+        training_time_s = config.get("training_time_s")
         print(f"Loaded run config: use_ik_guidance={use_ik_guidance}")
+        if training_time_s is not None:
+            print(f"Loaded training time: {training_time_s:.1f}s "
+                  f"({training_time_s / 60:.1f} min)")
 
     # Determine objects to eval
     if args.object and args.object != "all":
@@ -142,6 +147,11 @@ def main() -> None:
     overall = float(np.mean(all_rates))
     print(f"{'='*60}")
     print(f"Overall mean success rate: {overall:.2%}")
+    if training_time_s is not None:
+        print(f"Training time: {training_time_s:.1f}s "
+              f"({training_time_s / 60:.1f} min)")
+    else:
+        print("Training time: not recorded in run_config.json")
     for obj_name, rate in zip(objects, all_rates):
         print(f"  {obj_name}: {rate:.2%}")
 

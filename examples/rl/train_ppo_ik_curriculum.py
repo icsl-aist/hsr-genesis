@@ -154,6 +154,7 @@ def train(
             "object_name": object_name,
             "n_envs": n_envs,
             "total_steps": total_steps,
+            "training_time_s": dt,
         }, f, indent=2)
     print(f"[train] Model saved to {model_path}.zip")
     print(f"[train] Curriculum saved to {output_path / 'curriculum_state.json'}")
