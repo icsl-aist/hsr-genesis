@@ -94,13 +94,16 @@ def render_promo(
     max_trial_frames: int = 600,
     linger_frames: int = 15,
     num_closeup_trials: int = 2,
+    skip_approach_frames: int = 350,
 ) -> None:
     """Render the promo video.
 
     The video has two phases:
     1. Close-up: Camera stays tight on env0's single robot. Runs multiple
-       grasp trials — each trial steps until env0 succeeds (or max_trial_frames),
-       lingers briefly, then resets all envs for a new random object position.
+       grasp trials — each trial fast-forwards through the boring approach
+       phase (skip_approach_frames steps without recording), then records
+       the grasp + lift until env0 succeeds. Resets for a new random
+       object position between trials.
     2. Crane: Camera cranes from the close-up to a top-down fleet reveal.
        Grasps continue during the crane with auto-resets on done.
     """
@@ -208,8 +211,18 @@ def render_promo(
             break
         trial_success = False
         print(f"[promo]   Trial {trial+1}/{num_closeup_trials}: "
-              f"stepping until env0 grasp success...")
-        for trial_idx in range(max_trial_frames):
+              f"fast-forwarding {skip_approach_frames} approach frames...")
+
+        # Fast-forward through the boring approach/descend phase without recording
+        for skip_idx in range(skip_approach_frames):
+            action, _ = model.predict(obs, deterministic=True)
+            obs, rewards, dones, infos = vec_env.step(action)
+            if np.all(dones):
+                obs = vec_env.reset()
+            _set_head_pose()
+        print(f"[promo]     Now recording grasp + lift phase...")
+
+        for trial_idx in range(max_trial_frames - skip_approach_frames):
             if frames_recorded >= total_frames:
                 break
             obs, dones, infos = _step_and_render(closeup_pos, closeup_lookat)
@@ -218,7 +231,7 @@ def render_promo(
             if infos[0].get("success", False):
                 trial_success = True
                 success_count += 1
-                print(f"[promo]     env0 success at trial frame {trial_idx}!")
+                print(f"[promo]     env0 success at recorded frame {trial_idx}!")
                 # Brief linger
                 for linger_idx in range(linger_frames):
                     if frames_recorded >= total_frames:
@@ -229,7 +242,7 @@ def render_promo(
 
             if trial_idx % 60 == 0:
                 elapsed = time.time() - t0
-                print(f"    trial {trial+1} frame {trial_idx}/{max_trial_frames} "
+                print(f"    trial {trial+1} recorded frame {trial_idx} "
                       f"({elapsed:.1f}s)")
 
         if not trial_success:
@@ -293,6 +306,8 @@ def main() -> None:
                         help="Frames to linger after success before reset/crane")
     parser.add_argument("--num-closeup-trials", type=int, default=2,
                         help="Number of close-up grasp trials before craning")
+    parser.add_argument("--skip-approach-frames", type=int, default=350,
+                        help="Frames to fast-forward (no recording) per trial")
     args = parser.parse_args()
 
     render_promo(
@@ -307,6 +322,7 @@ def main() -> None:
         max_trial_frames=args.max_hold_frames,
         linger_frames=args.linger_frames,
         num_closeup_trials=args.num_closeup_trials,
+        skip_approach_frames=args.skip_approach_frames,
     )
 
 
