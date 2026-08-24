@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -82,6 +83,49 @@ def _build_crane_keyframes(env0_offset: np.ndarray) -> list[CraneKeyframe]:
     ]
 
 
+def _overlay_text(
+    input_path: str,
+    output_path: str,
+    text: str,
+    font_size: int = 36,
+    fade_in_seconds: float = 1.0,
+) -> None:
+    """Overlay text at bottom-center of video using ffmpeg drawtext.
+
+    Text fades in over fade_in_seconds and stays for the rest of the video.
+    A subtle dark shadow improves readability on bright backgrounds.
+    """
+    font_file = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+    # Escape colons and special chars for ffmpeg drawtext
+    escaped = text.replace(":", "\\:").replace("'", "\\'")
+    drawtext = (
+        f"drawtext="
+        f"fontfile={font_file}:"
+        f"text='{escaped}':"
+        f"fontsize={font_size}:"
+        f"fontcolor=white:"
+        f"borderw=2:bordercolor=black@0.6:"
+        f"x=(w-text_w)/2:"
+        f"y=h-text_h-30:"
+        f"alpha='if(lt(t,{fade_in_seconds}),t/{fade_in_seconds},1)'"
+    )
+    cmd = [
+        "ffmpeg", "-y", "-i", input_path,
+        "-vf", drawtext,
+        "-c:a", "copy",
+        output_path,
+    ]
+    print(f"[promo] Overlaying text: '{text}'")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"[promo] WARNING: ffmpeg overlay failed: {result.stderr[-500:]}")
+        # Fall back to original
+        import shutil
+        shutil.copy(input_path, output_path)
+    else:
+        print(f"[promo] Overlay saved to {output_path}")
+
+
 def render_promo(
     *,
     model_path: str,
@@ -99,6 +143,7 @@ def render_promo(
     descend_steps: int = 45,
     grasp_steps: int = 150,
     obj_radius_range: tuple[float, float] | None = None,
+    overlay_text: str | None = None,
 ) -> None:
     """Render the promo video.
 
@@ -327,6 +372,14 @@ def render_promo(
     elapsed = time.time() - t0
     print(f"[promo] Done in {elapsed:.1f}s. {frames_recorded} frames. Saved to {output}")
 
+    # Overlay text (e.g. repo URL) via ffmpeg post-processing
+    if overlay_text:
+        tmp_path = str(output.parent / (output.stem + "_raw" + output.suffix))
+        import shutil
+        shutil.move(str(output), tmp_path)
+        _overlay_text(tmp_path, str(output), overlay_text)
+        Path(tmp_path).unlink(missing_ok=True)
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Render HSR fleet reveal promo video")
@@ -361,6 +414,8 @@ def main() -> None:
                         help="Min object placement radius (m). Default: 0.32")
     parser.add_argument("--obj-radius-max", type=float, default=None,
                         help="Max object placement radius (m). Default: 0.46")
+    parser.add_argument("--overlay-text", type=str, default=None,
+                        help="Text to overlay at bottom of video (e.g. repo URL)")
     args = parser.parse_args()
 
     obj_radius_range = None
@@ -385,6 +440,7 @@ def main() -> None:
         descend_steps=args.descend_steps,
         grasp_steps=args.grasp_steps,
         obj_radius_range=obj_radius_range,
+        overlay_text=args.overlay_text,
     )
 
 
