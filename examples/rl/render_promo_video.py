@@ -65,9 +65,11 @@ def _build_crane_keyframes(env0_offset: np.ndarray) -> list[CraneKeyframe]:
     start_pos_world = (-44.0, -48.0, 1.2)
     start_lookat_world = (-46.5, -46.5, 0.8)
 
-    # Mid: rising up, moving toward grid center
-    mid_pos_world = (0.0, -5.0, 50.0)
-    mid_lookat_world = (0.0, 0.0, 0.0)
+    # Mid: low-altitude fly-through the fleet at z=2.0, traveling diagonally
+    # from the corner toward grid center. Camera is just above robot height
+    # so individual robot motions are clearly visible as it sweeps past them.
+    mid_pos_world = (0.0, -5.0, 2.0)
+    mid_lookat_world = (5.0, 5.0, 0.5)
 
     # End: top-down at grid center, full fleet visible
     end_pos_world = (0.0, 0.0, 100.0)
