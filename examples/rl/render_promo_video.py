@@ -94,7 +94,7 @@ def render_promo(
     max_trial_frames: int = 600,
     linger_frames: int = 15,
     num_closeup_trials: int = 2,
-    skip_approach_frames: int = 350,
+    skip_approach_frames: int = 150,
 ) -> None:
     """Render the promo video.
 
@@ -264,18 +264,20 @@ def render_promo(
     print(f"[promo] Phase 2: Craning over {crane_frames} frames")
 
     for frame_idx in range(crane_frames):
-        # Auto-reset all envs when all done, so grasps continue during crane
         t_norm = frame_idx / max(crane_frames - 1, 1)
         cam_pos, cam_lookat = crane_path(t_norm, keyframes)
         obs, dones, infos = _step_and_render(cam_pos, cam_lookat)
-        if np.all(dones):
+        # Reset all envs when most are done, so grasps keep going during crane
+        if dones.sum() > n_envs * 0.5:
             obs = vec_env.reset()
             _set_head_pose()
         frames_recorded += 1
 
         if frame_idx % 100 == 0:
             elapsed = time.time() - t0
-            print(f"  crane frame {frame_idx}/{crane_frames} ({elapsed:.1f}s)")
+            n_done = dones.sum()
+            print(f"  crane frame {frame_idx}/{crane_frames} "
+                  f"({elapsed:.1f}s, {n_done} done)")
 
     # Stop recording and save mp4
     camera.stop_recording(save_to_filename=str(output), fps=fps)
@@ -306,7 +308,7 @@ def main() -> None:
                         help="Frames to linger after success before reset/crane")
     parser.add_argument("--num-closeup-trials", type=int, default=2,
                         help="Number of close-up grasp trials before craning")
-    parser.add_argument("--skip-approach-frames", type=int, default=350,
+    parser.add_argument("--skip-approach-frames", type=int, default=150,
                         help="Frames to fast-forward (no recording) per trial")
     args = parser.parse_args()
 
