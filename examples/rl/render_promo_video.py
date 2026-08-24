@@ -1,8 +1,9 @@
 """Render a promotion video: HSR fleet reveal crane shot.
 
 Loads a trained PPO policy, builds a 1024-env scene, and records a
-continuous crane shot from a close-up of 4 robots to a top-down reveal
-of the full 32x32 grid.
+continuous crane shot. The camera starts tight on a single robot,
+holds until it completes a successful grasp, then cranes up to reveal
+the full 32x32 grid of 1024 robots.
 
 Usage:
     # Full render (1024 envs, 30s video)
@@ -49,19 +50,20 @@ def _build_crane_keyframes(env0_offset: np.ndarray) -> list[CraneKeyframe]:
     """Build the crane path keyframes in env0-relative coordinates.
 
     For 1024 envs at 3m spacing, the grid is centered at world origin.
-    env0 is at (-46.5, -46.5, 0). The 2x2 corner (envs 0,1,32,33) is
-    centered at world (-45, -45, 0).
+    env0 is at (-46.5, -46.5, 0). The camera starts tight on env0's
+    single robot, then cranes up to reveal the full grid.
 
     Camera positions are env0-relative: world (wx, wy, wz) -> relative
     (wx - env0_offset[0], wy - env0_offset[1], wz).
     """
     offset_x, offset_y = env0_offset[0], env0_offset[1]
 
-    # Start: low heroic close-up of the 2x2 corner
-    start_pos_world = (-43.0, -49.0, 2.5)
-    start_lookat_world = (-45.0, -45.0, 0.5)
+    # Start: tight close-up on single robot (env0) at world (-46.5, -46.5).
+    # Camera ~2.5m away, chest height, looking at the arm/grasp area.
+    start_pos_world = (-44.0, -48.0, 1.2)
+    start_lookat_world = (-46.5, -46.5, 0.8)
 
-    # Mid: approaching grid center, rising
+    # Mid: rising up, moving toward grid center
     mid_pos_world = (0.0, -5.0, 50.0)
     mid_lookat_world = (0.0, 0.0, 0.0)
 
@@ -89,8 +91,18 @@ def render_promo(
     object_name: str = "ycb_013_apple",
     seed: int = 0,
     settle_steps: int = 30,
+    max_hold_frames: int = 600,
+    linger_frames: int = 30,
 ) -> None:
-    """Render the promo video."""
+    """Render the promo video.
+
+    The video has two phases:
+    1. Hold: Camera stays tight on env0's single robot until it completes
+       a successful grasp (or max_hold_frames elapsed). After success,
+       linger for linger_frames to let the viewer appreciate it.
+    2. Crane: Camera cranes from the close-up to a top-down fleet reveal.
+       Duration = total_frames - hold_frames_used.
+    """
     _ensure_genesis_initialized()
 
     # Load curriculum at final stage (stage 2, policy_weight=0.7)
@@ -151,34 +163,77 @@ def render_promo(
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     camera.start_recording()
-    print(f"[promo] Recording {total_frames} frames at {fps} fps...")
+    print(f"[promo] Recording (max {total_frames} frames at {fps} fps)...")
 
     t0 = time.time()
-    for frame_idx in range(total_frames):
-        # Step the policy
+    frames_recorded = 0
+
+    # --- Phase 1: Hold at close-up until env0 grasp success ---
+    closeup_pos, closeup_lookat = crane_path(0.0, keyframes)
+    success_detected = False
+
+    print(f"[promo] Phase 1: Holding at close-up, waiting for env0 grasp success...")
+    for hold_idx in range(max_hold_frames):
         action, _ = model.predict(obs, deterministic=True)
         obs, rewards, dones, infos = vec_env.step(action)
+        if np.all(dones):
+            obs = vec_env.reset()
 
-        # Reset if all envs are done
+        # Keep camera fixed at close-up
+        camera.set_pose(pos=closeup_pos.tolist(), lookat=closeup_lookat.tolist())
+        camera.render()
+        frames_recorded += 1
+
+        # Check if env0 achieved success
+        if infos[0].get("success", False):
+            success_detected = True
+            print(f"[promo]   env0 grasp success at frame {hold_idx}!")
+            # Linger to let viewer appreciate the successful grasp
+            for linger_idx in range(linger_frames):
+                action, _ = model.predict(obs, deterministic=True)
+                obs, rewards, dones, infos = vec_env.step(action)
+                if np.all(dones):
+                    obs = vec_env.reset()
+                camera.set_pose(pos=closeup_pos.tolist(), lookat=closeup_lookat.tolist())
+                camera.render()
+                frames_recorded += 1
+            break
+
+        if hold_idx % 60 == 0:
+            elapsed = time.time() - t0
+            print(f"  hold frame {hold_idx}/{max_hold_frames} ({elapsed:.1f}s)")
+
+    if not success_detected:
+        print(f"[promo]  No success in {max_hold_frames} frames, starting crane anyway")
+
+    # --- Phase 2: Crane from close-up to wide fleet reveal ---
+    crane_frames = total_frames - frames_recorded
+    if crane_frames < 60:
+        crane_frames = 60  # ensure at least 2s of crane
+    print(f"[promo] Phase 2: Craning over {crane_frames} frames "
+          f"(success={success_detected}, total recorded so far={frames_recorded})")
+
+    for frame_idx in range(crane_frames):
+        action, _ = model.predict(obs, deterministic=True)
+        obs, rewards, dones, infos = vec_env.step(action)
         if np.all(dones):
             obs = vec_env.reset()
 
         # Interpolate camera pose along crane path with smoothstep easing
-        t_norm = frame_idx / max(total_frames - 1, 1)
+        t_norm = frame_idx / max(crane_frames - 1, 1)
         pos, lookat = crane_path(t_norm, keyframes)
         camera.set_pose(pos=pos.tolist(), lookat=lookat.tolist())
-
-        # Render to capture the frame for recording
         camera.render()
+        frames_recorded += 1
 
         if frame_idx % 100 == 0:
             elapsed = time.time() - t0
-            print(f"  frame {frame_idx}/{total_frames} ({elapsed:.1f}s)")
+            print(f"  crane frame {frame_idx}/{crane_frames} ({elapsed:.1f}s)")
 
     # Stop recording and save mp4
     camera.stop_recording(save_to_filename=str(output), fps=fps)
     elapsed = time.time() - t0
-    print(f"[promo] Done in {elapsed:.1f}s. Saved to {output}")
+    print(f"[promo] Done in {elapsed:.1f}s. {frames_recorded} frames. Saved to {output}")
 
 
 def main() -> None:
@@ -198,6 +253,10 @@ def main() -> None:
                         help="YCB object name")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--settle-steps", type=int, default=30)
+    parser.add_argument("--max-hold-frames", type=int, default=600,
+                        help="Max frames to hold at close-up waiting for grasp success")
+    parser.add_argument("--linger-frames", type=int, default=30,
+                        help="Frames to linger after success before craning")
     args = parser.parse_args()
 
     render_promo(
@@ -209,6 +268,8 @@ def main() -> None:
         object_name=args.object,
         seed=args.seed,
         settle_steps=args.settle_steps,
+        max_hold_frames=args.max_hold_frames,
+        linger_frames=args.linger_frames,
     )
 
 
