@@ -70,3 +70,34 @@ def test_env_without_camera_has_none():
     del env.scene
     import gc
     gc.collect()
+
+
+@pytest.mark.usefixtures("_genesis_initialized")
+def test_rl_env_with_camera_and_vis_overrides():
+    """HSRPickRLEnv forwards vis_options_overrides and camera_config to HSRPickEnv."""
+    from hsr_pick_rl_env import HSRPickRLEnv
+
+    env = HSRPickRLEnv(
+        n_envs=4,
+        object_name="ycb_013_apple",
+        seed=0,
+        settle_steps=10,
+        use_ik_guidance=True,
+        vis_options_overrides={
+            "env_separate_rigid": False,
+        },
+        camera_config={
+            "res": (640, 480),
+            "pos": (2, -2, 1.5),
+            "lookat": (0, 0, 0.5),
+            "fov": 60,
+            "far": 200.0,
+        },
+    )
+    assert env.camera is not None, "HSRPickRLEnv.camera should be set when camera_config provided"
+    assert env.camera.res == (640, 480)
+    assert env._pick_env.scene.vis_options.env_separate_rigid is False
+
+    del env._pick_env.scene
+    import gc
+    gc.collect()

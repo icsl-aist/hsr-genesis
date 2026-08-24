@@ -72,6 +72,8 @@ class HSRPickRLEnv(gym.Env):
         settle_steps: int = 30,
         curriculum: CurriculumManager | None = None,
         use_ik_guidance: bool = True,
+        vis_options_overrides: dict | None = None,
+        camera_config: dict | None = None,
     ) -> None:
         super().__init__()
         self.n_envs = n_envs
@@ -86,6 +88,8 @@ class HSRPickRLEnv(gym.Env):
             show_viewer=False,
             seed=seed,
             disable_visualizer=True,
+            vis_options_overrides=vis_options_overrides,
+            camera_config=camera_config,
         )
         self.dt = self._pick_env.dt
         self.envs_all = self._pick_env.envs_all
@@ -119,6 +123,11 @@ class HSRPickRLEnv(gym.Env):
             self._obs_buf = torch.zeros(
                 n_envs, OBS_DIM, device="cpu", dtype=gs.tc_float, pin_memory=True,
             )
+
+    @property
+    def camera(self):
+        """The offscreen camera, or None if no camera_config was provided."""
+        return self._pick_env.camera
 
     def _yaw_from_quat(self, quat: torch.Tensor) -> torch.Tensor:
         w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
