@@ -120,10 +120,22 @@ class HSRPickEnv:
         seed: int = 0,
         disable_visualizer: bool = False,
         grasp_params: torch.Tensor | None = None,
+        vis_options_overrides: dict | None = None,
+        camera_config: dict | None = None,
     ) -> None:
         self.n_envs = int(n_envs)
         self.dt = 0.02
         self.rng = torch.Generator(device=gs.device).manual_seed(int(seed))
+
+        vis_options_kwargs = dict(
+            show_world_frame=True,
+            world_frame_size=1.0,
+            show_link_frame=False,
+            plane_reflection=True,
+            ambient_light=(0.3, 0.3, 0.3),
+        )
+        if vis_options_overrides:
+            vis_options_kwargs.update(vis_options_overrides)
 
         scene = gs.Scene(
             viewer_options=gs.options.ViewerOptions(
@@ -132,13 +144,7 @@ class HSRPickEnv:
                 camera_fov=30,
                 max_FPS=60,
             ),
-            vis_options=gs.options.VisOptions(
-                show_world_frame=True,
-                world_frame_size=1.0,
-                show_link_frame=False,
-                plane_reflection=True,
-                ambient_light=(0.3, 0.3, 0.3),
-            ),
+            vis_options=gs.options.VisOptions(**vis_options_kwargs),
             sim_options=gs.options.SimOptions(dt=self.dt, substeps=4),
             rigid_options=gs.options.RigidOptions(use_gjk_collision=True),
             show_viewer=show_viewer,
@@ -175,6 +181,19 @@ class HSRPickEnv:
         self.object_names = [object_name]
         self.objects = self._build_objects(scene, self.object_names)
         self.obj = self.objects[0]
+
+        # Optional camera for offscreen rendering (must be added before build).
+        if camera_config is not None:
+            self.camera = scene.add_camera(
+                res=camera_config.get("res", (1920, 1080)),
+                pos=camera_config.get("pos", (2, -2, 1.5)),
+                lookat=camera_config.get("lookat", (0, 0, 0.5)),
+                fov=camera_config.get("fov", 60),
+                GUI=False,
+                far=camera_config.get("far", 200.0),
+            )
+        else:
+            self.camera = None
 
         if disable_visualizer:
             scene._visualizer.build = lambda: None
