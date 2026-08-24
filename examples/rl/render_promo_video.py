@@ -91,17 +91,18 @@ def render_promo(
     object_name: str = "ycb_013_apple",
     seed: int = 0,
     settle_steps: int = 30,
-    max_hold_frames: int = 600,
+    max_trial_frames: int = 600,
     linger_frames: int = 15,
+    num_closeup_trials: int = 2,
 ) -> None:
     """Render the promo video.
 
     The video has two phases:
-    1. Hold: Camera stays tight on env0's single robot until it completes
-       a successful grasp (or max_hold_frames elapsed). After success,
-       linger for linger_frames to let the viewer appreciate it.
+    1. Close-up: Camera stays tight on env0's single robot. Runs multiple
+       grasp trials — each trial steps until env0 succeeds (or max_trial_frames),
+       lingers briefly, then resets all envs for a new random object position.
     2. Crane: Camera cranes from the close-up to a top-down fleet reveal.
-       Duration = total_frames - hold_frames_used.
+       Grasps continue during the crane with auto-resets on done.
     """
     _ensure_genesis_initialized()
 
@@ -179,74 +180,84 @@ def render_promo(
             head_targets, dofs_idx_local=head_dofs, envs_idx=pick_env.envs_all,
         )
 
+    def _step_and_render(cam_pos, cam_lookat):
+        """Step policy, set head, set camera, render. Returns updated obs."""
+        nonlocal obs
+        action, _ = model.predict(obs, deterministic=True)
+        obs, rewards, dones, infos = vec_env.step(action)
+        _set_head_pose()
+        camera.set_pose(pos=cam_pos.tolist(), lookat=cam_lookat.tolist())
+        camera.render()
+        return obs, dones, infos
+
     # Start recording
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     camera.start_recording()
     print(f"[promo] Recording (max {total_frames} frames at {fps} fps)...")
+    print(f"[promo] Phase 1: {num_closeup_trials} close-up grasp trials with random resets")
 
     t0 = time.time()
     frames_recorded = 0
-
-    # --- Phase 1: Hold at close-up until env0 grasp success ---
     closeup_pos, closeup_lookat = crane_path(0.0, keyframes)
-    success_detected = False
+    success_count = 0
 
-    print(f"[promo] Phase 1: Holding at close-up, waiting for env0 grasp success...")
-    for hold_idx in range(max_hold_frames):
-        action, _ = model.predict(obs, deterministic=True)
-        obs, rewards, dones, infos = vec_env.step(action)
-        if np.all(dones):
-            obs = vec_env.reset()
-        _set_head_pose()
-
-        # Keep camera fixed at close-up
-        camera.set_pose(pos=closeup_pos.tolist(), lookat=closeup_lookat.tolist())
-        camera.render()
-        frames_recorded += 1
-
-        # Check if env0 achieved success
-        if infos[0].get("success", False):
-            success_detected = True
-            print(f"[promo]   env0 grasp success at frame {hold_idx}!")
-            # Linger to let viewer appreciate the successful grasp
-            for linger_idx in range(linger_frames):
-                action, _ = model.predict(obs, deterministic=True)
-                obs, rewards, dones, infos = vec_env.step(action)
-                if np.all(dones):
-                    obs = vec_env.reset()
-                _set_head_pose()
-                camera.set_pose(pos=closeup_pos.tolist(), lookat=closeup_lookat.tolist())
-                camera.render()
-                frames_recorded += 1
+    # --- Phase 1: Multiple close-up grasp trials ---
+    for trial in range(num_closeup_trials):
+        if frames_recorded >= total_frames:
             break
+        trial_success = False
+        print(f"[promo]   Trial {trial+1}/{num_closeup_trials}: "
+              f"stepping until env0 grasp success...")
+        for trial_idx in range(max_trial_frames):
+            if frames_recorded >= total_frames:
+                break
+            obs, dones, infos = _step_and_render(closeup_pos, closeup_lookat)
+            frames_recorded += 1
 
-        if hold_idx % 60 == 0:
-            elapsed = time.time() - t0
-            print(f"  hold frame {hold_idx}/{max_hold_frames} ({elapsed:.1f}s)")
+            if infos[0].get("success", False):
+                trial_success = True
+                success_count += 1
+                print(f"[promo]     env0 success at trial frame {trial_idx}!")
+                # Brief linger
+                for linger_idx in range(linger_frames):
+                    if frames_recorded >= total_frames:
+                        break
+                    obs, dones, infos = _step_and_render(closeup_pos, closeup_lookat)
+                    frames_recorded += 1
+                break
 
-    if not success_detected:
-        print(f"[promo]  No success in {max_hold_frames} frames, starting crane anyway")
+            if trial_idx % 60 == 0:
+                elapsed = time.time() - t0
+                print(f"    trial {trial+1} frame {trial_idx}/{max_trial_frames} "
+                      f"({elapsed:.1f}s)")
+
+        if not trial_success:
+            print(f"[promo]     No success in trial {trial+1}")
+
+        # Reset all envs for a new random object position
+        if frames_recorded < total_frames:
+            obs = vec_env.reset()
+            _set_head_pose()
+            print(f"[promo]     Reset for next trial (total frames: {frames_recorded})")
+
+    print(f"[promo] Phase 1 done: {success_count}/{num_closeup_trials} successes, "
+          f"{frames_recorded} frames used")
 
     # --- Phase 2: Crane from close-up to wide fleet reveal ---
     crane_frames = total_frames - frames_recorded
     if crane_frames < 60:
         crane_frames = 60  # ensure at least 2s of crane
-    print(f"[promo] Phase 2: Craning over {crane_frames} frames "
-          f"(success={success_detected}, total recorded so far={frames_recorded})")
+    print(f"[promo] Phase 2: Craning over {crane_frames} frames")
 
     for frame_idx in range(crane_frames):
-        action, _ = model.predict(obs, deterministic=True)
-        obs, rewards, dones, infos = vec_env.step(action)
+        # Auto-reset all envs when all done, so grasps continue during crane
+        t_norm = frame_idx / max(crane_frames - 1, 1)
+        cam_pos, cam_lookat = crane_path(t_norm, keyframes)
+        obs, dones, infos = _step_and_render(cam_pos, cam_lookat)
         if np.all(dones):
             obs = vec_env.reset()
-        _set_head_pose()
-
-        # Interpolate camera pose along crane path with smoothstep easing
-        t_norm = frame_idx / max(crane_frames - 1, 1)
-        pos, lookat = crane_path(t_norm, keyframes)
-        camera.set_pose(pos=pos.tolist(), lookat=lookat.tolist())
-        camera.render()
+            _set_head_pose()
         frames_recorded += 1
 
         if frame_idx % 100 == 0:
@@ -277,9 +288,11 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--settle-steps", type=int, default=30)
     parser.add_argument("--max-hold-frames", type=int, default=600,
-                        help="Max frames to hold at close-up waiting for grasp success")
+                        help="Max frames per close-up trial waiting for grasp success")
     parser.add_argument("--linger-frames", type=int, default=15,
-                        help="Frames to linger after success before craning")
+                        help="Frames to linger after success before reset/crane")
+    parser.add_argument("--num-closeup-trials", type=int, default=2,
+                        help="Number of close-up grasp trials before craning")
     args = parser.parse_args()
 
     render_promo(
@@ -291,8 +304,9 @@ def main() -> None:
         object_name=args.object,
         seed=args.seed,
         settle_steps=args.settle_steps,
-        max_hold_frames=args.max_hold_frames,
+        max_trial_frames=args.max_hold_frames,
         linger_frames=args.linger_frames,
+        num_closeup_trials=args.num_closeup_trials,
     )
 
 
