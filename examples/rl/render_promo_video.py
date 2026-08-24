@@ -294,9 +294,9 @@ def render_promo(
                 cam_pos, cam_lookat = closeup_pos, closeup_lookat
 
             obs, dones, infos = _step_and_render(cam_pos, cam_lookat)
-            # Reset all envs when most are done, so grasps keep going
+            # Retarget all envs when most are done (new object position, robot stays)
             if is_last_trial and dones.sum() > n_envs * 0.5:
-                obs = vec_env.reset()
+                obs = env.retarget()
                 _set_head_pose()
             frames_recorded += 1
 
@@ -315,7 +315,7 @@ def render_promo(
                         cam_pos, cam_lookat = closeup_pos, closeup_lookat
                     obs, dones, infos = _step_and_render(cam_pos, cam_lookat)
                     if is_last_trial and dones.sum() > n_envs * 0.5:
-                        obs = vec_env.reset()
+                        obs = env.retarget()
                         _set_head_pose()
                     frames_recorded += 1
                 if is_last_trial:
@@ -330,11 +330,11 @@ def render_promo(
         if not trial_success:
             print(f"[promo]     No success in trial {trial+1}")
 
-        # Reset all envs for a new random object position (not on last trial)
+        # Retarget for a new random object position (robot stays in place)
         if not is_last_trial and frames_recorded < total_frames:
-            obs = vec_env.reset()
+            obs = env.retarget()
             _set_head_pose()
-            print(f"[promo]     Reset for next trial (total frames: {frames_recorded})")
+            print(f"[promo]     Retarget for next trial (total frames: {frames_recorded})")
 
     print(f"[promo] Phase 1 done: {success_count}/{num_closeup_trials} successes, "
           f"{frames_recorded} frames used")
@@ -355,9 +355,9 @@ def render_promo(
         t_norm = min(t_norm, 1.0)
         cam_pos, cam_lookat = crane_path(t_norm, keyframes)
         obs, dones, infos = _step_and_render(cam_pos, cam_lookat)
-        # Reset all envs when most are done, so grasps keep going during crane
+        # Retarget all envs when most are done (new object, robot stays)
         if dones.sum() > n_envs * 0.5:
-            obs = vec_env.reset()
+            obs = env.retarget()
             _set_head_pose()
         frames_recorded += 1
 

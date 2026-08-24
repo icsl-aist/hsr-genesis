@@ -134,11 +134,14 @@ class IKPlanner:
         self.object_name = object_name
         self.params = get_object_params(object_name)
 
-    def plan(self, env) -> IKPlan:
+    def plan(self, env, *, init_qpos: torch.Tensor | None = None) -> IKPlan:
         """Compute IK targets for approach, descend, and lift phases.
 
         Args:
             env: HSRPickEnv instance with objects already settled.
+            init_qpos: Optional initial configuration for the approach IK.
+                When provided (e.g. from retarget), the IK solver starts
+                from the robot's current pose instead of the default.
 
         Returns:
             IKPlan with per-env targets for all phases.
@@ -148,7 +151,7 @@ class IKPlanner:
         # Phase 1: approach — hover above object
         pre_grasp = obj_pos.clone()
         pre_grasp[:, 2] += self.params["pre_grasp_height"]
-        qpos_approach, ok_approach = env._ik(pre_grasp)
+        qpos_approach, ok_approach = env._ik(pre_grasp, init_qpos=init_qpos)
         approach_arm, approach_base = env._qpos_to_arm_and_base(qpos_approach)
 
         # Phase 2: descend — go to grasp pose (base held)

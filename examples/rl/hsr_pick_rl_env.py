@@ -261,6 +261,65 @@ class HSRPickRLEnv(gym.Env):
         info = {"ik_success": ik_success}
         return obs, info
 
+    def retarget(self, settle_steps: int | None = None) -> np.ndarray:
+        """Move object to a new random position without resetting the robot.
+
+        Opens the gripper (drops current object), places the object at a new
+        random pose relative to the robot's *current* base position, settles
+        briefly while holding the robot at its current pose, then recomputes
+        the IK plan and resets the episode state.
+        The robot keeps its current base/arm position — it will drive to the
+        new target continuously.
+
+        Returns the new observation.
+        """
+        env = self._pick_env
+        if settle_steps is None:
+            settle_steps = self.settle_steps
+
+        # Open gripper to release the current object
+        env.hsr.control_dofs_position(
+            env.hand_open, dofs_idx_local=[env.motor_idx],
+            envs_idx=self.envs_all,
+        )
+
+        # Place object at new random position, offset by robot's current base xy
+        # so the object is always in front of the robot regardless of where it drove
+        base_pos = env.hsr.get_pos(envs_idx=env.envs_all)  # (n_envs, 3)
+        pos, quat = env._random_object_pose()
+        pos[:, 0] += base_pos[:, 0]
+        pos[:, 1] += base_pos[:, 1]
+        env.obj.set_pos(pos, envs_idx=env.envs_all, zero_velocity=True, relative=False)
+        env.obj.set_quat(quat, envs_idx=env.envs_all, zero_velocity=True, relative=False)
+
+        # Settle object while holding robot at current pose
+        env._settle(settle_steps)
+        env.obj_init_z = env._obj_pos()[:, 2]
+
+        # Recompute IK plan for the new object position, starting from current pose
+        if self.use_ik_guidance:
+            assert self._planner is not None
+            cur_qpos = env.hsr.get_qpos(envs_idx=env.envs_all)
+            if cur_qpos.ndim == 1:
+                cur_qpos = cur_qpos.unsqueeze(0)
+            self._plan = self._planner.plan(env, init_qpos=cur_qpos)
+
+        # Reset episode state (but keep robot pose)
+        self._step = 0
+        self._prev_action = torch.zeros(self.n_envs, ACTION_DIM, device=gs.device, dtype=gs.tc_float)
+        self._success = torch.zeros(self.n_envs, device=gs.device, dtype=torch.bool)
+        self._success_reward_given = torch.zeros(self.n_envs, device=gs.device, dtype=torch.bool)
+
+        # Set approach trajectory for the new target
+        self._set_phase_trajectory(0)
+        env.hsr.control_dofs_position(
+            env.hand_open, dofs_idx_local=[env.motor_idx],
+            envs_idx=self.envs_all,
+        )
+
+        obs = self.get_obs()
+        return obs
+
     def _set_phase_trajectory(self, phase: int):
         """Set the whole-body trajectory for the current phase, using IK targets."""
         if not self.use_ik_guidance or self._plan is None:
