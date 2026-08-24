@@ -89,6 +89,47 @@ class IKPlan:
 class IKPlanner:
     """Plans IK targets for all 4 phases of the pick pipeline."""
 
+    # Configurable phase durations (steps). Override via configure_phase_steps()
+    # before creating episodes. Defaults match the module-level constants.
+    approach_steps: int = APPROACH_STEPS
+    descend_steps: int = DESCEND_STEPS
+    grasp_steps: int = GRASP_STEPS
+    lift_steps: int = LIFT_STEPS
+
+    @classmethod
+    def configure_phase_steps(
+        cls,
+        approach: int | None = None,
+        descend: int | None = None,
+        grasp: int | None = None,
+        lift: int | None = None,
+    ) -> None:
+        """Override phase durations (in simulation steps)."""
+        if approach is not None:
+            cls.approach_steps = approach
+        if descend is not None:
+            cls.descend_steps = descend
+        if grasp is not None:
+            cls.grasp_steps = grasp
+        if lift is not None:
+            cls.lift_steps = lift
+
+    @classmethod
+    def descend_start(cls) -> int:
+        return cls.approach_steps
+
+    @classmethod
+    def grasp_start(cls) -> int:
+        return cls.approach_steps + cls.descend_steps
+
+    @classmethod
+    def lift_start(cls) -> int:
+        return cls.approach_steps + cls.descend_steps + cls.grasp_steps
+
+    @classmethod
+    def max_steps(cls) -> int:
+        return cls.approach_steps + cls.descend_steps + cls.grasp_steps + cls.lift_steps
+
     def __init__(self, object_name: str = "ycb_061_foam_brick") -> None:
         self.object_name = object_name
         self.params = get_object_params(object_name)
@@ -153,11 +194,11 @@ class IKPlanner:
     @staticmethod
     def get_phase(step: int) -> int:
         """Return phase index (0=approach, 1=descend, 2=grasp, 3=lift) for a given step."""
-        if step < DESCEND_START:
+        if step < IKPlanner.descend_start():
             return 0  # approach
-        elif step < GRASP_START:
+        elif step < IKPlanner.grasp_start():
             return 1  # descend
-        elif step < LIFT_START:
+        elif step < IKPlanner.lift_start():
             return 2  # grasp
         else:
             return 3  # lift

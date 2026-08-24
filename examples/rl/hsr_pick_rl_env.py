@@ -26,7 +26,7 @@ from gymnasium import spaces
 from stable_baselines3.common.vec_env.base_vec_env import VecEnv, VecEnvObs, VecEnvStepReturn
 
 from ycb_pick_ik_parallel import HSRPickEnv, GRIPPER_EFFORT, HAND_QUAT, LIFT_THRESHOLD
-from ik_planner import IKPlanner, IKPlan, MAX_STEPS, APPROACH_START, DESCEND_START, GRASP_START, LIFT_START
+from ik_planner import IKPlanner, IKPlan
 from curriculum import CurriculumManager
 
 # Observation dimensions
@@ -197,7 +197,7 @@ class HSRPickRLEnv(gym.Env):
                         device=gs.device, dtype=gs.tc_float)
 
         # Step progress
-        progress = torch.full((self.n_envs,), self._step / MAX_STEPS,
+        progress = torch.full((self.n_envs,), self._step / IKPlanner.max_steps(),
                               device=gs.device, dtype=gs.tc_float)
 
         # Phase one-hot
@@ -275,13 +275,13 @@ class HSRPickRLEnv(gym.Env):
 
         # Phase duration
         if phase == 0:
-            duration = (DESCEND_START - APPROACH_START) * self.dt
+            duration = IKPlanner.approach_steps * self.dt
         elif phase == 1:
-            duration = (GRASP_START - DESCEND_START) * self.dt
+            duration = IKPlanner.descend_steps * self.dt
         elif phase == 2:
-            duration = (LIFT_START - GRASP_START) * self.dt
+            duration = IKPlanner.grasp_steps * self.dt
         else:
-            duration = (MAX_STEPS - LIFT_START) * self.dt
+            duration = IKPlanner.lift_steps * self.dt
 
         t = torch.tensor([duration], device=gs.device, dtype=gs.tc_float)
         # API-bound: set_whole_body_trajectory_batched expects list[JointTrajectory] per env.
@@ -484,7 +484,7 @@ class HSRPickRLEnv(gym.Env):
 
         # Episode termination
         terminated = self._success.clone()  # terminate on success
-        truncated = torch.full((self.n_envs,), self._step >= MAX_STEPS,
+        truncated = torch.full((self.n_envs,), self._step >= IKPlanner.max_steps(),
                                device=gs.device, dtype=torch.bool)
 
         obs = self.get_obs()

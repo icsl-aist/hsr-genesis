@@ -34,6 +34,7 @@ from stable_baselines3 import PPO
 from hsr_pick_rl_env import HSRPickRLEnv, BatchedGenesisVecEnv
 from curriculum import CurriculumManager
 from camera_crane import CraneKeyframe, crane_path
+from ik_planner import IKPlanner
 
 
 def _ensure_genesis_initialized() -> None:
@@ -94,21 +95,29 @@ def render_promo(
     max_trial_frames: int = 600,
     linger_frames: int = 15,
     num_closeup_trials: int = 2,
-    skip_approach_frames: int = 150,
+    approach_steps: int = 60,
+    descend_steps: int = 45,
     obj_radius_range: tuple[float, float] | None = None,
 ) -> None:
     """Render the promo video.
 
     The video has two phases:
     1. Close-up: Camera stays tight on env0's single robot. Runs multiple
-       grasp trials — each trial fast-forwards through the boring approach
-       phase (skip_approach_frames steps without recording), then records
-       the grasp + lift until env0 succeeds. Resets for a new random
-       object position between trials.
+       grasp trials with shortened approach/descend phases so the robot
+       gets to the grasp quickly. Resets for a new random object position
+       between trials.
     2. Crane: Camera cranes from the close-up to a top-down fleet reveal.
        Grasps continue during the crane with auto-resets on done.
     """
     _ensure_genesis_initialized()
+
+    # Shorten approach/descend phases so the robot gets to the grasp faster.
+    # Default is approach=180 (3.6s), descend=105 (2.1s). We use 60 (1.2s)
+    # and 45 (0.9s) — the arm moves more quickly to the pre-grasp position.
+    IKPlanner.configure_phase_steps(approach=approach_steps, descend=descend_steps)
+    print(f"[promo] Phase steps: approach={IKPlanner.approach_steps}, "
+          f"descend={IKPlanner.descend_steps}, grasp={IKPlanner.grasp_steps}, "
+          f"lift={IKPlanner.lift_steps}, total={IKPlanner.max_steps()}")
 
     # Load curriculum at final stage (stage 2, policy_weight=0.7)
     curriculum = CurriculumManager()
@@ -186,7 +195,7 @@ def render_promo(
         )
 
     def _step_and_render(cam_pos, cam_lookat):
-        """Step policy, set head, set camera, render. Returns updated obs."""
+        """Step policy, set head, set camera, render. Returns obs, dones, infos."""
         nonlocal obs
         action, _ = model.predict(obs, deterministic=True)
         obs, rewards, dones, infos = vec_env.step(action)
@@ -218,18 +227,8 @@ def render_promo(
             break
         is_last_trial = (trial == num_closeup_trials - 1)
         trial_success = False
-        print(f"[promo]   Trial {trial+1}/{num_closeup_trials}: "
-              f"fast-forwarding {skip_approach_frames} approach frames..."
+        print(f"[promo]   Trial {trial+1}/{num_closeup_trials}:"
               f"{' (with crane)' if is_last_trial else ''}")
-
-        # Fast-forward through the boring approach/descend phase without recording
-        for skip_idx in range(skip_approach_frames):
-            action, _ = model.predict(obs, deterministic=True)
-            obs, rewards, dones, infos = vec_env.step(action)
-            if np.all(dones):
-                obs = vec_env.reset()
-            _set_head_pose()
-        print(f"[promo]     Now recording grasp + lift phase...")
 
         # For the last trial, crane starts here and runs for the remaining frames
         if is_last_trial:
@@ -237,7 +236,7 @@ def render_promo(
             crane_total = total_frames - frames_recorded
             print(f"[promo]     Crane starts now, {crane_total} frames remaining")
 
-        for trial_idx in range(max_trial_frames - skip_approach_frames):
+        for trial_idx in range(max_trial_frames):
             if frames_recorded >= total_frames:
                 break
 
@@ -258,7 +257,7 @@ def render_promo(
             if infos[0].get("success", False):
                 trial_success = True
                 success_count += 1
-                print(f"[promo]     env0 success at recorded frame {trial_idx}!")
+                print(f"[promo]     env0 success at frame {trial_idx}!")
                 # Brief linger (camera keeps craning if last trial)
                 for linger_idx in range(linger_frames):
                     if frames_recorded >= total_frames:
@@ -274,15 +273,13 @@ def render_promo(
                         _set_head_pose()
                     frames_recorded += 1
                 if is_last_trial:
-                    # Last trial: keep craning for remaining frames after success
                     break
                 else:
                     break
 
             if trial_idx % 60 == 0:
                 elapsed = time.time() - t0
-                print(f"    trial {trial+1} recorded frame {trial_idx} "
-                      f"({elapsed:.1f}s)")
+                print(f"    trial {trial+1} frame {trial_idx} ({elapsed:.1f}s)")
 
         if not trial_success:
             print(f"[promo]     No success in trial {trial+1}")
@@ -353,8 +350,10 @@ def main() -> None:
                         help="Frames to linger after success before reset/crane")
     parser.add_argument("--num-closeup-trials", type=int, default=2,
                         help="Number of close-up grasp trials before craning")
-    parser.add_argument("--skip-approach-frames", type=int, default=150,
-                        help="Frames to fast-forward (no recording) per trial")
+    parser.add_argument("--approach-steps", type=int, default=60,
+                        help="IK approach phase duration in sim steps (default 180=3.6s)")
+    parser.add_argument("--descend-steps", type=int, default=45,
+                        help="IK descend phase duration in sim steps (default 105=2.1s)")
     parser.add_argument("--obj-radius-min", type=float, default=None,
                         help="Min object placement radius (m). Default: 0.32")
     parser.add_argument("--obj-radius-max", type=float, default=None,
@@ -379,7 +378,8 @@ def main() -> None:
         max_trial_frames=args.max_hold_frames,
         linger_frames=args.linger_frames,
         num_closeup_trials=args.num_closeup_trials,
-        skip_approach_frames=args.skip_approach_frames,
+        approach_steps=args.approach_steps,
+        descend_steps=args.descend_steps,
         obj_radius_range=obj_radius_range,
     )
 
