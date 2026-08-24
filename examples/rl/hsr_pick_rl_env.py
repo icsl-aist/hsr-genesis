@@ -74,6 +74,7 @@ class HSRPickRLEnv(gym.Env):
         use_ik_guidance: bool = True,
         vis_options_overrides: dict | None = None,
         camera_config: dict | None = None,
+        obj_radius_range: tuple[float, float] | None = None,
     ) -> None:
         super().__init__()
         self.n_envs = n_envs
@@ -90,6 +91,7 @@ class HSRPickRLEnv(gym.Env):
             disable_visualizer=True,
             vis_options_overrides=vis_options_overrides,
             camera_config=camera_config,
+            obj_radius_range=obj_radius_range,
         )
         self.dt = self._pick_env.dt
         self.envs_all = self._pick_env.envs_all

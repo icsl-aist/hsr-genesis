@@ -122,10 +122,12 @@ class HSRPickEnv:
         grasp_params: torch.Tensor | None = None,
         vis_options_overrides: dict | None = None,
         camera_config: dict | None = None,
+        obj_radius_range: tuple[float, float] | None = None,
     ) -> None:
         self.n_envs = int(n_envs)
         self.dt = 0.02
         self.rng = torch.Generator(device=gs.device).manual_seed(int(seed))
+        self._obj_radius_range = obj_radius_range  # override default placement radius
 
         vis_options_kwargs = dict(
             show_world_frame=True,
@@ -273,7 +275,11 @@ class HSRPickEnv:
     def _random_object_pose(self):
         """Sample a random in-reach object pose per env: (pos, quat)."""
         theta = OBJ_ANG_MIN + (OBJ_ANG_MAX - OBJ_ANG_MIN) * self._rand((self.n_envs,))
-        radius = OBJ_RADIUS_MIN + (OBJ_RADIUS_MAX - OBJ_RADIUS_MIN) * self._rand((self.n_envs,))
+        if self._obj_radius_range is not None:
+            r_min, r_max = self._obj_radius_range
+        else:
+            r_min, r_max = OBJ_RADIUS_MIN, OBJ_RADIUS_MAX
+        radius = r_min + (r_max - r_min) * self._rand((self.n_envs,))
         x = radius * torch.cos(theta)
         y = radius * torch.sin(theta)
         z = torch.full((self.n_envs,), OBJ_Z, device=gs.device, dtype=gs.tc_float)

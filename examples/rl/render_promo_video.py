@@ -95,6 +95,7 @@ def render_promo(
     linger_frames: int = 15,
     num_closeup_trials: int = 2,
     skip_approach_frames: int = 150,
+    obj_radius_range: tuple[float, float] | None = None,
 ) -> None:
     """Render the promo video.
 
@@ -149,6 +150,7 @@ def render_promo(
             "fov": 60,
             "far": 200.0,
         },
+        obj_radius_range=obj_radius_range,
     )
     vec_env = BatchedGenesisVecEnv(env)
     camera = env.camera
@@ -353,7 +355,17 @@ def main() -> None:
                         help="Number of close-up grasp trials before craning")
     parser.add_argument("--skip-approach-frames", type=int, default=150,
                         help="Frames to fast-forward (no recording) per trial")
+    parser.add_argument("--obj-radius-min", type=float, default=None,
+                        help="Min object placement radius (m). Default: 0.32")
+    parser.add_argument("--obj-radius-max", type=float, default=None,
+                        help="Max object placement radius (m). Default: 0.46")
     args = parser.parse_args()
+
+    obj_radius_range = None
+    if args.obj_radius_min is not None or args.obj_radius_max is not None:
+        r_min = args.obj_radius_min if args.obj_radius_min is not None else 0.32
+        r_max = args.obj_radius_max if args.obj_radius_max is not None else 0.46
+        obj_radius_range = (r_min, r_max)
 
     render_promo(
         model_path=args.model,
@@ -368,6 +380,7 @@ def main() -> None:
         linger_frames=args.linger_frames,
         num_closeup_trials=args.num_closeup_trials,
         skip_approach_frames=args.skip_approach_frames,
+        obj_radius_range=obj_radius_range,
     )
 
 
