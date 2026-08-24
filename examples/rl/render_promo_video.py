@@ -159,6 +159,26 @@ def render_promo(
     # Reset env to start the first episode
     obs = vec_env.reset()
 
+    # Point head down toward the object/grasp area for all envs.
+    # head_pan_joint (dof 13): pan toward arm side (~0.5 rad)
+    # head_tilt_joint (dof 17): tilt down to look at object (~0.8 rad)
+    # Applied every frame because step_whole_body_trajectory_batched may
+    # override head control targets.
+    pick_env = env._pick_env
+    hsr = pick_env.hsr
+    head_pan_target = 0.5   # rad — pan toward arm side
+    head_tilt_target = 0.52  # rad — tilt down (joint max is 0.52)
+    head_dofs = [13, 17]
+    head_targets = torch.tensor(
+        [head_pan_target, head_tilt_target],
+        device=gs.device, dtype=gs.tc_float,
+    )
+
+    def _set_head_pose():
+        hsr.control_dofs_position(
+            head_targets, dofs_idx_local=head_dofs, envs_idx=pick_env.envs_all,
+        )
+
     # Start recording
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -178,6 +198,7 @@ def render_promo(
         obs, rewards, dones, infos = vec_env.step(action)
         if np.all(dones):
             obs = vec_env.reset()
+        _set_head_pose()
 
         # Keep camera fixed at close-up
         camera.set_pose(pos=closeup_pos.tolist(), lookat=closeup_lookat.tolist())
@@ -194,6 +215,7 @@ def render_promo(
                 obs, rewards, dones, infos = vec_env.step(action)
                 if np.all(dones):
                     obs = vec_env.reset()
+                _set_head_pose()
                 camera.set_pose(pos=closeup_pos.tolist(), lookat=closeup_lookat.tolist())
                 camera.render()
                 frames_recorded += 1
@@ -218,6 +240,7 @@ def render_promo(
         obs, rewards, dones, infos = vec_env.step(action)
         if np.all(dones):
             obs = vec_env.reset()
+        _set_head_pose()
 
         # Interpolate camera pose along crane path with smoothstep easing
         t_norm = frame_idx / max(crane_frames - 1, 1)
