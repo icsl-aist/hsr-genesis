@@ -146,16 +146,19 @@ def render_promo(
     grasp_steps: int = 150,
     obj_radius_range: tuple[float, float] | None = None,
     overlay_text: str | None = None,
+    apple_preroll_frames: int = 60,
 ) -> None:
     """Render the promo video.
 
-    The video has two phases:
+    The video has three phases:
+    0. Apple close-up: Camera starts tight on the apple object so the
+       viewer recognizes the task, then pulls back to reveal the robot.
     1. Close-up: Camera stays tight on env0's single robot. Runs multiple
        grasp trials with shortened approach/descend phases so the robot
-       gets to the grasp quickly. Resets for a new random object position
-       between trials.
+       gets to the grasp quickly. Retargets for a new random object
+       position between trials.
     2. Crane: Camera cranes from the close-up to a top-down fleet reveal.
-       Grasps continue during the crane with auto-resets on done.
+       Grasps continue during the crane with auto-retargets on done.
     """
     _ensure_genesis_initialized()
 
@@ -257,12 +260,56 @@ def render_promo(
     output.parent.mkdir(parents=True, exist_ok=True)
     camera.start_recording()
     print(f"[promo] Recording (max {total_frames} frames at {fps} fps)...")
-    print(f"[promo] Phase 1: {num_closeup_trials} close-up grasp trials with random resets")
 
     t0 = time.time()
     frames_recorded = 0
     closeup_pos, closeup_lookat = crane_path(0.0, keyframes)
     success_count = 0
+
+    # --- Phase 0: Apple close-up pre-roll ---
+    # Start with a tight shot of the apple on the table so the viewer
+    # recognizes the task, then pull back to reveal the robot.
+    if apple_preroll_frames > 0:
+        print(f"[promo] Phase 0: Apple close-up pre-roll ({apple_preroll_frames} frames)")
+        # Get env0 apple world position
+        obj_pos_world = pick_env._obj_pos()[0].cpu().numpy()  # (3,)
+        env0_xy = env0_offset[:2]
+
+        # Apple close-up: camera 0.3m from apple, at table height, looking at apple
+        apple_cam_pos = np.array([
+            obj_pos_world[0] + 0.3,
+            obj_pos_world[1] - 0.2,
+            obj_pos_world[2] + 0.15,
+        ])
+        apple_cam_lookat = obj_pos_world.copy()
+        apple_cam_lookat[2] += 0.02  # look at apple center
+
+        # Robot close-up (current crane start)
+        robot_cam_pos = closeup_pos.copy()
+        robot_cam_lookat = closeup_lookat.copy()
+
+        for pre_idx in range(apple_preroll_frames):
+            if frames_recorded >= total_frames:
+                break
+            # First half: hold on apple. Second half: pull back to robot.
+            if pre_idx < apple_preroll_frames // 2:
+                cam_pos = apple_cam_pos
+                cam_lookat = apple_cam_lookat
+            else:
+                t_pull = (pre_idx - apple_preroll_frames // 2) / max(
+                    apple_preroll_frames - apple_preroll_frames // 2 - 1, 1)
+                t_pull = t_pull * t_pull * (3 - 2 * t_pull)  # smoothstep
+                cam_pos = apple_cam_pos + (robot_cam_pos - apple_cam_pos) * t_pull
+                cam_lookat = apple_cam_lookat + (robot_cam_lookat - apple_cam_lookat) * t_pull
+
+            # Step sim but don't apply policy yet (robot holds during pre-roll)
+            camera.set_pose(pos=cam_pos.tolist(), lookat=cam_lookat.tolist())
+            camera.render()
+            frames_recorded += 1
+
+        print(f"[promo]   Pre-roll done ({frames_recorded} frames)")
+
+    print(f"[promo] Phase 1: {num_closeup_trials} close-up grasp trials with random resets")
 
     # --- Phase 1: Close-up grasp trials ---
     # All trials except the last use fixed close-up camera.
@@ -418,6 +465,8 @@ def main() -> None:
                         help="Max object placement radius (m). Default: 0.46")
     parser.add_argument("--overlay-text", type=str, default=None,
                         help="Text to overlay at bottom of video (e.g. repo URL)")
+    parser.add_argument("--apple-preroll-frames", type=int, default=60,
+                        help="Frames to show apple close-up before robot view (0=disable)")
     args = parser.parse_args()
 
     obj_radius_range = None
@@ -443,6 +492,7 @@ def main() -> None:
         grasp_steps=args.grasp_steps,
         obj_radius_range=obj_radius_range,
         overlay_text=args.overlay_text,
+        apple_preroll_frames=args.apple_preroll_frames,
     )
 
 
