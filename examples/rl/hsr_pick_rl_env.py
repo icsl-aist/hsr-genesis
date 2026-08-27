@@ -76,11 +76,13 @@ class HSRPickRLEnv(gym.Env):
         camera_config: dict | None = None,
         obj_radius_range: tuple[float, float] | None = None,
         gripper_effort_override: float | None = None,
+        terminate_on_success: bool = True,
     ) -> None:
         super().__init__()
         self.n_envs = n_envs
         self.settle_steps = settle_steps
         self.gripper_effort_override = gripper_effort_override
+        self.terminate_on_success = terminate_on_success
         self.curriculum = curriculum or CurriculumManager()
         self.use_ik_guidance = use_ik_guidance
 
@@ -548,7 +550,12 @@ class HSRPickRLEnv(gym.Env):
         self._success_reward_given = self._success_reward_given | new_success
 
         # Episode termination
-        terminated = self._success.clone()  # terminate on success
+        # When terminate_on_success is False (e.g. promo video with mobile lift),
+        # the episode runs to max_steps so the viewer can see the full lift+move.
+        if hasattr(self, 'terminate_on_success') and not self.terminate_on_success:
+            terminated = torch.zeros(self.n_envs, device=gs.device, dtype=torch.bool)
+        else:
+            terminated = self._success.clone()  # terminate on success
         truncated = torch.full((self.n_envs,), self._step >= IKPlanner.max_steps(),
                                device=gs.device, dtype=torch.bool)
 

@@ -214,6 +214,7 @@ def render_promo(
         },
         obj_radius_range=obj_radius_range,
         gripper_effort_override=gripper_effort,
+        terminate_on_success=False,
     )
     vec_env = BatchedGenesisVecEnv(env)
     camera = env.camera
@@ -352,10 +353,17 @@ def render_promo(
                 _set_head_pose()
             frames_recorded += 1
 
-            if infos[0].get("success", False):
+            # Detect success but don't break — wait for full episode (dones)
+            # so the viewer sees the complete lift+move motion.
+            if infos[0].get("success", False) and not trial_success:
                 trial_success = True
                 success_count += 1
                 print(f"[promo]     env0 success at frame {trial_idx}!")
+
+            # Break when env0's episode is complete (dones[0] = True at max_steps)
+            if dones[0]:
+                if not trial_success:
+                    print(f"[promo]     env0 episode ended at frame {trial_idx}")
                 # Brief linger (camera keeps craning if last trial)
                 for linger_idx in range(linger_frames):
                     if frames_recorded >= total_frames:
@@ -370,10 +378,7 @@ def render_promo(
                         obs = env.retarget()
                         _set_head_pose()
                     frames_recorded += 1
-                if is_last_trial:
-                    break
-                else:
-                    break
+                break
 
             if trial_idx % 60 == 0:
                 elapsed = time.time() - t0
