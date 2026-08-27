@@ -274,6 +274,12 @@ def render_promo(
             obs = env.retarget()
             _set_head_pose()
 
+    # Retarget all envs after warmup so closeup trials start fresh —
+    # otherwise env0 is already mid-lift and terminates immediately.
+    obs = env.retarget()
+    _set_head_pose()
+    print(f"[promo] Retarget after warmup (fresh episodes for recording)")
+
     # Start recording — first frame will be the fleet mid-action thumbnail
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
