@@ -265,8 +265,6 @@ def render_promo(
     # initial pose. Step the sim without recording until robots are in motion.
     warmup_steps = IKPlanner.lift_start() + 30  # mid-lift — robots holding objects up
     print(f"[promo] Warmup: stepping {warmup_steps} frames (no recording)...")
-    # Use the final crane camera position for the warmup (high vantage point)
-    warmup_pos, warmup_lookat = crane_path(1.0, keyframes)
     for _ in range(warmup_steps):
         action, _ = model.predict(obs, deterministic=True)
         obs, rewards, dones, infos = vec_env.step(action)
@@ -286,36 +284,6 @@ def render_promo(
     frames_recorded = 0
     closeup_pos, closeup_lookat = crane_path(0.0, keyframes)
     success_count = 0
-
-    # --- Hero frame: wide shot of fleet mid-action (thumbnail) ---
-    # Render a few frames from the high crane position so the first frame
-    # of the video is a compelling wide shot of the fleet grasping.
-    # Then smoothly transition to the close-up position for Phase 1.
-    hero_hold = 15   # 0.5s hold on the hero shot
-    hero_transition = 30  # 1.0s smooth transition to closeup
-    hero_total = hero_hold + hero_transition
-    print(f"[promo] Hero shot: {hero_hold} hold + {hero_transition} transition")
-    for hero_idx in range(hero_total):
-        if frames_recorded >= total_frames:
-            break
-        # Step sim to keep fleet moving
-        action, _ = model.predict(obs, deterministic=True)
-        obs, rewards, dones, infos = vec_env.step(action)
-        _set_head_pose()
-        if dones.sum() > 0:
-            obs = env.retarget()
-            _set_head_pose()
-        # Camera: hold on hero, then smoothstep to closeup
-        if hero_idx < hero_hold:
-            cam_pos, cam_lookat = warmup_pos, warmup_lookat
-        else:
-            t = (hero_idx - hero_hold) / max(hero_transition - 1, 1)
-            t = t * t * (3 - 2 * t)  # smoothstep
-            cam_pos = warmup_pos + (closeup_pos - warmup_pos) * t
-            cam_lookat = warmup_lookat + (closeup_lookat - warmup_lookat) * t
-        camera.set_pose(pos=cam_pos.tolist(), lookat=cam_lookat.tolist())
-        camera.render()
-        frames_recorded += 1
 
     # --- Phase 0: Apple close-up pre-roll ---
     # Start with a tight shot of the apple on the table so the viewer
