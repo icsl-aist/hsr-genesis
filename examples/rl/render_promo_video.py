@@ -144,9 +144,11 @@ def render_promo(
     approach_steps: int = 60,
     descend_steps: int = 45,
     grasp_steps: int = 150,
+    lift_steps: int = 180,
     obj_radius_range: tuple[float, float] | None = None,
     overlay_text: str | None = None,
     apple_preroll_frames: int = 60,
+    gripper_effort: float = 8.0,
 ) -> None:
     """Render the promo video.
 
@@ -165,7 +167,7 @@ def render_promo(
     # Shorten approach/descend phases so the robot gets to the grasp faster.
     # Default is approach=180 (3.6s), descend=105 (2.1s). We use 60 (1.2s)
     # and 45 (0.9s) — the arm moves more quickly to the pre-grasp position.
-    IKPlanner.configure_phase_steps(approach=approach_steps, descend=descend_steps, grasp=grasp_steps)
+    IKPlanner.configure_phase_steps(approach=approach_steps, descend=descend_steps, grasp=grasp_steps, lift=lift_steps)
     print(f"[promo] Phase steps: approach={IKPlanner.approach_steps}, "
           f"descend={IKPlanner.descend_steps}, grasp={IKPlanner.grasp_steps}, "
           f"lift={IKPlanner.lift_steps}, total={IKPlanner.max_steps()}")
@@ -211,6 +213,7 @@ def render_promo(
             "far": 200.0,
         },
         obj_radius_range=obj_radius_range,
+        gripper_effort_override=gripper_effort,
     )
     vec_env = BatchedGenesisVecEnv(env)
     camera = env.camera
@@ -459,6 +462,10 @@ def main() -> None:
                         help="IK descend phase duration in sim steps (default 105=2.1s)")
     parser.add_argument("--grasp-steps", type=int, default=150,
                         help="IK grasp phase duration in sim steps (default 200=4.0s)")
+    parser.add_argument("--lift-steps", type=int, default=180,
+                        help="IK lift phase duration in sim steps (default 155=3.1s)")
+    parser.add_argument("--gripper-effort", type=float, default=8.0,
+                        help="Gripper effort in N (default 8.0 for mobile lift)")
     parser.add_argument("--obj-radius-min", type=float, default=None,
                         help="Min object placement radius (m). Default: 0.32")
     parser.add_argument("--obj-radius-max", type=float, default=None,
@@ -490,9 +497,11 @@ def main() -> None:
         approach_steps=args.approach_steps,
         descend_steps=args.descend_steps,
         grasp_steps=args.grasp_steps,
+        lift_steps=args.lift_steps,
         obj_radius_range=obj_radius_range,
         overlay_text=args.overlay_text,
         apple_preroll_frames=args.apple_preroll_frames,
+        gripper_effort=args.gripper_effort,
     )
 
 

@@ -166,7 +166,10 @@ class IKPlanner:
 
         # Phase 3: grasp — no IK needed, gripper closes at current position
 
-        # Phase 4: lift — raise object (base held)
+        # Phase 4: lift — raise object straight up, then base drives to random
+        # position. The arm IK target is directly above the object (same as
+        # before), but the base target is offset by a random displacement so
+        # the robot carries the object while moving — showing mobile manipulation.
         lift = obj_pos.clone()
         lift[:, 2] = LIFT_HEIGHT
         cur_qpos2 = env.hsr.get_qpos(envs_idx=env.envs_all)
@@ -174,7 +177,16 @@ class IKPlanner:
             cur_qpos2 = cur_qpos2.unsqueeze(0)
         qpos_lift, ok_lift = env._ik(lift, init_qpos=cur_qpos2)
         lift_arm, _lift_base = env._qpos_to_arm_and_base(qpos_lift)
-        lift_base = approach_base.clone()  # base held during lift
+        # Override base target: add random offset to approach_base position
+        # so the robot drives while holding the object up
+        n = env.n_envs
+        lift_angle = torch.rand(n, device=gs.device) * 2.0 * 3.14159265
+        lift_radius = 0.3 + 0.3 * torch.rand(n, device=gs.device)
+        lift_base = approach_base.clone()
+        lift_base[:, 0] += lift_radius * torch.cos(lift_angle)
+        lift_base[:, 1] += lift_radius * torch.sin(lift_angle)
+        # Adjust yaw to face the movement direction
+        lift_base[:, 2] = lift_angle
 
         ik_success = torch.stack([ok_approach, ok_descend, ok_lift], dim=1)
 

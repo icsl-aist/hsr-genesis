@@ -75,10 +75,12 @@ class HSRPickRLEnv(gym.Env):
         vis_options_overrides: dict | None = None,
         camera_config: dict | None = None,
         obj_radius_range: tuple[float, float] | None = None,
+        gripper_effort_override: float | None = None,
     ) -> None:
         super().__init__()
         self.n_envs = n_envs
         self.settle_steps = settle_steps
+        self.gripper_effort_override = gripper_effort_override
         self.curriculum = curriculum or CurriculumManager()
         self.use_ik_guidance = use_ik_guidance
 
@@ -239,6 +241,8 @@ class HSRPickRLEnv(gym.Env):
         if self.use_ik_guidance:
             assert self._planner is not None
             self._plan = self._planner.plan(env)
+            if self.gripper_effort_override is not None:
+                self._plan.gripper_effort = self.gripper_effort_override
             ik_success = self._plan.ik_success.cpu().numpy()
         else:
             self._plan = None
@@ -303,6 +307,8 @@ class HSRPickRLEnv(gym.Env):
             if cur_qpos.ndim == 1:
                 cur_qpos = cur_qpos.unsqueeze(0)
             self._plan = self._planner.plan(env, init_qpos=cur_qpos)
+            if self.gripper_effort_override is not None:
+                self._plan.gripper_effort = self.gripper_effort_override
 
         # Reset episode state (but keep robot pose)
         self._step = 0
