@@ -347,10 +347,8 @@ def render_promo(
                 cam_pos, cam_lookat = closeup_pos, closeup_lookat
 
             obs, dones, infos = _step_and_render(cam_pos, cam_lookat)
-            # Retarget all envs when most are done (new object position, robot stays)
-            if is_last_trial and dones.sum() > n_envs * 0.5:
-                obs = env.retarget()
-                _set_head_pose()
+            # During the last trial, don't retarget — let env0 finish and
+            # linger. The crane phase will handle retargeting.
             frames_recorded += 1
 
             # Detect success but don't break — wait for full episode (dones)
@@ -374,9 +372,7 @@ def render_promo(
                     else:
                         cam_pos, cam_lookat = closeup_pos, closeup_lookat
                     obs, dones, infos = _step_and_render(cam_pos, cam_lookat)
-                    if is_last_trial and dones.sum() > n_envs * 0.5:
-                        obs = env.retarget()
-                        _set_head_pose()
+                    # No retarget during last trial's linger
                     frames_recorded += 1
                 break
 
@@ -412,8 +408,8 @@ def render_promo(
         t_norm = min(t_norm, 1.0)
         cam_pos, cam_lookat = crane_path(t_norm, keyframes)
         obs, dones, infos = _step_and_render(cam_pos, cam_lookat)
-        # Retarget all envs when most are done (new object, robot stays)
-        if dones.sum() > n_envs * 0.5:
+        # Retarget all envs when any are done (new object, robot stays)
+        if dones.sum() > 0:
             obs = env.retarget()
             _set_head_pose()
         frames_recorded += 1
@@ -421,8 +417,9 @@ def render_promo(
         if frame_idx % 100 == 0:
             elapsed = time.time() - t0
             n_done = dones.sum()
+            n_success = sum(1 for info in infos if info.get("success", False))
             print(f"  crane frame {frame_idx}/{crane_frames} "
-                  f"({elapsed:.1f}s, {n_done} done)")
+                  f"({elapsed:.1f}s, {n_done} done, {n_success} success)")
 
     # Stop recording and save mp4
     camera.stop_recording(save_to_filename=str(output), fps=fps)
