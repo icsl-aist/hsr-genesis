@@ -176,17 +176,8 @@ class IKPlanner:
         if cur_qpos2.ndim == 1:
             cur_qpos2 = cur_qpos2.unsqueeze(0)
         qpos_lift, ok_lift = env._ik(lift, init_qpos=cur_qpos2)
-        lift_arm, _lift_base = env._qpos_to_arm_and_base(qpos_lift)
-        # Override base target: add random offset to approach_base position
-        # so the robot drives while holding the object up
-        n = env.n_envs
-        lift_angle = torch.rand(n, device=gs.device) * 2.0 * 3.14159265
-        lift_radius = 0.3 + 0.3 * torch.rand(n, device=gs.device)
-        lift_base = approach_base.clone()
-        lift_base[:, 0] += lift_radius * torch.cos(lift_angle)
-        lift_base[:, 1] += lift_radius * torch.sin(lift_angle)
-        # Adjust yaw to face the movement direction
-        lift_base[:, 2] = lift_angle
+        lift_arm, lift_base = env._qpos_to_arm_and_base(qpos_lift)
+        # Base held during lift (no mobile movement — object stays in gripper)
 
         ik_success = torch.stack([ok_approach, ok_descend, ok_lift], dim=1)
 

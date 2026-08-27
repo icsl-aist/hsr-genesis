@@ -214,7 +214,7 @@ def render_promo(
         },
         obj_radius_range=obj_radius_range,
         gripper_effort_override=gripper_effort,
-        terminate_on_success=False,
+        terminate_delay_steps=60,
     )
     vec_env = BatchedGenesisVecEnv(env)
     camera = env.camera

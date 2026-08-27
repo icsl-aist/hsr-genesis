@@ -77,12 +77,15 @@ class HSRPickRLEnv(gym.Env):
         obj_radius_range: tuple[float, float] | None = None,
         gripper_effort_override: float | None = None,
         terminate_on_success: bool = True,
+        terminate_delay_steps: int = 0,
     ) -> None:
         super().__init__()
         self.n_envs = n_envs
         self.settle_steps = settle_steps
         self.gripper_effort_override = gripper_effort_override
         self.terminate_on_success = terminate_on_success
+        self.terminate_delay_steps = terminate_delay_steps
+        self._success_step = torch.full((n_envs,), -1, device=gs.device, dtype=torch.long)
         self.curriculum = curriculum or CurriculumManager()
         self.use_ik_guidance = use_ik_guidance
 
@@ -255,6 +258,7 @@ class HSRPickRLEnv(gym.Env):
         self._prev_action = torch.zeros(self.n_envs, ACTION_DIM, device=gs.device, dtype=gs.tc_float)
         self._success = torch.zeros(self.n_envs, device=gs.device, dtype=torch.bool)
         self._success_reward_given = torch.zeros(self.n_envs, device=gs.device, dtype=torch.bool)
+        self._success_step[:] = -1
 
         # Set initial trajectory (approach phase) and open hand
         self._set_phase_trajectory(0)
@@ -317,6 +321,7 @@ class HSRPickRLEnv(gym.Env):
         self._prev_action = torch.zeros(self.n_envs, ACTION_DIM, device=gs.device, dtype=gs.tc_float)
         self._success = torch.zeros(self.n_envs, device=gs.device, dtype=torch.bool)
         self._success_reward_given = torch.zeros(self.n_envs, device=gs.device, dtype=torch.bool)
+        self._success_step[:] = -1
 
         # Set approach trajectory for the new target
         self._set_phase_trajectory(0)
@@ -552,8 +557,16 @@ class HSRPickRLEnv(gym.Env):
         # Episode termination
         # When terminate_on_success is False (e.g. promo video with mobile lift),
         # the episode runs to max_steps so the viewer can see the full lift+move.
+        # When terminate_delay_steps > 0, terminate that many steps after success.
         if hasattr(self, 'terminate_on_success') and not self.terminate_on_success:
             terminated = torch.zeros(self.n_envs, device=gs.device, dtype=torch.bool)
+        elif hasattr(self, 'terminate_delay_steps') and self.terminate_delay_steps > 0:
+            # Terminate terminate_delay_steps after first success
+            if not hasattr(self, '_success_step'):
+                self._success_step = torch.full((self.n_envs,), -1, device=gs.device, dtype=torch.long)
+            just_succeeded = self._success & (self._success_step < 0)
+            self._success_step[just_succeeded] = self._step
+            terminated = (self._success_step >= 0) & (self._step >= self._success_step + self.terminate_delay_steps)
         else:
             terminated = self._success.clone()  # terminate on success
         truncated = torch.full((self.n_envs,), self._step >= IKPlanner.max_steps(),
