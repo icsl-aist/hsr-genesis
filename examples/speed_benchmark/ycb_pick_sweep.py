@@ -193,6 +193,18 @@ def _is_oom_error(exc: BaseException) -> bool:
     return any(n in msg for n in needles)
 
 
+def _is_max_n_error(exc: BaseException) -> bool:
+    """Heuristic: did this error indicate N is too large for the GPU/engine?
+
+    Catches both CUDA OOM and Genesis's internal ``Jacobian shape ... is too
+    large`` exception (which fires before OOM on GPUs with large VRAM).
+    """
+    if _is_oom_error(exc):
+        return True
+    msg = str(exc).lower()
+    return "too large" in msg or "shape" in msg and "n_envs" in msg
+
+
 def benchmark_env_count(
     n_envs: int,
     *,
@@ -208,8 +220,9 @@ def benchmark_env_count(
     GPU metrics (memory usage + compute-unit utilization) sampled via
     ``nvidia-smi`` during the measured region of that trial.
 
-    Raises ``RuntimeError`` (with an OOM-tagged message) if the scene cannot
-    be built or stepped at this ``n_envs`` because the GPU ran out of memory.
+    Raises ``RuntimeError`` (with a max-N-tagged message) if the scene cannot
+    be built or stepped at this ``n_envs`` because the GPU ran out of memory
+    or the engine's internal Jacobian size limit was exceeded.
     The caller is expected to catch this to stop the sweep at the max N.
     """
     from ycb_pick_ik_parallel import HSRPickEnv
@@ -219,7 +232,8 @@ def benchmark_env_count(
         nvtx_push(f"N={n_envs} trial={trial}")
 
         # Rebuild scene for each trial to get clean state.  This is where the
-        # bulk of GPU memory is allocated, so OOM usually surfaces here.
+        # bulk of GPU memory is allocated, so OOM / size-limit errors usually
+        # surface here.
         try:
             env = HSRPickEnv(
                 n_envs=n_envs,
@@ -229,9 +243,9 @@ def benchmark_env_count(
                 disable_visualizer=True,
             )
         except BaseException as exc:
-            if _is_oom_error(exc):
+            if _is_max_n_error(exc):
                 raise RuntimeError(
-                    f"OOM at N={n_envs} during scene build: {exc}"
+                    f"Max-N exceeded at N={n_envs} during scene build: {exc}"
                 ) from exc
             raise
 
@@ -242,9 +256,9 @@ def benchmark_env_count(
                 env.scene.step()
             sync_if_cuda()
         except BaseException as exc:
-            if _is_oom_error(exc):
+            if _is_max_n_error(exc):
                 raise RuntimeError(
-                    f"OOM at N={n_envs} during warmup: {exc}"
+                    f"Max-N exceeded at N={n_envs} during warmup: {exc}"
                 ) from exc
             raise
 
@@ -260,9 +274,9 @@ def benchmark_env_count(
             wall = time.perf_counter() - t0
         except BaseException as exc:
             sampler.stop()
-            if _is_oom_error(exc):
+            if _is_max_n_error(exc):
                 raise RuntimeError(
-                    f"OOM at N={n_envs} during pipeline: {exc}"
+                    f"Max-N exceeded at N={n_envs} during pipeline: {exc}"
                 ) from exc
             raise
 
@@ -451,9 +465,11 @@ def main() -> None:
                 gpu_sample_interval=args.gpu_sample_interval,
             )
         except RuntimeError as exc:
-            # OOM raised by benchmark_env_count with an "OOM at N=..." message.
+            # Max-N exceeded (OOM or engine size limit) raised by
+            # benchmark_env_count with a "Max-N exceeded at N=..." message.
             nvtx_pop()
-            if not _is_oom_error(exc) and not str(exc).startswith("OOM"):
+            if not _is_max_n_error(exc) and not str(exc).startswith("Max-N") \
+                    and not str(exc).startswith("OOM"):
                 raise
             oom_error = str(exc)
             print(f"  [ERROR] {oom_error}")
@@ -464,7 +480,7 @@ def main() -> None:
             successful = [r["n_envs"] for r in all_results]
             max_supported_n = max(successful) if successful else 0
             print(
-                f"  [max-N] GPU memory exhausted at N={n_envs}. "
+                f"  [max-N] GPU/engine limit reached at N={n_envs}. "
                 f"Max supported N on this GPU: {max_supported_n}."
             )
             break
@@ -476,7 +492,7 @@ def main() -> None:
     if oom_error is not None:
         print()
         print("=" * 80)
-        print(f"[OOM] {oom_error}")
+        print(f"[max-N] {oom_error}")
         if max_supported_n is not None:
             print(f"[max-N] Maximum supported N on this GPU: {max_supported_n}")
         print("=" * 80)
