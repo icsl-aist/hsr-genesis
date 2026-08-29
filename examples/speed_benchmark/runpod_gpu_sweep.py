@@ -178,7 +178,7 @@ nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
 BENCHMARK_SCRIPT_TEMPLATE = f"""set -ex
 cd {REMOTE_REPO_DIR}
 PYTHONPATH=src .venv/bin/python examples/speed_benchmark/ycb_pick_sweep.py \
-    --envs {{envs}} --trials {{trials}} --settle-steps {{settle_steps}} \
+    {{envs_arg}} --trials {{trials}} --settle-steps {{settle_steps}} \
     --csv {REMOTE_CSV}
 echo "BENCHMARK_DONE"
 cat {REMOTE_CSV}
@@ -188,14 +188,22 @@ cat {REMOTE_CSV}
 def run_gpu_benchmark(
     gpu_id: str,
     *,
-    envs: list[int],
+    envs: list[int] | None,
     trials: int,
     settle_steps: int,
     template_id: str,
     keep_pod: bool,
     dry_run: bool,
+    auto_start: int = 1,
+    auto_factor: float = 2.0,
+    auto_cap: int = 100_000_000,
 ) -> list[dict]:
-    """Create a pod with the given GPU, run the benchmark, collect results."""
+    """Create a pod with the given GPU, run the benchmark, collect results.
+
+    If ``envs`` is ``None``, the remote sweep runs in auto-scaling mode
+    (doubling N from ``auto_start`` until the GPU OOMs), so the max N is
+    capped only by GPU memory.
+    """
     gpu_short = gpu_id.replace("NVIDIA ", "").replace(" ", "_").replace("/", "_")
     pod_name = f"hsr-bench-{gpu_short}"
 
@@ -203,9 +211,20 @@ def run_gpu_benchmark(
     print(f"[GPU] {gpu_id}")
     print(f"{'='*70}")
 
+    if envs is None:
+        envs_arg = (
+            f"--auto-start {auto_start} --auto-factor {auto_factor} "
+            f"--auto-cap {auto_cap}"
+        )
+        sweep_desc = (f"auto (start={auto_start} factor={auto_factor} "
+                      f"cap={auto_cap}, max N capped only by OOM)")
+    else:
+        envs_arg = "--envs " + " ".join(str(e) for e in envs)
+        sweep_desc = f"envs={envs}"
+
     if dry_run:
         print(f"  [dry-run] would create pod: {pod_name}")
-        print(f"  [dry-run] envs={envs} trials={trials}")
+        print(f"  [dry-run] {sweep_desc} trials={trials}")
         return []
 
     # --- Create pod ---
@@ -273,10 +292,9 @@ def run_gpu_benchmark(
         print(f"  Files copied.")
 
         # --- Run benchmark ---
-        print(f"  Running benchmark...")
-        envs_str = " ".join(str(e) for e in envs)
+        print(f"  Running benchmark ({sweep_desc})...")
         bench_cmd = BENCHMARK_SCRIPT_TEMPLATE.format(
-            envs=envs_str, trials=trials, settle_steps=settle_steps,
+            envs_arg=envs_arg, trials=trials, settle_steps=settle_steps,
         )
         rc, out, err = ssh_run(host, port, key, bench_cmd, timeout=7200)
         print(f"  Remote output (tail):")
@@ -326,9 +344,22 @@ def main() -> None:
         help="RunPod GPU IDs to benchmark (see: runpodctl gpu list)",
     )
     parser.add_argument(
-        "--envs", type=int, nargs="+",
-        default=[1, 8, 32, 128],
-        help="Env counts to sweep",
+        "--envs", type=int, nargs="+", default=None,
+        help="Explicit env counts to sweep. If omitted, the remote sweep "
+             "auto-scales N (doubling from --auto-start) until the GPU OOMs -- "
+             "i.e. the max N is capped only by GPU memory per GPU.",
+    )
+    parser.add_argument(
+        "--auto-start", type=int, default=1,
+        help="Starting N for auto-scaling mode (default 1).",
+    )
+    parser.add_argument(
+        "--auto-factor", type=float, default=2.0,
+        help="Multiply N by this each step in auto-scaling mode (default 2.0).",
+    )
+    parser.add_argument(
+        "--auto-cap", type=int, default=100_000_000,
+        help="Safety hard cap on N in auto-scaling mode (default 100M).",
     )
     parser.add_argument("--trials", type=int, default=2)
     parser.add_argument("--settle-steps", type=int, default=30)
@@ -345,7 +376,13 @@ def main() -> None:
     args = parser.parse_args()
 
     print(f"[runpod-bench] GPUs={args.gpus}")
-    print(f"[runpod-bench] envs={args.envs} trials={args.trials} "
+    if args.envs is None:
+        print(f"[runpod-bench] AUTO mode: start={args.auto_start} "
+              f"factor={args.auto_factor} cap={args.auto_cap} "
+              f"(max N capped only by OOM)")
+    else:
+        print(f"[runpod-bench] envs={args.envs}")
+    print(f"[runpod-bench] trials={args.trials} "
           f"settle_steps={args.settle_steps}")
     print(f"[runpod-bench] template={args.template_id}")
 
@@ -360,6 +397,9 @@ def main() -> None:
                 template_id=args.template_id,
                 keep_pod=args.keep_pods,
                 dry_run=args.dry_run,
+                auto_start=args.auto_start,
+                auto_factor=args.auto_factor,
+                auto_cap=args.auto_cap,
             )
             all_results.extend(results)
         except Exception as exc:
@@ -380,16 +420,23 @@ def main() -> None:
     print(f"\n[runpod-bench] Aggregated results saved to {csv_path}")
 
     # --- Summary table ---
-    print(f"\n{'='*90}")
+    # In auto mode there is no fixed env list, so iterate over the N values
+    # that actually appear in the results for each GPU.
+    print(f"\n{'='*118}")
     print(f"{'GPU':30s} {'envs':>6s} {'wall_s':>8s} {'steps/s':>10s} "
-          f"{'envs·steps/s':>14s} {'success':>8s}")
-    print(f"{'-'*90}")
+          f"{'envs·steps/s':>14s} {'success':>8s} "
+          f"{'mem(MiB)':>16s} {'SM(%)':>14s}")
+    print(f"{'':30s} {'':>6s} {'':>8s} {'':>10s} {'':>14s} {'':>8s} "
+          f"{'mean/max':>16s} {'mean/max':>14s}")
+    print(f"{'-'*118}")
     for gpu_id in args.gpus:
         gpu_results = [r for r in all_results if r["gpu_id"] == gpu_id]
         if not gpu_results:
             continue
         gpu_short = gpu_results[0]["gpu_short"]
-        for n_envs in args.envs:
+        # Sorted unique N values that produced results for this GPU.
+        seen_n = sorted({int(r["n_envs"]) for r in gpu_results})
+        for n_envs in seen_n:
             trials = [r for r in gpu_results if int(r["n_envs"]) == n_envs]
             if not trials:
                 continue
@@ -397,12 +444,21 @@ def main() -> None:
             avg_sps = sum(float(r["steps_per_sec"]) for r in trials) / len(trials)
             avg_esps = sum(float(r["env_steps_per_sec"]) for r in trials) / len(trials)
             avg_succ = sum(float(r["success_rate"]) for r in trials) / len(trials)
+            avg_mem = sum(float(r.get("gpu_mem_mean_mib", 0)) for r in trials) / len(trials)
+            max_mem = max(float(r.get("gpu_mem_max_mib", 0)) for r in trials)
+            avg_sm = sum(float(r.get("gpu_util_mean_pct", 0)) for r in trials) / len(trials)
+            max_sm = max(float(r.get("gpu_util_max_pct", 0)) for r in trials)
             print(
                 f"{gpu_short:30s} {n_envs:>6d} {avg_wall:>8.2f} "
-                f"{avg_sps:>10.1f} {avg_esps:>14.0f} {avg_succ:>7.0%}"
+                f"{avg_sps:>10.1f} {avg_esps:>14.0f} {avg_succ:>7.0%} "
+                f"{avg_mem:>7.0f}/{max_mem:<7.0f} "
+                f"{avg_sm:>5.0f}/{max_sm:<5.0f}"
             )
+        # Surface the max supported N for this GPU (largest N with results).
+        max_n = max(int(r["n_envs"]) for r in gpu_results)
+        print(f"  [max-N] {gpu_short}: max supported N on this GPU = {max_n}")
         print()
-    print(f"{'='*90}")
+    print(f"{'='*118}")
 
 
 if __name__ == "__main__":
