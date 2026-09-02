@@ -233,6 +233,7 @@ def benchmark_env_count(
     artvip_object: str | None = None,
     artvip_cache_dir: str | None = None,
     decimate_face_num: int = 500,
+    merge_meshes: bool = False,
 ) -> list[dict]:
     """Run the IK pick pipeline ``trials`` times for ``n_envs`` envs.
 
@@ -265,6 +266,7 @@ def benchmark_env_count(
                     disable_visualizer=True,
                     cache_dir=artvip_cache_dir,
                     decimate_face_num=decimate_face_num,
+                    merge_meshes=merge_meshes,
                 )
             else:
                 env = HSRPickEnv(
@@ -424,6 +426,13 @@ def main() -> None:
              "physics at the cost of collision fidelity. Used with "
              "--object-type=artvip.",
     )
+    parser.add_argument(
+        "--merge-meshes", action="store_true",
+        help="Merge meshes connected by fixed joints into a single mesh "
+             "per link before loading. Reduces collision geom count "
+             "(e.g. 6→3 for stepping_dustbin_4). Used with "
+             "--object-type=artvip.",
+    )
     parser.add_argument("--settle-steps", type=int, default=50)
     parser.add_argument("--trials", type=int, default=2,
                         help="Number of repeated trials per env count")
@@ -535,6 +544,7 @@ def main() -> None:
                 artvip_object=args.artvip_object,
                 artvip_cache_dir=args.artvip_cache_dir,
                 decimate_face_num=args.decimate_face_num,
+                merge_meshes=args.merge_meshes,
             )
         except RuntimeError as exc:
             # Max-N exceeded (OOM or engine size limit) raised by

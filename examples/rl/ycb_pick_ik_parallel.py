@@ -739,11 +739,13 @@ class HSRArtvipPickEnv(HSRPickEnv):
         obj_radius_range: tuple[float, float] | None = None,
         cache_dir: str | Path | None = None,
         decimate_face_num: int = 500,
+        merge_meshes: bool = False,
     ) -> None:
         self._artvip_category = artvip_category
         self._artvip_object = artvip_object
         self._artvip_cache_dir = cache_dir
         self._decimate_face_num = decimate_face_num
+        self._merge_meshes = merge_meshes
         label = f"artvip:{artvip_category}/{artvip_object}"
         super().__init__(
             n_envs=n_envs,
@@ -758,13 +760,15 @@ class HSRArtvipPickEnv(HSRPickEnv):
         )
 
     def _build_objects(self, scene, object_names: list[str]) -> list:
-        from hsr_genesis.artvip_loader import download_artvip_object
+        from hsr_genesis.artvip_loader import download_artvip_object, merge_fixed_meshes
 
         usd_path = download_artvip_object(
             self._artvip_category,
             self._artvip_object,
             cache_dir=self._artvip_cache_dir,
         )
+        if self._merge_meshes:
+            usd_path = merge_fixed_meshes(usd_path)
         entity = scene.add_entity(
             gs.morphs.USD(
                 file=str(usd_path),

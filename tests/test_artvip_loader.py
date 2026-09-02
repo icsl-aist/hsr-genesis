@@ -17,6 +17,7 @@ from hsr_genesis.artvip_loader import (
     ArtVIPJoint,
     ArtVIPJointInfo,
     list_artvip_categories,
+    merge_fixed_meshes,
     parse_artvip_control_script,
     parse_artvip_joint_info,
 )
@@ -315,3 +316,138 @@ def test_list_artvip_objects_local_cache(tmp_path):
     assert "dishwasher_1" in result
     assert "dishwasher_2" in result
     assert "refrigerator_1" not in result
+
+
+# ---------------------------------------------------------------------------
+# merge_fixed_meshes (requires pxr + downloaded USD)
+# ---------------------------------------------------------------------------
+
+#: Path to the pre-downloaded stepping_dustbin_4 USD in the HF cache.
+_DUSTBIN_USD = (
+    "/home/yosuke/.cache/artvip/datasets--X-Humanoid--ArtVIP/"
+    "snapshots/d22f2095bc9db29fdd4b60f4a3c4f8177e1f5e9e/"
+    "Articulated_objects/household_items/trash_can/stepping_dustbin_4/"
+    "model_stepping_dustbin_4.usd"
+)
+
+
+@pytest.fixture
+def dustbin_usd_path() -> str:
+    """Path to the pre-downloaded stepping_dustbin_4 USD, or skip."""
+    path = _DUSTBIN_USD
+    if not os.path.exists(path):
+        pytest.skip(f"Dustbin USD not found at {path}. Run download first.")
+    return path
+
+
+def _count_active_meshes(usd_path: str) -> tuple[int, int]:
+    """Count active meshes and joints in a USD file."""
+    from pxr import Usd, UsdGeom, UsdPhysics
+
+    stage = Usd.Stage.Open(usd_path)
+    n_meshes = 0
+    n_joints = 0
+    for prim in stage.Traverse():
+        if prim.IsA(UsdGeom.Mesh) and prim.IsActive():
+            n_meshes += 1
+        if prim.IsA(UsdPhysics.Joint):
+            n_joints += 1
+    return n_meshes, n_joints
+
+
+def test_merge_fixed_meshes_reduces_mesh_count(dustbin_usd_path, tmp_path):
+    """Merging should reduce 6 meshes to 3 (one per link)."""
+    output = tmp_path / "merged.usd"
+    result = merge_fixed_meshes(dustbin_usd_path, output)
+
+    assert result == output
+    assert output.exists()
+
+    n_before, n_joints_before = _count_active_meshes(dustbin_usd_path)
+    n_after, n_joints_after = _count_active_meshes(str(output))
+
+    # Original has 6 meshes across 3 links.
+    assert n_before == 6
+    # Merged should have 3 (one per link).
+    assert n_after == 3
+    # Joints should be preserved.
+    assert n_joints_before == n_joints_after == 3
+
+
+def test_merge_fixed_meshes_preserves_joints(dustbin_usd_path, tmp_path):
+    """The merged USD should still have 2 revolute + 1 fixed joint."""
+    from pxr import Usd, UsdPhysics
+
+    output = tmp_path / "merged.usd"
+    merge_fixed_meshes(dustbin_usd_path, output)
+
+    stage = Usd.Stage.Open(str(output))
+    joint_types = []
+    for prim in stage.Traverse():
+        if prim.IsA(UsdPhysics.Joint):
+            if prim.IsA(UsdPhysics.RevoluteJoint):
+                joint_types.append("revolute")
+            elif prim.IsA(UsdPhysics.FixedJoint):
+                joint_types.append("fixed")
+            elif prim.IsA(UsdPhysics.PrismaticJoint):
+                joint_types.append("prismatic")
+
+    assert sorted(joint_types) == ["fixed", "revolute", "revolute"]
+
+
+def test_merge_fixed_meshes_default_output_path(dustbin_usd_path):
+    """Without output_path, should write _merged.usd next to the input."""
+    output = merge_fixed_meshes(dustbin_usd_path)
+    try:
+        assert output.exists()
+        assert "_merged" in output.name
+    finally:
+        # Clean up.
+        if output.exists():
+            os.remove(output)
+
+
+def test_merge_fixed_meshes_merged_vertices(dustbin_usd_path, tmp_path):
+    """The first mesh in each link should contain the merged vertex count."""
+    from pxr import Usd, UsdGeom
+
+    output = tmp_path / "merged.usd"
+    merge_fixed_meshes(dustbin_usd_path, output)
+
+    stage = Usd.Stage.Open(str(output))
+    root = stage.GetDefaultPrim() or stage.GetPseudoRoot()
+    root_children = {str(c.GetPath()) for c in root.GetChildren()}
+
+    link_vert_counts: dict[str, int] = {}
+    for prim in stage.Traverse():
+        if prim.IsA(UsdGeom.Mesh) and prim.IsActive():
+            # Walk up to the top-level link (direct child of root).
+            parent = prim.GetParent()
+            while parent and parent.IsValid():
+                if str(parent.GetPath()) in root_children:
+                    break
+                parent = parent.GetParent()
+            link_name = parent.GetName() if parent and parent.IsValid() else "unknown"
+            pts = UsdGeom.Mesh(prim).GetPointsAttr().Get()
+            link_vert_counts[link_name] = len(pts) if pts else 0
+
+    # Body link had 3 meshes (18030 + 2742 + 428 = 21200 verts).
+    assert link_vert_counts.get("E_body_2", 0) == 21200
+    # Lid link had 2 meshes (14132 + 4232 = 18364 verts).
+    assert link_vert_counts.get("E_lid_1", 0) == 18364
+    # Pedal link had 1 mesh (3190 verts, unchanged).
+    assert link_vert_counts.get("E_pedal_5", 0) == 3190
+
+
+def test_merge_fixed_meshes_does_not_modify_original(dustbin_usd_path, tmp_path):
+    """The original USD file should not be modified."""
+    import hashlib
+
+    def file_hash(path):
+        with open(path, "rb") as f:
+            return hashlib.md5(f.read()).hexdigest()
+
+    original_hash = file_hash(dustbin_usd_path)
+    output = tmp_path / "merged.usd"
+    merge_fixed_meshes(dustbin_usd_path, output)
+    assert file_hash(dustbin_usd_path) == original_hash

@@ -83,6 +83,7 @@ __all__ = [
     "load_artvip_object",
     "parse_artvip_joint_info",
     "parse_artvip_control_script",
+    "merge_fixed_meshes",
 ]
 
 
@@ -572,6 +573,261 @@ def parse_artvip_control_script(py_path: str | Path) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Mesh merging (unify meshes connected by fixed joints)
+# ---------------------------------------------------------------------------
+
+def merge_fixed_meshes(
+    usd_path: str | Path,
+    output_path: str | Path | None = None,
+    *,
+    decimate_face_num: int | None = None,
+) -> Path:
+    """Merge meshes connected by fixed joints into a single mesh per link.
+
+    ArtVIP USD objects often have multiple mesh prims per link (e.g. a body
+    link with separate meshes for the main body, handle, and group).  Genesis
+    creates one collision geom per mesh prim, so 6 meshes → 6 geoms, increasing
+    broad-phase collision pair count and slowing down physics.
+
+    This function identifies rigid groups — sets of meshes that belong to the
+    same link (connected by fixed joints or no joints at all, just nested
+    Xforms) — and merges them into a single mesh per link.  Meshes on links
+    connected by revolute or prismatic joints are kept separate.
+
+    The merged USD preserves:
+      - Joint prims (revolute, prismatic, fixed) and their properties
+      - Link hierarchy and transforms
+      - Material bindings (on the merged mesh)
+
+    Parameters
+    ----------
+    usd_path : str | Path
+        Path to the input ArtVIP ``model_*.usd`` file.
+    output_path : str | Path, optional
+        Path for the output USD.  If None, writes alongside the input with
+        a ``_merged`` suffix (e.g. ``model_foo_merged.usd``).
+    decimate_face_num : int, optional
+        If given, decimate each merged mesh to this face count using
+        ``trimesh``.  This is a simple uniform decimation — Genesis's own
+        decimation (``decimate=True`` on ``gs.morphs.USD``) still applies
+        on top.
+
+    Returns
+    -------
+    Path
+        Path to the merged USD file.
+
+    Example
+    -------
+        from hsr_genesis.artvip_loader import download_artvip_object, merge_fixed_meshes
+
+        usd_path = download_artvip_object("household_items", "trash_can/stepping_dustbin_4")
+        merged_path = merge_fixed_meshes(usd_path)
+        # merged_path has 3 meshes (one per link) instead of 6
+    """
+    from pxr import Usd, UsdGeom, UsdPhysics, Gf, Vt
+    import shutil
+
+    usd_path = Path(usd_path)
+    if output_path is None:
+        output_path = usd_path.with_name(
+            usd_path.stem + "_merged" + usd_path.suffix
+        )
+    output_path = Path(output_path)
+
+    # Copy the entire object directory to preserve sublayer references.
+    # The merged USD replaces only the main model file; resource/ stays intact.
+    if usd_path.parent != output_path.parent:
+        output_dir = output_path.parent
+        output_dir.mkdir(parents=True, exist_ok=True)
+        # Copy resource/ if it exists.
+        resource = usd_path.parent / "resource"
+        if resource.exists():
+            dest_resource = output_dir / "resource"
+            if not dest_resource.exists():
+                shutil.copytree(resource, dest_resource)
+
+    stage = Usd.Stage.Open(str(usd_path))
+
+    # 1. Find all links (E_ prefixed Xforms that are direct children of root).
+    root = stage.GetDefaultPrim()
+    if not root or not root.IsValid():
+        root = stage.GetPseudoRoot()
+
+    links: dict[str, list] = {}  # link_path -> [(mesh_prim, world_to_link_matrix)]
+    for link_prim in root.GetChildren():
+        if not link_prim.IsA(UsdGeom.Xform):
+            continue
+        link_path = str(link_prim.GetPath())
+        link_world = UsdGeom.Xformable(link_prim).ComputeLocalToWorldTransform(0.0)
+        link_inv = link_world.GetInverse()
+
+        # Recursively collect all meshes under this link (but not under
+        # child links connected by movable joints).
+        meshes = _collect_meshes_in_link(link_prim, link_inv)
+        if meshes:
+            links[link_path] = meshes
+
+    # 2. For each link, merge all meshes into one.
+    # Build a new stage that references the original but overrides mesh prims.
+    # Strategy: edit the stage in-place (remove extra meshes, replace first
+    # with merged geometry), then save to output_path.
+    for link_path, mesh_list in links.items():
+        if len(mesh_list) <= 1:
+            continue
+
+        # Merge vertex arrays, applying per-mesh transforms to bring vertices
+        # into the link's local frame.
+        all_points: list[Gf.Vec3f] = []
+        all_face_counts: list[int] = []
+        all_face_indices: list[int] = []
+        vert_offset = 0
+
+        for mesh_prim, to_link_matrix in mesh_list:
+            mesh = UsdGeom.Mesh(mesh_prim)
+            points = mesh.GetPointsAttr().Get()
+            face_counts = mesh.GetFaceVertexCountsAttr().Get()
+            face_indices = mesh.GetFaceVertexIndicesAttr().Get()
+
+            if not points or not face_counts:
+                continue
+
+            # Transform points to link frame.
+            for p in points:
+                p_world = to_link_matrix.Transform(Gf.Vec3d(p))
+                all_points.append(Gf.Vec3f(p_world))
+
+            all_face_counts.extend(int(fc) for fc in face_counts)
+            all_face_indices.extend(int(fi) + vert_offset for fi in face_indices)
+            vert_offset += len(points)
+
+        if not all_points:
+            continue
+
+        # Optional decimation.
+        if decimate_face_num is not None and len(all_face_counts) > decimate_face_num:
+            all_points, all_face_counts, all_face_indices = _decimate_mesh(
+                all_points, all_face_counts, all_face_indices, decimate_face_num,
+            )
+
+        # Use the first mesh prim as the target; deactivate the rest.
+        first_mesh_prim, _ = mesh_list[0]
+        first_mesh = UsdGeom.Mesh(first_mesh_prim)
+
+        # Set merged geometry on the first mesh.
+        first_mesh.GetPointsAttr().Set(Vt.Vec3fArray(all_points))
+        first_mesh.GetFaceVertexCountsAttr().Set(Vt.IntArray(all_face_counts))
+        first_mesh.GetFaceVertexIndicesAttr().Set(Vt.IntArray(all_face_indices))
+
+        # Deactivate the extra mesh prims (they may be defined in sublayer
+        # files, so RemovePrim doesn't work — use SetActive(False) instead).
+        for mesh_prim, _ in mesh_list[1:]:
+            mesh_prim.SetActive(False)
+
+    # Export the modified stage to the output path.
+    # We use Export (not Save) to avoid modifying the original file.
+    stage.Export(str(output_path))
+
+    return output_path
+
+
+def _collect_meshes_in_link(
+    link_prim,
+    link_inv_matrix,
+    *,
+    _depth: int = 0,
+) -> list:
+    """Recursively collect all Mesh prims under a link, excluding child links.
+
+    A "child link" is an Xform that has a PhysicsJoint (revolute, prismatic, or
+    fixed connecting it to a different body).  We stop recursion at child links
+    because those meshes belong to a different rigid body.
+
+    Returns a list of (mesh_prim, matrix_to_link_frame) tuples.
+    """
+    from pxr import Usd, UsdGeom, UsdPhysics
+
+    result = []
+    for child in link_prim.GetChildren():
+        # Skip joint prims.
+        if child.IsA(UsdPhysics.Joint):
+            continue
+
+        # Check if this child is a separate link (has joints connecting it
+        # to other bodies).
+        has_movable_joint = False
+        for grandchild in child.GetChildren():
+            if grandchild.IsA(UsdPhysics.RevoluteJoint) or grandchild.IsA(UsdPhysics.PrismaticJoint):
+                has_movable_joint = True
+                break
+
+        if has_movable_joint:
+            continue  # This is a separate articulated link; skip its meshes.
+
+        if child.IsA(UsdGeom.Mesh):
+            # Compute this mesh's world transform, then transform to link frame.
+            mesh_world = UsdGeom.Xformable(child).ComputeLocalToWorldTransform(0.0)
+            to_link = link_inv_matrix * mesh_world
+            result.append((child, to_link))
+        elif child.IsA(UsdGeom.Xform):
+            # Recurse into nested Xforms (e.g. E_Group_3, E_handle_4).
+            result.extend(
+                _collect_meshes_in_link(child, link_inv_matrix, _depth=_depth + 1)
+            )
+
+    return result
+
+
+def _decimate_mesh(points, face_counts, face_indices, target_face_num):
+    """Simple mesh decimation using trimesh.
+
+    Converts the mesh to trimesh format, decimates, and returns the simplified
+    geometry.  Falls back to the original if trimesh is unavailable.
+    """
+    try:
+        import trimesh
+    except ImportError:
+        return points, face_counts, face_indices
+
+    # Build trimesh from the mesh data.
+    # First, triangulate non-triangle faces.
+    verts = np.array([[p[0], p[1], p[2]] for p in points], dtype=np.float64)
+
+    # Convert face_counts/face_indices to triangle faces.
+    tri_faces = []
+    idx = 0
+    for fc in face_counts:
+        face = face_indices[idx:idx + fc]
+        idx += fc
+        # Fan triangulation.
+        for i in range(1, fc - 1):
+            tri_faces.append([face[0], face[i], face[i + 1]])
+
+    if not tri_faces:
+        return points, face_counts, face_indices
+
+    faces = np.array(tri_faces, dtype=np.int64)
+    mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
+
+    # Decimate.
+    try:
+        mesh = mesh.simplify_quadric_decimation(target_face_num)
+    except Exception:
+        try:
+            mesh = mesh.simplify_faces_count(target_face_num)
+        except Exception:
+            return points, face_counts, face_indices
+
+    # Convert back.
+    from pxr import Gf
+    new_points = [Gf.Vec3f(p[0], p[1], p[2]) for p in mesh.vertices]
+    new_face_counts = [3] * len(mesh.faces)
+    new_face_indices = [int(fi) for fi in mesh.faces.flatten()]
+
+    return new_points, new_face_counts, new_face_indices
+
+
+# ---------------------------------------------------------------------------
 # Genesis morph creation
 # ---------------------------------------------------------------------------
 
@@ -586,6 +842,7 @@ def load_artvip_object(
     token: Optional[str] = None,
     decimate: bool = True,
     convexify: bool = True,
+    merge_meshes: bool = False,
     **usd_kwargs: Any,
 ):
     """Download (if needed) and load an ArtVIP object as ``gs.morphs.USD``.
@@ -610,6 +867,12 @@ def load_artvip_object(
         Whether to decimate meshes (default True, recommended for performance).
     convexify : bool
         Whether to convexify collision meshes (default True).
+    merge_meshes : bool
+        If True, merge meshes connected by fixed joints into a single mesh
+        per link before loading.  This reduces the collision geom count
+        (e.g. 6→3 for stepping_dustbin_4), which can improve physics
+        throughput by reducing broad-phase collision pair count.
+        Default False.
     **usd_kwargs
         Additional kwargs passed to ``gs.morphs.USD``.
 
@@ -623,6 +886,9 @@ def load_artvip_object(
     usd_path = download_artvip_object(
         category, object_name, cache_dir=cache_dir, token=token,
     )
+
+    if merge_meshes:
+        usd_path = merge_fixed_meshes(usd_path)
 
     kwargs: dict[str, Any] = {
         "file": str(usd_path),
