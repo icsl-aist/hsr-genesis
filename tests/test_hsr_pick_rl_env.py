@@ -47,6 +47,7 @@ def test_reset_without_ik_guidance_skips_planner(monkeypatch):
     env.settle_steps = 7
     env.envs_all = torch.arange(2)
     env.curriculum = SimpleNamespace(policy_weight=0.3)
+    env._success_step = torch.full((2,), -1, dtype=torch.long)
     env._planner = SimpleNamespace(
         plan=lambda _pick_env: (_ for _ in ()).throw(AssertionError("planner should not run"))
     )
