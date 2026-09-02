@@ -770,6 +770,9 @@ class HSRArtvipPickEnv(HSRPickEnv):
                 fixed=False,
                 decimate=True,
                 convexify=True,
+                # ArtVIP USDs contain fixed links; per-env set_pos requires
+                # batching the fixed-vertex geometry across envs.
+                batch_fixed_verts=True,
             ),
         )
         return [entity]
