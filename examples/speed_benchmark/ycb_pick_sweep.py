@@ -232,6 +232,7 @@ def benchmark_env_count(
     artvip_category: str | None = None,
     artvip_object: str | None = None,
     artvip_cache_dir: str | None = None,
+    decimate_face_num: int = 500,
 ) -> list[dict]:
     """Run the IK pick pipeline ``trials`` times for ``n_envs`` envs.
 
@@ -263,6 +264,7 @@ def benchmark_env_count(
                     seed=seed + trial,
                     disable_visualizer=True,
                     cache_dir=artvip_cache_dir,
+                    decimate_face_num=decimate_face_num,
                 )
             else:
                 env = HSRPickEnv(
@@ -415,6 +417,13 @@ def main() -> None:
         help="Custom cache directory for ArtVIP downloads. Defaults to "
              "~/.cache/artvip or the ARTVIP_CACHE_DIR env var.",
     )
+    parser.add_argument(
+        "--decimate-face-num", type=int, default=500,
+        help="Target face count per mesh for decimation (default 500). "
+             "Lower values reduce collision mesh complexity for faster "
+             "physics at the cost of collision fidelity. Used with "
+             "--object-type=artvip.",
+    )
     parser.add_argument("--settle-steps", type=int, default=50)
     parser.add_argument("--trials", type=int, default=2,
                         help="Number of repeated trials per env count")
@@ -525,6 +534,7 @@ def main() -> None:
                 artvip_category=args.artvip_category,
                 artvip_object=args.artvip_object,
                 artvip_cache_dir=args.artvip_cache_dir,
+                decimate_face_num=args.decimate_face_num,
             )
         except RuntimeError as exc:
             # Max-N exceeded (OOM or engine size limit) raised by

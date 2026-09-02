@@ -738,10 +738,12 @@ class HSRArtvipPickEnv(HSRPickEnv):
         camera_config: dict | None = None,
         obj_radius_range: tuple[float, float] | None = None,
         cache_dir: str | Path | None = None,
+        decimate_face_num: int = 500,
     ) -> None:
         self._artvip_category = artvip_category
         self._artvip_object = artvip_object
         self._artvip_cache_dir = cache_dir
+        self._decimate_face_num = decimate_face_num
         label = f"artvip:{artvip_category}/{artvip_object}"
         super().__init__(
             n_envs=n_envs,
@@ -769,6 +771,7 @@ class HSRArtvipPickEnv(HSRPickEnv):
                 pos=(0.5, 0.0, OBJ_Z),
                 fixed=False,
                 decimate=True,
+                decimate_face_num=self._decimate_face_num,
                 convexify=True,
                 # ArtVIP USDs contain fixed links; per-env set_pos requires
                 # batching the fixed-vertex geometry across envs.
