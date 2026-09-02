@@ -746,6 +746,11 @@ class HSRArtvipPickEnv(HSRPickEnv):
         self._artvip_cache_dir = cache_dir
         self._decimate_face_num = decimate_face_num
         self._merge_meshes = merge_meshes
+        # ArtVIP objects are much larger than YCB bricks; place them further
+        # from the robot to reduce hand-object collision pairs during the
+        # approach and descend phases.
+        if obj_radius_range is None:
+            obj_radius_range = (0.50, 0.65)
         label = f"artvip:{artvip_category}/{artvip_object}"
         super().__init__(
             n_envs=n_envs,
@@ -772,7 +777,7 @@ class HSRArtvipPickEnv(HSRPickEnv):
         entity = scene.add_entity(
             gs.morphs.USD(
                 file=str(usd_path),
-                pos=(0.5, 0.0, OBJ_Z),
+                pos=(0.6, 0.0, OBJ_Z),
                 fixed=False,
                 decimate=True,
                 decimate_face_num=self._decimate_face_num,
