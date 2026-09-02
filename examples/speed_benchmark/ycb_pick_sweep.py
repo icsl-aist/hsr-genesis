@@ -4,6 +4,16 @@ Sweeps the number of parallel environments and measures the wall-clock
 performance of the full IK pick pipeline (settle → approach → descend →
 grasp → lift) from ``examples/rl/ycb_pick_ik_parallel.py``.
 
+Two object types are supported:
+
+  * **ycb** (default) -- simple rigid URDF objects (e.g. foam brick).
+    Use ``--object ycb_061_foam_brick``.
+  * **artvip** -- complex articulated USD objects from the ArtVIP dataset
+    (convexified meshes + revolute/prismatic joints).  Use
+    ``--object-type artvip --artvip-category household_items
+    --artvip-object trash_can/stepping_dustbin_4``.  The ArtVIP object is
+    downloaded on-demand via :mod:`hsr_genesis.artvip_loader`.
+
 For each env count it reports:
   - total sim steps
   - wall time (s)
@@ -30,6 +40,11 @@ Run
 
     # save results to CSV
     PYTHONPATH=src .venv/bin/python examples/speed_benchmark/ycb_pick_sweep.py --csv results.csv
+
+    # complex object: ArtVIP articulated USD (trash can with lid)
+    PYTHONPATH=src .venv/bin/python examples/speed_benchmark/ycb_pick_sweep.py \
+        --object-type artvip --artvip-category household_items \
+        --artvip-object trash_can/stepping_dustbin_4 --csv artvip_results.csv
 
     # capture a detailed Nsight Systems trace (one .nsys-rep for the whole
     # sweep, with NVTX ranges labeling each N condition and trial)
@@ -213,6 +228,10 @@ def benchmark_env_count(
     trials: int,
     seed: int,
     gpu_sample_interval: float = 0.2,
+    object_type: str = "ycb",
+    artvip_category: str | None = None,
+    artvip_object: str | None = None,
+    artvip_cache_dir: str | None = None,
 ) -> list[dict]:
     """Run the IK pick pipeline ``trials`` times for ``n_envs`` envs.
 
@@ -225,7 +244,7 @@ def benchmark_env_count(
     or the engine's internal Jacobian size limit was exceeded.
     The caller is expected to catch this to stop the sweep at the max N.
     """
-    from ycb_pick_ik_parallel import HSRPickEnv
+    from ycb_pick_ik_parallel import HSRPickEnv, HSRArtvipPickEnv
 
     results = []
     for trial in range(trials):
@@ -235,13 +254,24 @@ def benchmark_env_count(
         # bulk of GPU memory is allocated, so OOM / size-limit errors usually
         # surface here.
         try:
-            env = HSRPickEnv(
-                n_envs=n_envs,
-                object_name=object_name,
-                show_viewer=False,
-                seed=seed + trial,
-                disable_visualizer=True,
-            )
+            if object_type == "artvip":
+                env = HSRArtvipPickEnv(
+                    n_envs=n_envs,
+                    artvip_category=artvip_category,
+                    artvip_object=artvip_object,
+                    show_viewer=False,
+                    seed=seed + trial,
+                    disable_visualizer=True,
+                    cache_dir=artvip_cache_dir,
+                )
+            else:
+                env = HSRPickEnv(
+                    n_envs=n_envs,
+                    object_name=object_name,
+                    show_viewer=False,
+                    seed=seed + trial,
+                    disable_visualizer=True,
+                )
         except BaseException as exc:
             if _is_max_n_error(exc):
                 raise RuntimeError(
@@ -290,6 +320,8 @@ def benchmark_env_count(
         result = {
             "n_envs": n_envs,
             "trial": trial,
+            "object_type": object_type,
+            "object_name": object_name,
             "total_steps": total_steps,
             "wall_s": wall,
             "steps_per_sec": steps_per_sec,
@@ -361,7 +393,28 @@ def main() -> None:
              "sweep normally stops at OOM long before this; it only prevents "
              "an infinite loop if the GPU never OOMs.",
     )
-    parser.add_argument("--object", type=str, default="ycb_061_foam_brick")
+    parser.add_argument("--object", type=str, default="ycb_061_foam_brick",
+                        help="YCB model name (used when --object-type=ycb)")
+    parser.add_argument(
+        "--object-type", choices=("ycb", "artvip"), default="ycb",
+        help="Object type to benchmark: 'ycb' (simple rigid URDF, default) "
+             "or 'artvip' (complex articulated USD from the ArtVIP dataset).",
+    )
+    parser.add_argument(
+        "--artvip-category", type=str, default="household_items",
+        help="ArtVIP category (default: household_items). Used with "
+             "--object-type=artvip.",
+    )
+    parser.add_argument(
+        "--artvip-object", type=str, default="trash_can/stepping_dustbin_4",
+        help="ArtVIP object path: type/instance (default: "
+             "trash_can/stepping_dustbin_4). Used with --object-type=artvip.",
+    )
+    parser.add_argument(
+        "--artvip-cache-dir", type=str, default=None,
+        help="Custom cache directory for ArtVIP downloads. Defaults to "
+             "~/.cache/artvip or the ARTVIP_CACHE_DIR env var.",
+    )
     parser.add_argument("--settle-steps", type=int, default=50)
     parser.add_argument("--trials", type=int, default=2,
                         help="Number of repeated trials per env count")
@@ -430,18 +483,23 @@ def main() -> None:
     # OOM) when --envs is not given.  In auto mode the max N is capped only by
     # GPU memory exhaustion, not by any hardcoded ceiling.
     auto_mode = args.envs is None
+    # Build a human-readable object label for log output.
+    if args.object_type == "artvip":
+        object_label = f"artvip:{args.artvip_category}/{args.artvip_object}"
+    else:
+        object_label = args.object
     if auto_mode:
         n_iter = _auto_n_sequence(
             args.auto_start, args.auto_factor, args.auto_cap,
         )
-        print(f"[benchmark] object={args.object} backend={args.backend}")
+        print(f"[benchmark] object={object_label} backend={args.backend}")
         print(f"[benchmark] AUTO mode: start={args.auto_start} "
               f"factor={args.auto_factor} cap={args.auto_cap} "
               f"(max N capped only by OOM)")
         print(f"[benchmark] trials={args.trials} settle_steps={args.settle_steps}")
     else:
         n_iter = iter(args.envs)
-        print(f"[benchmark] object={args.object} backend={args.backend}")
+        print(f"[benchmark] object={object_label} backend={args.backend}")
         print(f"[benchmark] envs={args.envs} trials={args.trials} "
               f"settle_steps={args.settle_steps}")
     print(f"[benchmark] gpu_sample_interval={args.gpu_sample_interval}s")
@@ -458,11 +516,15 @@ def main() -> None:
         try:
             results = benchmark_env_count(
                 n_envs,
-                object_name=args.object,
+                object_name=object_label,
                 settle_steps=args.settle_steps,
                 trials=args.trials,
                 seed=args.seed,
                 gpu_sample_interval=args.gpu_sample_interval,
+                object_type=args.object_type,
+                artvip_category=args.artvip_category,
+                artvip_object=args.artvip_object,
+                artvip_cache_dir=args.artvip_cache_dir,
             )
         except RuntimeError as exc:
             # Max-N exceeded (OOM or engine size limit) raised by

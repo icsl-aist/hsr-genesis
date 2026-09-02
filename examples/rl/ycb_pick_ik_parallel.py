@@ -710,6 +710,71 @@ class HSRMultiObjectPickEnv(HSRPickEnv):
         return summary
 
 
+class HSRArtvipPickEnv(HSRPickEnv):
+    """HSR pick env with an ArtVIP articulated USD object instead of a YCB URDF.
+
+    This stresses the physics solver with complex collision geometry (convexified
+    meshes) and articulation joints, providing a "complex object" case for
+    throughput benchmarking.  The ArtVIP object is downloaded on-demand via
+    :mod:`hsr_genesis.artvip_loader` and loaded as a free-body articulated
+    entity (``fixed=False``) so the pick pipeline can interact with it.
+
+    The success rate will typically be lower than with simple YCB objects
+    (large articulated objects are harder to lift), but the throughput
+    metrics (steps/sec, envs·steps/sec, GPU memory) are the primary output.
+    """
+
+    def __init__(
+        self,
+        *,
+        n_envs: int,
+        artvip_category: str,
+        artvip_object: str,
+        show_viewer: bool = False,
+        seed: int = 0,
+        disable_visualizer: bool = False,
+        grasp_params: torch.Tensor | None = None,
+        vis_options_overrides: dict | None = None,
+        camera_config: dict | None = None,
+        obj_radius_range: tuple[float, float] | None = None,
+        cache_dir: str | Path | None = None,
+    ) -> None:
+        self._artvip_category = artvip_category
+        self._artvip_object = artvip_object
+        self._artvip_cache_dir = cache_dir
+        label = f"artvip:{artvip_category}/{artvip_object}"
+        super().__init__(
+            n_envs=n_envs,
+            object_name=label,
+            show_viewer=show_viewer,
+            seed=seed,
+            disable_visualizer=disable_visualizer,
+            grasp_params=grasp_params,
+            vis_options_overrides=vis_options_overrides,
+            camera_config=camera_config,
+            obj_radius_range=obj_radius_range,
+        )
+
+    def _build_objects(self, scene, object_names: list[str]) -> list:
+        from hsr_genesis.artvip_loader import download_artvip_object
+
+        usd_path = download_artvip_object(
+            self._artvip_category,
+            self._artvip_object,
+            cache_dir=self._artvip_cache_dir,
+        )
+        entity = scene.add_entity(
+            gs.morphs.USD(
+                file=str(usd_path),
+                pos=(0.5, 0.0, OBJ_Z),
+                fixed=False,
+                decimate=True,
+                convexify=True,
+            ),
+        )
+        return [entity]
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
