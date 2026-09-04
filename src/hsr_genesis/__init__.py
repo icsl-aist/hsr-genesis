@@ -24,6 +24,20 @@ __all__ = [
     "sdf_to_urdf",
     "load_sdf_model",
     "morph_from_sdf",
+    # ArtVIP loader
+    "ARTVIP_REPO_ID",
+    "ARTVIP_CATEGORIES",
+    "ArtVIPJoint",
+    "ArtVIPJointInfo",
+    "ArtVIPPart",
+    "ArtVIPPartInfo",
+    "list_artvip_categories",
+    "list_artvip_objects",
+    "download_artvip_object",
+    "load_artvip_object",
+    "parse_artvip_joint_info",
+    "parse_artvip_part_info",
+    "parse_artvip_control_script",
 ]
 
 __version__ = "0.1.0"
@@ -72,6 +86,24 @@ def __getattr__(name: str):
         from . import sdf_parser
 
         return getattr(sdf_parser, name)
+    if name in (
+        "ARTVIP_REPO_ID",
+        "ARTVIP_CATEGORIES",
+        "ArtVIPJoint",
+        "ArtVIPJointInfo",
+        "ArtVIPPart",
+        "ArtVIPPartInfo",
+        "list_artvip_categories",
+        "list_artvip_objects",
+        "download_artvip_object",
+        "load_artvip_object",
+        "parse_artvip_joint_info",
+        "parse_artvip_part_info",
+        "parse_artvip_control_script",
+    ):
+        from . import artvip_loader
+
+        return getattr(artvip_loader, name)
     raise AttributeError(name)
 
 
