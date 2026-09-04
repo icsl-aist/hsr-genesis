@@ -395,6 +395,8 @@ class HSRRigidEntity(RigidEntity):
         self._hsr_arm_lift_kv: float = 450.0
         self._hsr_torso_kp: float = 10000.0
         self._hsr_torso_kv: float = 400.0
+        self._hsr_arm_kp: torch.Tensor | None = None
+        self._hsr_arm_kv: torch.Tensor | None = None
         self._hsr_base_controller: HSRBBaseController | None = None
         self._hsr_base_traj_ctrls: list[OmniBaseTrajectoryControl] | None = None
         self._hsr_base_traj_time: torch.Tensor | None = None
@@ -415,6 +417,9 @@ class HSRRigidEntity(RigidEntity):
         self._hsr_vec_base_duration: torch.Tensor | None = None
         self._hsr_vec_base_start_time: torch.Tensor | None = None
         self._hsr_vec_base_done: torch.Tensor | None = None
+        self._hsr_arm_integral_force: torch.Tensor | None = None
+        self._hsr_arm_integral_gain: torch.Tensor | None = None
+        self._hsr_arm_force_limit: torch.Tensor | None = None
         self._hsr_vec_capacity: int = 0
         self._hsr_torso_dof_idx_local: int | None = None
         self._hsr_collision_disable_applied = False
@@ -775,6 +780,8 @@ class HSRRigidEntity(RigidEntity):
             )
             self.set_dofs_kp(arm_kp, dofs_idx_local=self._hsr_arm_dofs_idx_local)
             self.set_dofs_kv(arm_kv, dofs_idx_local=self._hsr_arm_dofs_idx_local)
+            self._hsr_arm_kp = arm_kp
+            self._hsr_arm_kv = arm_kv
         if self._hsr_head_dofs_idx_local:
             head_names = []
             for name in ("head_pan_joint", "head_tilt_joint"):
@@ -919,6 +926,19 @@ class HSRRigidEntity(RigidEntity):
         self._hsr_arm_lift_kv = tuned_kv["arm_lift_joint"]
         self._hsr_torso_kp = tuned_kp["torso_lift_joint"]
         self._hsr_torso_kv = tuned_kv["torso_lift_joint"]
+        # Integral disturbance rejection removes the remaining pose-dependent
+        # gravity/coupling bias that fixed feed-forward cannot model.  Values
+        # are force-per-position-error-per-second (N/(m*s), Nm/(rad*s)).
+        self._hsr_arm_integral_gain = torch.tensor(
+            [8000.0, 240.0, 32.0, 48.0, 32.0],
+            device=gs.device,
+            dtype=gs.tc_float,
+        )
+        self._hsr_arm_force_limit = torch.tensor(
+            [300.0, 100.0, 100.0, 100.0, 100.0],
+            device=gs.device,
+            dtype=gs.tc_float,
+        )
         self._hsr_default_gains_applied = True
 
     def _hsr_apply_head_hold(self) -> None:
@@ -1065,6 +1085,9 @@ class HSRRigidEntity(RigidEntity):
         self._hsr_vec_base_duration = _grow(self._hsr_vec_base_duration, (n_envs,))
         self._hsr_vec_base_start_time = _grow(self._hsr_vec_base_start_time, (n_envs,))
         self._hsr_vec_base_done = _grow_bool(self._hsr_vec_base_done, n_envs)
+        self._hsr_arm_integral_force = _grow(
+            self._hsr_arm_integral_force, (n_envs, n_arm),
+        )
         self._hsr_vec_capacity = n_envs
 
     @staticmethod
@@ -1573,9 +1596,20 @@ class HSRRigidEntity(RigidEntity):
         )
         if cur_arm.ndim == 1:
             cur_arm = cur_arm.unsqueeze(0)
+        previous_target = self._hsr_vec_arm_end_pos[envs_idx_arr].clone()
+        had_target = self._hsr_vec_arm_active[envs_idx_arr].clone()
         self._hsr_vec_arm_start_pos[envs_idx_arr] = cur_arm
         self._hsr_vec_arm_end_pos[envs_idx_arr] = end_pos
         self._hsr_vec_arm_duration[envs_idx_arr] = durations
+        # Retain the learned disturbance only when replacing a trajectory with
+        # the same endpoint.  A changed endpoint clears stale integral force.
+        if self._hsr_arm_integral_force is not None:
+            changed_target = had_target & (
+                (end_pos - previous_target).abs().amax(dim=1) > 1e-4
+            )
+            reset_envs = envs_idx_arr[changed_target]
+            if reset_envs.numel() > 0:
+                self._hsr_arm_integral_force[reset_envs] = 0.0
         # Resolve start times: use provided or current whole-body time.
         times_now = self._hsr_whole_body_time[envs_idx_arr] if self._hsr_whole_body_time is not None else torch.zeros(n, device=gs.device, dtype=gs.tc_float)
         for i in range(n):
@@ -1606,6 +1640,8 @@ class HSRRigidEntity(RigidEntity):
         if self._hsr_vec_arm_active is not None:
             self._hsr_vec_arm_active[envs_idx_arr] = False
             self._hsr_vec_arm_done[envs_idx_arr] = False
+        if self._hsr_arm_integral_force is not None:
+            self._hsr_arm_integral_force[envs_idx_arr] = 0.0
         # Re-enable the arm hold so the arm doesn't fall between the reset
         # and the next trajectory being commanded.
         self._hsr_arm_hold_applied = False
@@ -1646,6 +1682,7 @@ class HSRRigidEntity(RigidEntity):
         if arm_vel.ndim == 1:
             arm_vel = arm_vel.unsqueeze(0)
 
+        desired_arm_vel = torch.zeros_like(arm_vel)
         desired_arm = torch.zeros_like(arm_pos)
         active = torch.zeros((envs_idx_arr.numel(),), device=gs.device, dtype=torch.bool)
 
@@ -1666,6 +1703,12 @@ class HSRRigidEntity(RigidEntity):
             alpha_exp = alpha.unsqueeze(1)  # (N, 1)
             start_pos = self._hsr_vec_arm_start_pos[envs_idx_arr]
             end_pos = self._hsr_vec_arm_end_pos[envs_idx_arr]
+            moving = (t < durations) & (durations > 0)
+            desired_arm_vel = torch.where(
+                moving.unsqueeze(1),
+                (end_pos - start_pos) / durations.clamp_min(1e-6).unsqueeze(1),
+                torch.zeros_like(desired_arm_vel),
+            )
             desired_arm = (1.0 - alpha_exp) * start_pos + alpha_exp * end_pos
             active = torch.ones(envs_idx_arr.numel(), device=gs.device, dtype=torch.bool)
             # Mark done
@@ -1695,8 +1738,7 @@ class HSRRigidEntity(RigidEntity):
                     state.point_before_pos = arm_pos[i].clone()
                     state.point_before_vel = arm_vel[i].clone()
                     state.sampled_already = True
-
-                pos, _vel, _acc, _before_last, _time_from_point = self._sample_linear_trajectory(
+                pos, vel, _acc, _before_last, _time_from_point = self._sample_linear_trajectory(
                     t_env,
                     state.traj.time_from_start,
                     state.traj.positions,
@@ -1706,6 +1748,7 @@ class HSRRigidEntity(RigidEntity):
                     state.point_before_vel,
                 )
                 desired_arm[i] = pos
+                desired_arm_vel[i] = vel
                 active[i] = True
 
                 if t_env >= float(state.traj.time_from_start[-1].item()):
@@ -1714,49 +1757,75 @@ class HSRRigidEntity(RigidEntity):
         if torch.any(active):
             active_envs = envs_idx_arr[active].tolist()
 
-            # --- Arm PD position control with gravity feed-forward ---
+            # --- Arm PID position control with gravity feed-forward ---
             #
-            # Genesis's CTRL_MODE.POSITION recomputes the PD force every
-            # substep using the current pos/vel, while CTRL_MODE.FORCE
-            # applies a constant force for all substeps.  Using
-            # control_dofs_force for PD+FF causes vibration at large dt
-            # because the force goes stale between substeps.
-            #
-            # Solution: embed the feed-forward into the position target.
-            # Setting ctrl_pos = desired + ff / kp makes Genesis's PD
-            # controller produce: kp*(desired + ff/kp - pos) + kv*(-vel)
-            #                           = kp*(desired - pos) + ff + kv*(-vel)
-            # which is exactly PD + feed-forward, recomputed every substep.
-            arm_lift_dof_idx = self._hsr_arm_dofs_idx_local[self._hsr_arm_lift_order_idx]
-            arm_ff_val = self._arm_lift_gravity_compensation_force()
-            torso_idx = self._ensure_torso_dof_idx()
+            # Genesis recomputes position-mode PD each physics substep.  Embed
+            # desired-velocity feed-forward, fixed gravity feed-forward, and a
+            # slowly learned disturbance force into the position target.  The
+            # integral term rejects pose-dependent gravity and mimic coupling
+            # without switching to stale per-step force control.
+            assert self._hsr_arm_kp is not None
+            assert self._hsr_arm_kv is not None
+            assert self._hsr_arm_integral_gain is not None
+            assert self._hsr_arm_force_limit is not None
+            assert self._hsr_arm_integral_force is not None
 
-            # Compute the arm_lift PD force prediction for the torso FF.
-            # This is needed to counteract the arm reaction on the torso.
-            arm_lift_actual = arm_pos[active][:, self._hsr_arm_lift_order_idx]
-            arm_lift_vel = arm_vel[active][:, self._hsr_arm_lift_order_idx]
-            arm_lift_desired = desired_arm[active][:, self._hsr_arm_lift_order_idx]
-            arm_pd_force = (
-                self._hsr_arm_lift_kp * (arm_lift_desired - arm_lift_actual)
-                + self._hsr_arm_lift_kv * (-arm_lift_vel)
+            active_envs_tensor = envs_idx_arr[active]
+            actual_arm = arm_pos[active]
+            actual_arm_vel = arm_vel[active]
+            target_arm = desired_arm[active]
+            target_arm_vel = desired_arm_vel[active]
+            position_error = target_arm - actual_arm
+
+            nominal_ff = torch.zeros_like(target_arm)
+            nominal_ff[:, self._hsr_arm_lift_order_idx] = (
+                self._arm_lift_gravity_compensation_force()
             )
-            arm_total_force = arm_pd_force + arm_ff_val
-            arm_force_limit = 300.0
-            arm_total_force = arm_total_force.clamp(-arm_force_limit, arm_force_limit)
-
-            # Shift the arm_lift target to embed the gravity feed-forward.
-            desired_arm_shifted = desired_arm[active].clone()
-            desired_arm_shifted[:, self._hsr_arm_lift_order_idx] = (
-                arm_lift_desired + arm_ff_val / self._hsr_arm_lift_kp
+            velocity_ff = self._hsr_arm_kv * target_arm_vel
+            non_integral_force = (
+                self._hsr_arm_kp * position_error
+                + self._hsr_arm_kv * (-actual_arm_vel)
+                + velocity_ff
+                + nominal_ff
             )
 
-            # Apply standard PD position control to all arm DOFs.
-            # The arm_lift target is shifted to produce PD + FF.
+            integral_force = self._hsr_arm_integral_force[active_envs_tensor]
+            candidate_integral = integral_force + (
+                self._hsr_arm_integral_gain * position_error * float(dt)
+            )
+            integral_limit = self._hsr_arm_force_limit * 0.8
+            candidate_integral = torch.maximum(
+                torch.minimum(candidate_integral, integral_limit), -integral_limit,
+            )
+            candidate_total = non_integral_force + candidate_integral
+            integrating_into_upper_limit = (
+                (candidate_total > self._hsr_arm_force_limit) & (position_error > 0.0)
+            )
+            integrating_into_lower_limit = (
+                (candidate_total < -self._hsr_arm_force_limit) & (position_error < 0.0)
+            )
+            integral_force = torch.where(
+                integrating_into_upper_limit | integrating_into_lower_limit,
+                integral_force,
+                candidate_integral,
+            )
+            self._hsr_arm_integral_force[active_envs_tensor] = integral_force
+
+            embedded_force = nominal_ff + velocity_ff + integral_force
+            arm_ctrl_pos = target_arm + embedded_force / self._hsr_arm_kp
             self.control_dofs_position(
-                desired_arm_shifted,
+                arm_ctrl_pos,
                 dofs_idx_local=self._hsr_arm_dofs_idx_local,
-                envs_idx=active_envs,
+                envs_idx=active_envs_tensor.tolist(),
             )
+
+            arm_lift_actual = actual_arm[:, self._hsr_arm_lift_order_idx]
+            arm_lift_desired = target_arm[:, self._hsr_arm_lift_order_idx]
+            arm_total_force = (
+                non_integral_force[:, self._hsr_arm_lift_order_idx]
+                + integral_force[:, self._hsr_arm_lift_order_idx]
+            ).clamp(-300.0, 300.0)
+            torso_idx = self._ensure_torso_dof_idx()
 
             # --- Torso mimic + gravity + arm-reaction feed-forward ---
             if (
