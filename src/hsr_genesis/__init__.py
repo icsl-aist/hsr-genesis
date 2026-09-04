@@ -29,11 +29,14 @@ __all__ = [
     "ARTVIP_CATEGORIES",
     "ArtVIPJoint",
     "ArtVIPJointInfo",
+    "ArtVIPPart",
+    "ArtVIPPartInfo",
     "list_artvip_categories",
     "list_artvip_objects",
     "download_artvip_object",
     "load_artvip_object",
     "parse_artvip_joint_info",
+    "parse_artvip_part_info",
     "parse_artvip_control_script",
 ]
 
@@ -88,11 +91,14 @@ def __getattr__(name: str):
         "ARTVIP_CATEGORIES",
         "ArtVIPJoint",
         "ArtVIPJointInfo",
+        "ArtVIPPart",
+        "ArtVIPPartInfo",
         "list_artvip_categories",
         "list_artvip_objects",
         "download_artvip_object",
         "load_artvip_object",
         "parse_artvip_joint_info",
+        "parse_artvip_part_info",
         "parse_artvip_control_script",
     ):
         from . import artvip_loader

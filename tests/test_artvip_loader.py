@@ -16,10 +16,13 @@ from hsr_genesis.artvip_loader import (
     ARTVIP_REPO_ID,
     ArtVIPJoint,
     ArtVIPJointInfo,
+    ArtVIPPart,
+    ArtVIPPartInfo,
     list_artvip_categories,
     merge_fixed_meshes,
     parse_artvip_control_script,
     parse_artvip_joint_info,
+    parse_artvip_part_info,
 )
 
 
@@ -241,6 +244,120 @@ def test_parse_control_script_all_constants(tmp_path):
     assert meta["joint_names"] == ["joint_a", "joint_b"]
     assert meta["joint_threshold"] == 0.5
     assert meta["asset_root_names"] == ["root_link"]
+
+
+# ---------------------------------------------------------------------------
+# parse_artvip_part_info
+# ---------------------------------------------------------------------------
+
+def test_parse_part_info_dishwasher(dishwasher_usd_path):
+    """Parse part-level semantic annotations from the dishwasher USD."""
+    info = parse_artvip_part_info(dishwasher_usd_path)
+
+    assert info.object_label == "dishwasher"
+    assert len(info.parts) >= 3
+
+    # Should have door, handle, and rack labels.
+    assert "door" in info.labels
+    assert "handle" in info.labels
+    assert "rack" in info.labels
+
+    # The handle should be a nested sub-part (not a top-level link).
+    handles = info.get_parts_by_label("handle")
+    assert len(handles) == 1
+    handle = handles[0]
+    assert handle.is_link is False
+    assert handle.parent_link != handle.prim_path
+
+    # The door should be a top-level link.
+    doors = info.get_parts_by_label("door")
+    assert len(doors) == 1
+    door = doors[0]
+    assert door.is_link is True
+    assert door.parent_link == door.prim_path
+
+    # The handle's parent link should be the door.
+    assert handle.parent_link == door.prim_path
+
+
+def test_parse_part_info_mesh_counts(dishwasher_usd_path):
+    """Each part should have non-zero mesh and vertex counts."""
+    info = parse_artvip_part_info(dishwasher_usd_path)
+
+    for part in info.parts:
+        assert part.n_meshes >= 1, f"{part.name} has no meshes"
+        assert part.n_vertices >= 1, f"{part.name} has no vertices"
+
+
+def test_parse_part_info_labels_property(dishwasher_usd_path):
+    """The labels property should return sorted unique labels."""
+    info = parse_artvip_part_info(dishwasher_usd_path)
+
+    labels = info.labels
+    assert labels == sorted(labels)
+    assert len(labels) == len(set(labels))
+
+
+def test_parse_part_info_get_graspable_parts(dishwasher_usd_path):
+    """get_graspable_parts should return handles, doors, etc. but not racks."""
+    info = parse_artvip_part_info(dishwasher_usd_path)
+
+    graspable = info.get_graspable_parts()
+    graspable_labels = {p.label for p in graspable}
+
+    # Door and handle are graspable; rack is not.
+    assert "door" in graspable_labels
+    assert "handle" in graspable_labels
+    assert "rack" not in graspable_labels
+
+
+def test_parse_part_info_get_parts_by_label(dishwasher_usd_path):
+    """get_parts_by_label should filter correctly."""
+    info = parse_artvip_part_info(dishwasher_usd_path)
+
+    racks = info.get_parts_by_label("rack")
+    assert len(racks) == 2
+    for r in racks:
+        assert r.label == "rack"
+
+    # Non-existent label should return empty list.
+    assert info.get_parts_by_label("nonexistent") == []
+
+
+def test_artvip_part_dataclass():
+    """ArtVIPPart should be a frozen dataclass with all fields."""
+    p = ArtVIPPart(
+        prim_path="/root/E_lid_1",
+        name="E_lid_1",
+        label="lid",
+        is_link=True,
+        parent_link="/root/E_lid_1",
+        n_meshes=2,
+        n_vertices=18364,
+    )
+    assert p.prim_path == "/root/E_lid_1"
+    assert p.label == "lid"
+    assert p.is_link is True
+    assert p.n_meshes == 2
+    assert p.n_vertices == 18364
+
+    # Frozen — should not allow mutation.
+    with pytest.raises(AttributeError):
+        p.label = "door"
+
+
+def test_artvip_part_info_dataclass():
+    """ArtVIPPartInfo should support queries."""
+    parts = [
+        ArtVIPPart("/root/E_lid_1", "E_lid_1", "lid", True, "/root/E_lid_1", 1, 100),
+        ArtVIPPart("/root/E_pedal_5", "E_pedal_5", "pedal", True, "/root/E_pedal_5", 1, 50),
+    ]
+    info = ArtVIPPartInfo(usd_path="test.usd", object_label="trash_can", parts=parts)
+
+    assert info.object_label == "trash_can"
+    assert info.labels == ["lid", "pedal"]
+    assert len(info.get_parts_by_label("lid")) == 1
+    assert len(info.get_graspable_parts()) == 2  # both lid and pedal are graspable
 
 
 # ---------------------------------------------------------------------------

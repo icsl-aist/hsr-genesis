@@ -77,11 +77,14 @@ __all__ = [
     "ARTVIP_CATEGORIES",
     "ArtVIPJointInfo",
     "ArtVIPJoint",
+    "ArtVIPPart",
+    "ArtVIPPartInfo",
     "list_artvip_categories",
     "list_artvip_objects",
     "download_artvip_object",
     "load_artvip_object",
     "parse_artvip_joint_info",
+    "parse_artvip_part_info",
     "parse_artvip_control_script",
     "merge_fixed_meshes",
 ]
@@ -175,6 +178,90 @@ class ArtVIPJointInfo:
     movable_joints: list[ArtVIPJoint] = field(default_factory=list)
     up_axis: str = "Z"
     meters_per_unit: float = 1.0
+
+
+@dataclass(frozen=True)
+class ArtVIPPart:
+    """Semantic metadata for one part of an ArtVIP articulated object.
+
+    ArtVIP USD files embed semantic labels via ``semantics:labels:class``
+    attributes on link prims (e.g. ``"lid"``, ``"pedal"``, ``"handle"``,
+    ``"door"``).  These labels identify functional parts that a robot would
+    interact with, following the 35-category annotation scheme described in
+    the ArtVIP paper (Table 5).
+
+    Attributes
+    ----------
+    prim_path : str
+        USD prim path of the labeled part (e.g. ``"/root/E_lid_1"``).
+    name : str
+        Prim name (e.g. ``"E_lid_1"``).
+    label : str
+        Semantic label from ``semantics:labels:class``
+        (e.g. ``"lid"``, ``"pedal"``, ``"handle"``).
+    is_link : bool
+        True if this part is a top-level link (direct child of the
+        articulation root).  Sub-parts (e.g. a handle nested inside a
+        door link) have ``is_link=False``.
+    parent_link : str
+        Prim path of the top-level link that contains this part.
+        For top-level links, this is the part's own path.
+    n_meshes : int
+        Number of mesh prims under this part.
+    n_vertices : int
+        Total vertex count across all meshes under this part.
+    """
+
+    prim_path: str
+    name: str
+    label: str
+    is_link: bool
+    parent_link: str
+    n_meshes: int
+    n_vertices: int
+
+
+@dataclass(frozen=True)
+class ArtVIPPartInfo:
+    """Parsed part-level semantic metadata from an ArtVIP USD file.
+
+    Attributes
+    ----------
+    usd_path : str
+        Path to the USD file that was parsed.
+    object_label : str
+        Semantic label of the object itself (e.g. ``"trash_can"``,
+        ``"dishwasher"``).
+    parts : list[ArtVIPPart]
+        All labeled parts in the object.
+    labels : list[str]
+        Sorted unique semantic labels across all parts.
+    """
+
+    usd_path: str
+    object_label: str
+    parts: list[ArtVIPPart] = field(default_factory=list)
+
+    @property
+    def labels(self) -> list[str]:
+        return sorted({p.label for p in self.parts})
+
+    def get_parts_by_label(self, label: str) -> list[ArtVIPPart]:
+        """Return all parts with the given semantic label."""
+        return [p for p in self.parts if p.label == label]
+
+    def get_graspable_parts(self) -> list[ArtVIPPart]:
+        """Return parts with labels commonly used for robotic grasping.
+
+        These are parts like handles, lids, knobs, and buttons that a
+        robot gripper would interact with, as opposed to passive parts
+        like bodies or shelves.
+        """
+        graspable_labels = {
+            "handle", "lid", "knob", "button", "door", "drawer",
+            "pedal", "ball handle", "front cover",
+        }
+        return [p for p in self.parts if p.label in graspable_labels]
 
 
 # ---------------------------------------------------------------------------
@@ -518,6 +605,126 @@ def parse_artvip_joint_info(usd_path: str | Path) -> ArtVIPJointInfo:
         movable_joints=movable,
         up_axis=up_axis,
         meters_per_unit=meters_per_unit,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Part-level semantic annotation parsing
+# ---------------------------------------------------------------------------
+
+def parse_artvip_part_info(usd_path: str | Path) -> ArtVIPPartInfo:
+    """Parse part-level semantic annotations from an ArtVIP USD file.
+
+    ArtVIP USD files embed semantic labels via ``semantics:labels:class``
+    attributes on prims.  These labels follow a 35-category annotation
+    scheme (Table 5 of the ArtVIP paper) that identifies functional parts
+    such as ``"lid"``, ``"pedal"``, ``"handle"``, ``"door"``, ``"drawer"``,
+    ``"shelf"``, ``"seat"``, ``"backrest"``, ``"wheel"``, etc.
+
+    This function extracts all semantic labels, along with mesh counts and
+    vertex counts per part, and identifies which parts are top-level
+    articulation links vs. nested sub-parts.
+
+    Parameters
+    ----------
+    usd_path : str | Path
+        Path to the ArtVIP ``model_*.usd`` file.
+
+    Returns
+    -------
+    ArtVIPPartInfo
+        Parsed part metadata including the object-level label, all part
+        labels, and convenience methods for filtering by label or
+        identifying graspable parts.
+
+    Example
+    -------
+        from hsr_genesis.artvip_loader import download_artvip_object, parse_artvip_part_info
+
+        usd_path = download_artvip_object("household_items", "trash_can/stepping_dustbin_4")
+        part_info = parse_artvip_part_info(usd_path)
+
+        print(f"Object: {part_info.object_label}")
+        for part in part_info.parts:
+            print(f"  {part.name}: label={part.label}, meshes={part.n_meshes}, verts={part.n_vertices}")
+
+        # Find graspable parts
+        for part in part_info.get_graspable_parts():
+            print(f"  Graspable: {part.name} ({part.label})")
+    """
+    from pxr import Usd, UsdGeom
+
+    usd_path = Path(usd_path)
+    stage = Usd.Stage.Open(str(usd_path))
+
+    root = stage.GetDefaultPrim()
+    if not root or not root.IsValid():
+        root = stage.GetPseudoRoot()
+
+    # Object-level label on the root prim.
+    object_label = ""
+    root_sem_attr = root.GetAttribute("semantics:labels:class")
+    if root_sem_attr and root_sem_attr.Get():
+        labels = list(root_sem_attr.Get())
+        object_label = labels[0] if labels else ""
+
+    # Identify top-level links (direct children of root that are Xforms).
+    root_children_paths = {str(c.GetPath()) for c in root.GetChildren()}
+
+    parts: list[ArtVIPPart] = []
+    for prim in stage.Traverse():
+        sem_attr = prim.GetAttribute("semantics:labels:class")
+        if not sem_attr or not sem_attr.Get():
+            continue
+
+        labels_list = list(sem_attr.Get())
+        if not labels_list:
+            continue
+        label = labels_list[0]
+
+        prim_path = str(prim.GetPath())
+        name = prim.GetName()
+
+        # Skip the root prim (already captured as object_label).
+        if prim_path == str(root.GetPath()):
+            continue
+
+        # Determine if this is a top-level link.
+        is_link = prim_path in root_children_paths
+
+        # Find the parent link (walk up to a root child).
+        parent_link = prim_path
+        parent = prim.GetParent()
+        while parent and parent.IsValid():
+            if str(parent.GetPath()) in root_children_paths:
+                parent_link = str(parent.GetPath())
+                break
+            parent = parent.GetParent()
+
+        # Count meshes and vertices under this part.
+        n_meshes = 0
+        n_vertices = 0
+        for descendant in Usd.PrimRange(prim):
+            if descendant.IsA(UsdGeom.Mesh) and descendant.IsActive():
+                n_meshes += 1
+                pts = UsdGeom.Mesh(descendant).GetPointsAttr().Get()
+                if pts:
+                    n_vertices += len(pts)
+
+        parts.append(ArtVIPPart(
+            prim_path=prim_path,
+            name=name,
+            label=label,
+            is_link=is_link,
+            parent_link=parent_link,
+            n_meshes=n_meshes,
+            n_vertices=n_vertices,
+        ))
+
+    return ArtVIPPartInfo(
+        usd_path=str(usd_path),
+        object_label=object_label,
+        parts=parts,
     )
 
 
