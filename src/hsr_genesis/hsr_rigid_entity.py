@@ -1215,21 +1215,19 @@ class HSRRigidEntity(RigidEntity):
         base_positions: torch.Tensor,
         start_times: Sequence[float | None],
     ) -> None:
-        """Populate flattened tensors for the single-waypoint fast path.
+        """Populate flattened tensors for the vectorized single-waypoint fast path.
 
-        This path duplicates only the common finite-difference trajectory
-        behavior; it is not yet semantically identical to
-        ``OmniBaseTrajectoryControl``:
+        Eligibility (all four conditions required for every member):
+          * ``positions`` is a 2-D tensor with shape ``(1, 3)``
+          * ``joint_names`` is ``None`` (no named-coordinate permutation)
+          * ``velocities`` is ``None`` (no explicit feed-forward)
+          * ``accelerations`` is ``None``
 
-        * ``end_pos`` stores the raw waypoint yaw rather than the accepted,
-          shortest-path unwrapped yaw.
-        * explicit ``Trajectory.velocities`` and ``accelerations`` are not
-          stored, so feed-forward is always derived from endpoint difference.
-        * reaching ``duration`` sets ``done`` but leaves ``active`` true, so
-          the final pose remains under feedback control indefinitely.
-
-        Multi-waypoint or mixed-active batches use the per-environment
-        controller below and do not have these fast-path semantics.
+        If any member is ineligible the entire batch falls back to the
+        per-environment canonical controller — the batch is never partitioned.
+        When eligible, the terminal yaw is normalized to the shortest-path
+        angle relative to the acceptance pose so that ``+179°`` → ``-179°``
+        commands a ``+2°`` turn rather than a ``-358°`` turn.
         """
         n = int(envs_idx_arr.numel())
         all_simple = True
@@ -1239,14 +1237,27 @@ class HSRRigidEntity(RigidEntity):
             traj = trajectories[i]
             positions = to_torch(traj.positions).to(device=gs.device, dtype=gs.tc_float)
             tfs = to_torch(traj.time_from_start).to(device=gs.device, dtype=gs.tc_float)
-            if positions.ndim != 2 or positions.shape[0] != 1:
+            is_simple = (
+                positions.ndim == 2
+                and positions.shape == (1, 3)
+                and traj.joint_names is None
+                and traj.velocities is None
+                and traj.accelerations is None
+            )
+            if not is_simple:
                 all_simple = False
                 break
             end_pos[i] = positions[0]
             durations[i] = float(tfs[0].item()) if tfs.numel() > 0 else 0.0
         if not all_simple:
+            # Batch-wide fallback: do not partition the batch.
             self._hsr_vec_base_active[envs_idx_arr] = False
+            self._hsr_vec_base_done[envs_idx_arr] = False
             return
+        # Normalize terminal yaw to shortest-path from the acceptance pose.
+        end_pos[:, 2] = base_positions[:, 2] + _wrap_to_pi_batch(
+            end_pos[:, 2] - base_positions[:, 2]
+        )
         self._hsr_vec_base_start_pos[envs_idx_arr] = base_positions
         self._hsr_vec_base_end_pos[envs_idx_arr] = end_pos
         self._hsr_vec_base_duration[envs_idx_arr] = durations
@@ -1279,6 +1290,19 @@ class HSRRigidEntity(RigidEntity):
         *,
         envs_idx,
     ) -> dict[str, torch.Tensor]:
+        """Advance base trajectory control one step and return commands.
+
+        ``active`` denotes trajectory **ownership**, not motion.  A trajectory
+        remains active after its time horizon — the final pose is held under
+        feedback control until ``reset_base_trajectory_batched`` or replacement
+        via ``set_base_trajectory_batched``.  If step calls stop, the inner
+        ``HSRBBaseController`` command timeout (0.5 s) zeroes the wheel command
+        automatically.
+
+        Returns a dict with:
+        * ``active`` — ``bool[N]``: whether each environment owns a trajectory.
+        * ``command`` — ``float[N, 3]``: body-frame ``[forward, left, CCW yaw]``.
+        """
         self._hsr_apply_default_collision_disable()
         self._hsr_apply_passive_wheel_friction()
         self._hsr_apply_high_friction_links()
@@ -1325,13 +1349,19 @@ class HSRRigidEntity(RigidEntity):
             use_vec_base = bool(vec_base_active.all().item())
         else:
             use_vec_base = False
-        # If none active, skip base trajectory entirely (no loop needed).
+        # If no vector path and no canonical trajectory is active, skip the
+        # base trajectory loop entirely.
         if not use_vec_base and not vec_base_active.any().item():
-            # No base trajectories active — just step the base controller.
-            if self._hsr_base_control_mode != BaseControlMode.QPOS:
-                base_controller = self.get_base_controller()
-                base_controller.step_batch(dt, envs_idx=envs_idx_arr.tolist())
-            return {"active": active, "command": out}
+            any_canonical_active = any(
+                self._hsr_base_traj_ctrls[int(env)].update_active_trajectory()
+                for env in envs_idx_arr.tolist()
+            )
+            if not any_canonical_active:
+                # No base trajectories active — just step the base controller.
+                if self._hsr_base_control_mode != BaseControlMode.QPOS:
+                    base_controller = self.get_base_controller()
+                    base_controller.step_batch(dt, envs_idx=envs_idx_arr.tolist())
+                return {"active": active, "command": out}
         if use_vec_base and self._hsr_base_control_mode != BaseControlMode.QPOS:
             # This branch uses the controller-owned batched output calculation
             # for throughput.  Keep its frame order invariant: interpolate and
@@ -1349,18 +1379,16 @@ class HSRRigidEntity(RigidEntity):
             start_pos_b = self._hsr_vec_base_start_pos[envs_idx_arr]
             end_pos_b = self._hsr_vec_base_end_pos[envs_idx_arr]
             desired_positions = (1.0 - alpha_exp_b) * start_pos_b + alpha_exp_b * end_pos_b
-            # Feed-forward is endpoint finite difference during the trajectory
-            # and zero afterward.  Unlike sample_desired_state, this path does
-            # not consume explicit Trajectory.velocities; see
-            # _populate_vec_base_state's semantic warning.
+            # Feed-forward is active only for 0 <= t < duration.  Before the
+            # start time the captured pose is held with zero feed-forward; at
+            # and after the horizon the endpoint is held with zero feed-forward.
+            # A zero-duration waypoint is immediate (alpha=1, zero feed-forward).
             dt_traj = torch.where(durations_b > 0, durations_b, torch.ones_like(durations_b))
-            desired_velocities = (end_pos_b - start_pos_b) / dt_traj.unsqueeze(1)
-            # Zero feed-forward after the trajectory horizon.
-            done_mask_b = self._hsr_vec_base_done[envs_idx_arr]
+            moving = (t_b >= 0.0) & (t_b < durations_b)
             desired_velocities = torch.where(
-                (t_b >= durations_b).unsqueeze(1),
-                torch.zeros_like(desired_velocities),
-                desired_velocities,
+                moving.unsqueeze(1),
+                (end_pos_b - start_pos_b) / dt_traj.unsqueeze(1),
+                torch.zeros_like(end_pos_b),
             )
 
             # Controller-owned outer-loop calculation (feedback + damping +
@@ -1403,7 +1431,6 @@ class HSRRigidEntity(RigidEntity):
                 else:
                     out[i] = ctrl.get_output_velocity(current_positions[i], desired, dt=dt, current_velocities=current_velocities[i])
                 active[i] = True
-                ctrl.terminate_control_if_stopped(time_now, current_velocities[i])
 
         # QPOS is a kinematic bypass, not another actuator controller.  It
         # writes the interpolated world X/Y and yaw directly to the root pose,

@@ -664,15 +664,10 @@ class OmniBaseTrajectoryControl:
     def __init__(
         self,
         coordinate_names: Sequence[str] = ("odom_x", "odom_y", "odom_t"),
-        stop_velocity_threshold: float = 0.001,
-        stop_time_margin: float = 0.2,
     ) -> None:
         self.coordinate_names = list(coordinate_names)
         if len(self.coordinate_names) != 3:
             raise ValueError("coordinate_names must have length 3")
-
-        self.stop_velocity_threshold = float(stop_velocity_threshold)
-        self.stop_time_margin = float(stop_time_margin)
 
         self._feedback_gain = torch.tensor(
             self.TUNING.feedback_gain,
@@ -1021,21 +1016,6 @@ class OmniBaseTrajectoryControl:
             current_velocities=current_velocities.unsqueeze(0),
         )[0]
 
-    def terminate_control_if_stopped(self, time: float, current_velocities: torch.Tensor) -> bool:
-        if self._trajectory is None or self._trajectory_start_time is None:
-            return False
-
-        times = self._trajectory.time_from_start
-        last_time = float(times[-1].item())
-        if time - self._trajectory_start_time <= last_time + self.stop_time_margin:
-            return False
-
-        cur_vel = to_torch(current_velocities).to(device=gs.device, dtype=TORCH_FLOAT).reshape(3)
-        if torch.linalg.norm(cur_vel) >= self.stop_velocity_threshold:
-            return False
-
-        self.reset_current_trajectory()
-        return True
 
     def step(
         self,
