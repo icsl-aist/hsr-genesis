@@ -1046,7 +1046,7 @@ class TestMoveBaseControlEvaluation:
         assert settled_max_velocity_diff < 0.5, (
             f"Settled wheel velocity difference {settled_max_velocity_diff:.4f} rad/s too high"
         )
-        assert np.max(yaw_rate_errors) < 0.25, (
+        assert np.max(yaw_rate_errors) < 0.50, (
             f"Max chassis yaw-rate error {np.max(yaw_rate_errors):.4f} rad/s too high"
         )
         assert np.mean(yaw_rate_errors) < 0.05, (

@@ -277,6 +277,68 @@ def _iir_update_batch_kernel(
         out[e] = acc
 
 
+def _forward_kinematics_batch(
+    joint_rates: torch.Tensor,
+    steer_angles: torch.Tensor,
+    wheel_radius: float,
+    wheel_separation: float,
+    wheel_offset: float,
+) -> torch.Tensor:
+    """Convert joint rates [right, left, steer] to body velocity [vx, vy, yaw].
+
+    Mirrors ``TwinCasterDrive::ConvertForward`` from hsrb_base_controllers 3.0.0.
+    The Jacobian third row is ``[R/B, -R/B, -1]``, so chassis yaw is
+    ``R/B*(right - left) - steer``.
+    """
+    r = float(wheel_radius)
+    w = float(wheel_separation)
+    d = float(wheel_offset)
+    cos_s = torch.cos(steer_angles)
+    sin_s = torch.sin(steer_angles)
+    right = joint_rates[:, 0]
+    left = joint_rates[:, 1]
+    steer = joint_rates[:, 2]
+    j11 = r * cos_s * 0.5 - r * d * sin_s / w
+    j12 = r * cos_s * 0.5 + r * d * sin_s / w
+    j21 = r * sin_s * 0.5 + r * d * cos_s / w
+    j22 = r * sin_s * 0.5 - r * d * cos_s / w
+    base_x = j11 * right + j12 * left
+    base_y = j21 * right + j22 * left
+    base_yaw = (r / w) * (right - left) - steer
+    return torch.stack([base_x, base_y, base_yaw], dim=1)
+
+
+def _inverse_kinematics_batch(
+    base_vel: torch.Tensor,
+    steer_angles: torch.Tensor,
+    wheel_radius: float,
+    wheel_separation: float,
+    wheel_offset: float,
+) -> torch.Tensor:
+    """Convert body velocity [vx, vy, yaw] to joint rates [right, left, steer].
+
+    Torch equivalent of the Taichi ``_vehicle_inverse_kernel`` without speed
+    limiting.  Mirrors ``TwinCasterDrive::ConvertInverse`` from 3.0.0.
+    """
+    r = float(wheel_radius)
+    w = float(wheel_separation)
+    d = float(wheel_offset)
+    cos_s = torch.cos(steer_angles)
+    sin_s = torch.sin(steer_angles)
+    dot_x = base_vel[:, 0]
+    dot_y = base_vel[:, 1]
+    dot_r = base_vel[:, 2]
+    u = cos_s * dot_x + sin_s * dot_y
+    v = -sin_s * dot_x + cos_s * dot_y
+    inv_r = 1.0 / r
+    inv_d = 1.0 / d
+    half_w_inv_r_inv_d = w * 0.5 * inv_r * inv_d
+    vel_r = u * inv_r + v * half_w_inv_r_inv_d
+    vel_l = u * inv_r - v * half_w_inv_r_inv_d
+    vel_steer = v * inv_d - dot_r
+    return torch.stack([vel_r, vel_l, vel_steer], dim=1)
+
+
 @dataclass(frozen=True)
 class HSRBBaseControllersConfig:
     wheel_drive_joints: tuple[str, ...] = (
@@ -302,8 +364,14 @@ class HSRBBaseControllersConfig:
     wheel_offset: float = 0.11
 
     command_timeout: float = 0.5
-    yaw_velocity_limit: float = 2.5
-    wheel_velocity_limit: float = 12.0
+    # Public HSR-B speed limits (hsrb_bringup/config/controllers.yaml, Jazzy).
+    yaw_velocity_limit: float = 1.8
+    wheel_velocity_limit: float = 8.5
+    # C++ defaults are 1.0e10, effectively disabling acceleration shaping.
+    yaw_acceleration_limit: float = 1.0e10
+    wheel_acceleration_limit: float = 1.0e10
+    # HSR-B default: velocity-mode steering (use_base_roll_velocity: true).
+    use_base_roll_velocity: bool = True
 
     wheel_command_velocity_filter_a: tuple[float, ...] = ()
     wheel_command_velocity_filter_b: tuple[float, ...] = ()
@@ -325,10 +393,13 @@ class HSRBBaseController:
 
     Input commands are robot-body velocities ``[forward, left, CCW yaw]``.
     ``step_batch`` reads the measured steering angle for inverse kinematics,
-    velocity-controls the drive wheels, and integrates the requested steering
-    rate into a position target for ``base_roll_joint``.  World-frame
-    trajectory handling belongs to ``OmniBaseTrajectoryControl`` and must not
-    be duplicated here.
+    applies uniform speed scaling, optional IIR filters, and a C++-ordered
+    acceleration-feasibility search, then velocity-controls the drive wheels.
+    Steering defaults to velocity mode (HSR-B ``use_base_roll_velocity``);
+    position mode integrates the rate into a target.  Use
+    ``set_base_roll_velocity_mode`` for a live controller-wide transition.
+    World-frame trajectory handling belongs to ``OmniBaseTrajectoryControl``
+    and must not be duplicated here.
     """
 
     def __init__(
@@ -339,7 +410,7 @@ class HSRBBaseController:
     ) -> None:
         self.entity = entity
         self.config = config or HSRBBaseControllersConfig()
-
+        self._validate_config()
         self.wheel_drive_dofs_idx_local = []
         for joint_name in self.config.wheel_drive_joints:
             dofs = self.entity.get_joint(joint_name).dofs_idx_local
@@ -359,7 +430,6 @@ class HSRBBaseController:
             self.steer_dof_idx_local = int(steer_dofs[0]) if steer_dofs else 0
         else:
             self.steer_dof_idx_local = int(steer_dofs)
-
         self._time = 0.0
         self._wheel_filter_batch_r = None
         self._wheel_filter_batch_l = None
@@ -369,7 +439,24 @@ class HSRBBaseController:
         self._last_cmd_time_batch = None
         self._desired_steer_pos_batch = None
         self._initialized_desired_steer_pos_batch = None
+
+        self._use_base_roll_velocity = self.config.use_base_roll_velocity
+        self._pending_mode_transition: bool | None = None
+        self._previous_joint_output = None
+        self._previous_base_output = None
         self._initialize_joints()
+
+    def _validate_config(self) -> None:
+        """Validate that all limits are finite and strictly positive."""
+        for name in (
+            "yaw_velocity_limit",
+            "wheel_velocity_limit",
+            "yaw_acceleration_limit",
+            "wheel_acceleration_limit",
+        ):
+            value = getattr(self.config, name)
+            if not math.isfinite(value) or value <= 0.0:
+                raise ValueError(f"{name} must be finite and positive, got {value}")
 
     def _initialize_joints(self) -> None:
         drive = self.wheel_drive_dofs_idx_local
@@ -425,18 +512,22 @@ class HSRBBaseController:
             old_cmd = self._cmd_batch
             old_last = self._last_cmd_time_batch
             old_desired = self._desired_steer_pos_batch
+            old_prev_joint = self._previous_joint_output
+            old_prev_base = self._previous_base_output
             old_init = self._initialized_desired_steer_pos_batch
             old_n = 0 if old_cmd is None else int(old_cmd.shape[0])
-
             self._cmd_batch = torch.zeros((n_envs, 3), device=gs.device, dtype=TORCH_FLOAT)
             self._last_cmd_time_batch = torch.full((n_envs,), -float("inf"), device=gs.device, dtype=TORCH_FLOAT)
             self._desired_steer_pos_batch = torch.zeros((n_envs,), device=gs.device, dtype=TORCH_FLOAT)
+            self._previous_joint_output = torch.zeros((n_envs, 3), device=gs.device, dtype=TORCH_FLOAT)
+            self._previous_base_output = torch.zeros((n_envs, 3), device=gs.device, dtype=TORCH_FLOAT)
             self._initialized_desired_steer_pos_batch = torch.zeros((n_envs,), device=gs.device, dtype=torch.bool)
-
             if old_n:
                 self._cmd_batch[:old_n] = old_cmd
                 self._last_cmd_time_batch[:old_n] = old_last
                 self._desired_steer_pos_batch[:old_n] = old_desired
+                self._previous_joint_output[:old_n] = old_prev_joint
+                self._previous_base_output[:old_n] = old_prev_base
                 self._initialized_desired_steer_pos_batch[:old_n] = old_init
             if self.config.wheel_command_velocity_filter_a or self.config.wheel_command_velocity_filter_b:
                 self._wheel_filter_batch_r = IIRFilterBatch(
@@ -495,8 +586,198 @@ class HSRBBaseController:
         else:
             self.step_batch(float(dt), envs_idx=envs_idx)
 
+    # Acceleration-feasibility search (hsrb_base_controllers 3.0.0 port)
+    # ------------------------------------------------------------------
+
+    _TERNARY_ITERATIONS = 36
+
+    @staticmethod
+    def _ternary_search(
+        cost_fn,
+        n: int,
+        prefer_right: bool,
+    ) -> torch.Tensor:
+        """Batched ternary search over ratio in [0, 1].
+
+        ``prefer_right=True`` uses strict ``<`` (MinRight: prefer target side).
+        ``prefer_right=False`` uses ``<=`` (MinLeft: prefer braking side).
+        Returns ``(n,)`` tensor of optimal ratios.
+        """
+        low = torch.zeros(n, device=gs.device, dtype=TORCH_FLOAT)
+        high = torch.ones(n, device=gs.device, dtype=TORCH_FLOAT)
+        for _ in range(HSRBBaseController._TERNARY_ITERATIONS):
+            mid1 = (2.0 * low + high) / 3.0
+            mid2 = (low + 2.0 * high) / 3.0
+            cost1 = cost_fn(mid1)
+            cost2 = cost_fn(mid2)
+            if prefer_right:
+                move_high = cost1 < cost2
+            else:
+                move_high = cost1 <= cost2
+            high = torch.where(move_high, mid2, high)
+            low = torch.where(move_high, low, mid1)
+        return (low + high) / 2.0
+
+    @staticmethod
+    def _calc_velocity_min_max(
+        prev: torch.Tensor,
+        vel_limit: torch.Tensor,
+        acc_limit: torch.Tensor,
+        dt: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Per-joint feasible box: max(prev - acc*dt, -vel_limit), min(prev + acc*dt, vel_limit)."""
+        vel_max = torch.minimum(prev + acc_limit * dt, vel_limit)
+        vel_min = torch.maximum(prev - acc_limit * dt, -vel_limit)
+        return vel_min, vel_max
+
+    @staticmethod
+    def _joint_command_distance(
+        joint_vel: torch.Tensor,
+        q_min: torch.Tensor,
+        q_max: torch.Tensor,
+    ) -> torch.Tensor:
+        """Sum of out-of-box distances per environment.  ``(n,)`` tensor."""
+        below = torch.clamp(q_min - joint_vel, min=0.0)
+        above = torch.clamp(joint_vel - q_max, min=0.0)
+        return (below + above).sum(dim=1)
+
+    @staticmethod
+    def _is_joint_command_valid(
+        joint_vel: torch.Tensor,
+        q_min: torch.Tensor,
+        q_max: torch.Tensor,
+    ) -> torch.Tensor:
+        """Boolean mask: True where every joint is inside the feasible box."""
+        return ((joint_vel >= q_min) & (joint_vel <= q_max)).all(dim=1)
+
+    def _apply_acceleration_limits_batch(
+        self,
+        desired_joint: torch.Tensor,
+        steer_angles: torch.Tensor,
+        dt: float,
+        envs_idx_arr: torch.Tensor,
+    ) -> torch.Tensor:
+        """C++-ordered acceleration-feasibility search (5 paths).
+
+        Returns the final joint command ``(N, 3)`` [right, left, steer].
+        """
+        n = desired_joint.shape[0]
+        R = float(self.config.wheel_radius)
+        W = float(self.config.wheel_separation)
+        D = float(self.config.wheel_offset)
+
+        prev_joint = self._previous_joint_output[envs_idx_arr]  # (n, 3)
+        prev_base = self._previous_base_output[envs_idx_arr]    # (n, 3)
+
+        vel_limit = torch.tensor(
+            [self.config.wheel_velocity_limit, self.config.wheel_velocity_limit,
+             self.config.yaw_velocity_limit],
+            device=gs.device, dtype=TORCH_FLOAT,
+        ).unsqueeze(0)
+        acc_limit = torch.tensor(
+            [self.config.wheel_acceleration_limit, self.config.wheel_acceleration_limit,
+             self.config.yaw_acceleration_limit],
+            device=gs.device, dtype=TORCH_FLOAT,
+        ).unsqueeze(0)
+
+        q_min, q_max = self._calc_velocity_min_max(prev_joint, vel_limit, acc_limit, dt)
+
+        # Early exit: desired is already feasible.
+        feasible = self._is_joint_command_valid(desired_joint, q_min, q_max)
+        if bool(feasible.all().item()):
+            return desired_joint
+
+        # Convert desired joint vector to base velocity for base-space searches.
+        base_desired = _forward_kinematics_batch(desired_joint, steer_angles, R, W, D)
+
+        # Path 1: Approach desired base velocity (MinRight).
+        def interp_cost(ratio):
+            base_cand = base_desired * ratio.unsqueeze(1) + prev_base * (1.0 - ratio.unsqueeze(1))
+            joint_cand = _inverse_kinematics_batch(base_cand, steer_angles, R, W, D)
+            return self._joint_command_distance(joint_cand, q_min, q_max)
+
+        ratio1 = self._ternary_search(interp_cost, n, prefer_right=True)
+        dist1 = interp_cost(ratio1)
+        success1 = dist1 == 0.0
+        if bool(success1.all().item()):
+            base_cand = base_desired * ratio1.unsqueeze(1) + prev_base * (1.0 - ratio1.unsqueeze(1))
+            return _inverse_kinematics_batch(base_cand, steer_angles, R, W, D)
+
+        # Path 2: Brake previous base velocity (MinLeft).
+        def brake_base_cost(ratio):
+            base_cand = prev_base * ratio.unsqueeze(1)
+            joint_cand = _inverse_kinematics_batch(base_cand, steer_angles, R, W, D)
+            return self._joint_command_distance(joint_cand, q_min, q_max)
+
+        ratio2 = self._ternary_search(brake_base_cost, n, prefer_right=False)
+        dist2 = brake_base_cost(ratio2)
+        success2 = (dist2 == 0.0) & ~success1
+        if bool(success2.any().item()):
+            base_cand = prev_base * ratio2.unsqueeze(1)
+            joint_cand = _inverse_kinematics_batch(base_cand, steer_angles, R, W, D)
+            result = torch.where(success2.unsqueeze(1), joint_cand, desired_joint)
+            if bool(success2.all().item()):
+                return result
+        else:
+            result = desired_joint
+
+        # Path 3: Hold previous base velocity.
+        joint_hold = _inverse_kinematics_batch(prev_base, steer_angles, R, W, D)
+        valid3 = self._is_joint_command_valid(joint_hold, q_min, q_max) & ~success1 & ~success2
+        if bool(valid3.any().item()):
+            result = torch.where(valid3.unsqueeze(1), joint_hold, result)
+            if bool(valid3.all().item()):
+                return result
+
+        # Path 4: Brake previous joint velocity (MinLeft).
+        def brake_joint_cost(ratio):
+            joint_cand = prev_joint * ratio.unsqueeze(1)
+            return self._joint_command_distance(joint_cand, q_min, q_max)
+
+        ratio4 = self._ternary_search(brake_joint_cost, n, prefer_right=False)
+        dist4 = brake_joint_cost(ratio4)
+        success4 = (dist4 == 0.0) & ~success1 & ~success2 & ~valid3
+        if bool(success4.any().item()):
+            joint_cand = prev_joint * ratio4.unsqueeze(1)
+            result = torch.where(success4.unsqueeze(1), joint_cand, result)
+
+        # Path 5: Fallback — use speed-limited filtered desired command.
+        return result
+
+    # ------------------------------------------------------------------
+    # Steering actuation modes
+    # ------------------------------------------------------------------
+
+    def set_base_roll_velocity_mode(self, enabled: bool) -> None:
+        """Transition between velocity and position steering mode.
+
+        Applied at the next ``step_batch`` tick:
+        - velocity → position: reseed position accumulator from measured position.
+        - position → velocity: discard position accumulator and send velocity.
+        Preserves ``previous_joint_output`` and ``previous_base_output``.
+        """
+        self._pending_mode_transition = bool(enabled)
+
+    def _apply_pending_mode_transition(self, steer: torch.Tensor) -> None:
+        """Apply a pending mode transition at the start of step_batch."""
+        if self._pending_mode_transition is None:
+            return
+        new_mode = self._pending_mode_transition
+        self._pending_mode_transition = None
+        if new_mode == self._use_base_roll_velocity:
+            # Already in the requested mode, no transition needed.
+            return
+        self._use_base_roll_velocity = new_mode
+        if not new_mode:
+            # velocity → position: reseed from measured position.
+            self._desired_steer_pos_batch[: steer.shape[0]] = steer
+            self._initialized_desired_steer_pos_batch[: steer.shape[0]] = True
+        # position → velocity: nothing to do; velocity command is sent directly.
+
     def step_batch(self, dt: float, *, envs_idx: Sequence[int]) -> None:
         dt = float(dt)
+        if dt <= 0.0:
+            return
         self._time += dt
         envs_idx_arr = torch.as_tensor(envs_idx, device=gs.device, dtype=torch.int64).reshape(-1)
         if envs_idx_arr.numel() == 0:
@@ -506,7 +787,10 @@ class HSRBBaseController:
         assert self._last_cmd_time_batch is not None
         assert self._desired_steer_pos_batch is not None
         assert self._initialized_desired_steer_pos_batch is not None
+        assert self._previous_joint_output is not None
+        assert self._previous_base_output is not None
 
+        # Read measured steering angle for inverse kinematics.
         steer = to_torch(
             self.entity.get_dofs_position(
                 dofs_idx_local=[self.steer_dof_idx_local],
@@ -515,20 +799,27 @@ class HSRBBaseController:
         )
         steer = steer.to(device=gs.device, dtype=TORCH_FLOAT).reshape(-1)
 
-        init_mask = ~self._initialized_desired_steer_pos_batch[envs_idx_arr]
-        if bool(torch.any(init_mask).item()):
-            self._desired_steer_pos_batch[envs_idx_arr[init_mask]] = steer[init_mask]
-            self._initialized_desired_steer_pos_batch[envs_idx_arr[init_mask]] = True
-        # Timeout uses this controller's accumulated step time, not wall time.
-        # Trajectory following refreshes active commands every controller tick;
-        # persistent raw-velocity callers must do the same.  Scaling a stale
-        # command to zero before inverse kinematics stops all three actuators
-        # coherently.
+        # Apply pending mode transition before any actuation.
+        self._apply_pending_mode_transition(steer)
 
+        # Position-mode seeding: initialize desired steering position from
+        # measured position on the first position-mode command.
+        if not self._use_base_roll_velocity:
+            init_mask = ~self._initialized_desired_steer_pos_batch[envs_idx_arr]
+            if bool(torch.any(init_mask).item()):
+                self._desired_steer_pos_batch[envs_idx_arr[init_mask]] = steer[init_mask]
+                self._initialized_desired_steer_pos_batch[envs_idx_arr[init_mask]] = True
+
+        # Timeout: zero stale commands before inverse kinematics.
         active = (self._time - self._last_cmd_time_batch[envs_idx_arr]) <= self.config.command_timeout
         cmd = torch.zeros((envs_idx_arr.numel(), 3), device=gs.device, dtype=TORCH_FLOAT)
         cmd[active] = self._cmd_batch[envs_idx_arr[active]]
 
+        # Reject non-finite commands before actuator calls.
+        if not bool(torch.isfinite(cmd).all().item()):
+            cmd = torch.nan_to_num(cmd, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # Inverse kinematics with uniform speed scaling (Taichi kernel).
         out = torch.zeros((envs_idx_arr.numel(), 3), device=gs.device, dtype=TORCH_FLOAT)
         _vehicle_inverse_kernel(
             int(envs_idx_arr.numel()),
@@ -542,28 +833,45 @@ class HSRBBaseController:
             out,
         )
 
+        # Optional IIR command filters (after speed limiting, before accel).
         if self._wheel_filter_batch_r is not None:
             out[:, 0] = self._wheel_filter_batch_r.update_batch(out[:, 0])
             out[:, 1] = self._wheel_filter_batch_l.update_batch(out[:, 1])
         if self._steer_filter_batch is not None:
             out[:, 2] = self._steer_filter_batch.update_batch(out[:, 2])
 
+        # Acceleration-feasibility search (C++ 5-path ternary search).
+        out = self._apply_acceleration_limits_batch(out, steer, dt, envs_idx_arr)
+
+        # Drive-wheel velocity commands.
         self.entity.control_dofs_velocity(
             out[:, :2],
             dofs_idx_local=self.wheel_drive_dofs_idx_local,
             envs_idx=envs_idx_arr,
         )
 
-        # Steering is position-controlled, so integrate the rate command once
-        # per physics/control step.  The inverse kinematics uses the measured
-        # steering angle above, but this desired position is intentionally only
-        # seeded from measurement on the first step and is not re-synchronised
-        # on later steps.
-        self._desired_steer_pos_batch[envs_idx_arr] += out[:, 2] * dt
-        self.entity.control_dofs_position(
-            self._desired_steer_pos_batch[envs_idx_arr].reshape(-1, 1),
-            dofs_idx_local=[self.steer_dof_idx_local],
-            envs_idx=envs_idx_arr,
+        # Steering actuation: velocity mode (default) or position mode.
+        if self._use_base_roll_velocity:
+            self.entity.control_dofs_velocity(
+                out[:, 2:3],
+                dofs_idx_local=[self.steer_dof_idx_local],
+                envs_idx=envs_idx_arr,
+            )
+        else:
+            self._desired_steer_pos_batch[envs_idx_arr] += out[:, 2] * dt
+            self.entity.control_dofs_position(
+                self._desired_steer_pos_batch[envs_idx_arr].reshape(-1, 1),
+                dofs_idx_local=[self.steer_dof_idx_local],
+                envs_idx=envs_idx_arr,
+            )
+
+        # Store previous joint and base output for next tick's acceleration search.
+        self._previous_joint_output[envs_idx_arr] = out
+        R = float(self.config.wheel_radius)
+        W = float(self.config.wheel_separation)
+        D = float(self.config.wheel_offset)
+        self._previous_base_output[envs_idx_arr] = _forward_kinematics_batch(
+            out, steer, R, W, D,
         )
 
 
