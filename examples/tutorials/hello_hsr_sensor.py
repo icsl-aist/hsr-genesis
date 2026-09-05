@@ -15,6 +15,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 parser = argparse.ArgumentParser()
 parser.add_argument("--steps", type=int, default=0)
 parser.add_argument("--depth-res", type=str, default="160x120")
+parser.add_argument(
+    "--record-video", action="store_true",
+    help="Record offscreen camera video (mp4 + gif) to examples/tutorials/videos/",
+)
+parser.add_argument(
+    "--video-dir", type=str, default="examples/tutorials/videos",
+    help="Output directory for recorded videos",
+)
 args = parser.parse_args()
 
 IS_DEBUG = True
@@ -216,6 +224,14 @@ if n_envs == 1:
     surface=gs.surfaces.Default(color=(1.0, 0.0, 0.0)),
 )
 
+rec = None
+if args.record_video:
+    from hsr_genesis.tutorial_utils import VideoRecorder
+
+    rec = VideoRecorder(
+        scene, res=(320, 240), pos=(3, -1, 1.5),
+        lookat=(0.0, 0.0, 0.5), fov=30, fps=50,
+    )
 scene.build(n_envs=n_envs, env_spacing=(3.0, 3.0))
 
 envs_idx_all_torch = torch.arange(n_envs, device=gs.device, dtype=gs.tc_int)
@@ -359,6 +375,8 @@ while True:
 
     scene.step()
     sim_time[0] += dt
+    if rec is not None:
+        rec.capture()
 
     if IS_DEBUG:
         for cam_name in ("hand_camera", "head_center_camera"):
@@ -392,3 +410,8 @@ while True:
     step_count += 1
     if steps > 0 and step_count >= steps:
         break
+
+if rec is not None:
+    import os
+    os.makedirs(args.video_dir, exist_ok=True)
+    rec.save(os.path.join(args.video_dir, "hello_hsr_sensor.mp4"))

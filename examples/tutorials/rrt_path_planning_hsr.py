@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import math
+import argparse
 import os
 import sys
 from pathlib import Path
@@ -235,6 +235,16 @@ def _trajectory_execution_steps(execution_duration: float, dt: float) -> int:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="RRT path planning demo for HSR")
+    parser.add_argument(
+        "--record-video", action="store_true",
+        help="Record offscreen camera video (mp4 + gif) to examples/tutorials/videos/",
+    )
+    parser.add_argument(
+        "--video-dir", type=str, default="examples/tutorials/videos",
+        help="Output directory for recorded videos",
+    )
+    args = parser.parse_args()
     gs.init(backend=gs.gpu)
     from hsr_genesis.hsr_rigid_entity import HSRBURDF, JointTrajectory
     from hsr_genesis.base_controller import Trajectory
@@ -339,6 +349,14 @@ def main() -> None:
         )
         markers.append(marker)
 
+    rec = None
+    if args.record_video:
+        from hsr_genesis.tutorial_utils import VideoRecorder
+
+        rec = VideoRecorder(
+            scene, res=(320, 240), pos=(3, -1, 1.5),
+            lookat=(0.0, 0.0, 0.5), fov=30, fps=50,
+        )
     scene.build()
 
     dt = float(scene.sim_options.dt)
@@ -668,6 +686,8 @@ def main() -> None:
         elapsed = (step + 1) * dt  # controller internal time
         step_result = hsr.step_whole_body_trajectory_batched(dt, envs_idx=[0])
         scene.step()
+        if rec is not None:
+            rec.capture()
 
         # --- Per-target EE error at segment end times ---
         for seg_idx, seg_end_time in enumerate(segment_end_times):
@@ -831,6 +851,12 @@ def main() -> None:
     final_quat = hsr.get_quat()
     final_yaw = _quat_wxyz_to_yaw(final_quat)
     print(f"Final base pose: x={final_pos[0].item():.3f}, y={final_pos[1].item():.3f}, yaw={final_yaw:.3f}")
+
+    if rec is not None:
+        import os
+        out_dir = args.video_dir
+        os.makedirs(out_dir, exist_ok=True)
+        rec.save(os.path.join(out_dir, "rrt_path_planning_hsr.mp4"))
 
 
 if __name__ == "__main__":

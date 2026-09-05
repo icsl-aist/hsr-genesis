@@ -403,16 +403,119 @@ def clear_frames() -> None:
 
 
 def save_video(path: str, fps: int | None = None) -> None:
-    """Save captured frames to an mp4 file."""
+    """Save captured frames to a video file (mp4 or gif).
+
+    Uses *mediapy* when available (Colab), otherwise falls back to *imageio*.
+    """
     if not _state.frames:
         print("No frames captured.")
         return
-    import mediapy as media
-
     if fps is None:
         fps = int(round(1.0 / _state.dt))
-    media.write_video(path, _state.frames, fps=fps)
-    print(f"Saved video to {path}")
+
+    frames_np = [np.asarray(f) for f in _state.frames]
+
+    try:
+        import mediapy as media
+
+        media.write_video(path, frames_np, fps=fps)
+    except ImportError:
+        import imageio.v2 as imageio
+
+        imageio.mimsave(path, frames_np, fps=fps, codec="libx264")
+
+    print(f"Saved video to {path} ({len(frames_np)} frames)")
+
+
+def save_gif(path: str, fps: int = 30, max_frames: int = 600) -> None:
+    """Save captured frames as an animated GIF.
+
+    Frames are sub-sampled to *fps* and capped at *max_frames* to keep the
+    file size reasonable for quick preview.
+    """
+    if not _state.frames:
+        print("No frames captured.")
+        return
+    capture_fps = int(round(1.0 / _state.dt))
+    stride = max(1, capture_fps // fps)
+    gif_frames = [np.asarray(f) for f in _state.frames[::stride][:max_frames]]
+    actual_fps = min(fps, capture_fps // stride)
+
+    import imageio.v2 as imageio
+
+    imageio.mimsave(path, gif_frames, duration=1000 / actual_fps, loop=0)
+    print(f"Saved GIF to {path} ({len(gif_frames)} frames)")
+
+
+class VideoRecorder:
+    """Offscreen camera frame collector for standalone scripts.
+
+    Unlike the notebook-oriented ``save_video``/``save_gif`` functions that
+    operate on ``_state.frames``, this class wraps its own camera and frame
+    list so it can be used alongside a viewer-based scene.
+
+    Usage::
+
+        rec = VideoRecorder(scene, res=(320, 240), pos=(2, 0, 1.5),
+                            lookat=(0, 0, 0.5), fps=50)
+        scene.build()
+        for _ in range(steps):
+            ...
+            scene.step()
+            rec.capture()
+        rec.save("output.mp4")   # also writes output.gif
+    """
+
+    def __init__(
+        self,
+        scene,
+        *,
+        res: tuple[int, int] = (320, 240),
+        pos: tuple[float, float, float] = (2.0, 0.0, 1.5),
+        lookat: tuple[float, float, float] = (0.0, 0.0, 0.5),
+        fov: float = 45,
+        fps: int | None = None,
+    ) -> None:
+        self._camera = scene.add_camera(
+            res=res, pos=pos, lookat=lookat, fov=fov, GUI=False,
+        )
+        self._fps = fps or 30
+        self._frames: list[np.ndarray] = []
+
+    def capture(self) -> None:
+        """Render one frame and append it to the buffer."""
+        rgb = self._camera.render()[0]
+        if hasattr(rgb, "cpu"):
+            rgb = rgb.cpu()
+        self._frames.append(np.asarray(rgb, dtype=np.uint8))
+
+    def save(self, path: str, *, gif: bool = True) -> None:
+        """Write buffered frames to *path* (mp4) and optionally a GIF.
+
+        The GIF is sub-sampled to ~30 fps and capped at 600 frames.
+        """
+        if not self._frames:
+            return
+        import imageio.v2 as imageio
+
+        out = Path(path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+
+        # mp4 — every frame at full capture fps.
+        imageio.mimsave(str(out), self._frames, fps=self._fps, codec="libx264")
+        print(f"Video saved: {out} ({len(self._frames)} frames)")
+
+        if gif:
+            gif_fps = 30
+            stride = max(1, self._fps // gif_fps)
+            gif_frames = self._frames[::stride][:600]
+            actual_gif_fps = min(gif_fps, self._fps // stride)
+            gif_path = out.with_suffix(".gif")
+            imageio.mimsave(
+                str(gif_path), gif_frames,
+                duration=1000 / actual_gif_fps, loop=0,
+            )
+            print(f"GIF saved: {gif_path} ({len(gif_frames)} frames)")
 
 
 # ---------------------------------------------------------------------------

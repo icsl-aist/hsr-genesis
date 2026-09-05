@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import math
+import argparse
 import sys
 from pathlib import Path
 
@@ -52,6 +52,16 @@ def _qpos_to_arm_dofs(entity, qpos: torch.Tensor, arm_dofs_idx_local: list[int])
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="IK init-qpos demo for HSR")
+    parser.add_argument(
+        "--record-video", action="store_true",
+        help="Record offscreen camera video (mp4 + gif) to examples/tutorials/videos/",
+    )
+    parser.add_argument(
+        "--video-dir", type=str, default="examples/tutorials/videos",
+        help="Output directory for recorded videos",
+    )
+    args = parser.parse_args()
     gs.init(backend=gs.gpu)
     from hsr_genesis.hsr_rigid_entity import HSRBURDF, JointTrajectory
     from hsr_genesis.base_controller import Trajectory
@@ -94,6 +104,14 @@ def main() -> None:
         visualize_contact=True,
     )
 
+    rec = None
+    if args.record_video:
+        from hsr_genesis.tutorial_utils import VideoRecorder
+
+        rec = VideoRecorder(
+            scene, res=(320, 240), pos=(3, -1, 1.5),
+            lookat=(0.0, 0.0, 0.5), fov=30, fps=50,
+        )
     scene.build()
 
     end_effector = hsr.get_link("hand_palm_link")
@@ -171,11 +189,21 @@ def main() -> None:
         if step == 0:
             hsr.control_dofs_position(hand_open, dofs_idx_local=[motor_idx])
         scene.step()
+        if rec is not None:
+            rec.capture()
 
     hsr.control_dofs_position(close_cmd, dofs_idx_local=[motor_idx])
     for _ in range(200):
         hsr.step_whole_body_trajectory_batched(dt, envs_idx=[0])
         scene.step()
+        if rec is not None:
+            rec.capture()
+
+    if rec is not None:
+        import os
+        out_dir = args.video_dir
+        os.makedirs(out_dir, exist_ok=True)
+        rec.save(os.path.join(out_dir, "IK_init_qpos_hsr.mp4"))
 
 
 def arm_traj_names() -> list[str]:
