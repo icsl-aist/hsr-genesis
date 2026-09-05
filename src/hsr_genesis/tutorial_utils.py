@@ -170,7 +170,10 @@ def _arm_traj_names() -> list[str]:
 
 def _step_once(render: bool = True) -> None:
     """Advance the simulation by one dt, handling velocity / gripper / housekeeping."""
-    # Re-apply base velocity command so it doesn't timeout.
+    # Raw velocity is already a robot-body command: +X forward, +Y left,
+    # +yaw counter-clockwise.  Do not rotate it by the world pose; only the
+    # trajectory follower performs a world-to-body conversion.  Refreshing the
+    # stored command here also keeps it inside the controller's 0.5 s timeout.
     if _state.base_vel_cmd is not None:
         from hsr_genesis.base_controller import CartSpace
 
@@ -452,7 +455,10 @@ def move_base_goal(x: float, y: float, theta: float, duration: float = 3.0) -> f
     from hsr_genesis.base_controller import Trajectory
 
     _maybe_build()
-    # Cancel any velocity command.
+    # Goal poses are world/odom-frame, unlike move_base_vel's body-frame twist.
+    # OmniBaseTrajectoryControl owns the world-to-body conversion.
+    # Cancel any raw velocity command so both producers cannot race to update
+    # the same inner HSRBBaseController command buffer.
     _state.base_vel_cmd = None
 
     yaw_rad = math.radians(theta)
