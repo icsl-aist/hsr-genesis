@@ -208,5 +208,6 @@ __marimo__/
 
 # Tooling / agent artifacts
 .cocoindex_code/
+.internal/
 .firecrawl/
 results/
