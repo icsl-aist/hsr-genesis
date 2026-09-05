@@ -37,6 +37,7 @@ if not getattr(gs, "_initialized", False):
     gs.init(backend=gs.cpu, precision="32", logging_level="warning")
 
 from hsr_genesis.base_controller import (  # noqa: E402
+    DesiredState,
     OmniBaseTrajectoryControl,
     Trajectory,
     TORCH_FLOAT,
@@ -119,9 +120,7 @@ class TestPointBeforeVelocityFrame:
     """
 
     def _make_ctrl(self) -> OmniBaseTrajectoryControl:
-        return OmniBaseTrajectoryControl(
-            feedback_gain=torch.tensor([0.0, 0.0, 0.0], dtype=TORCH_FLOAT, device=gs.device)
-        )
+        return OmniBaseTrajectoryControl()
 
     def test_no_explicit_velocities_uses_finite_difference(self) -> None:
         ctrl = self._make_ctrl()
@@ -209,6 +208,35 @@ class TestPointBeforeVelocityFrame:
             "FAIL: velocity is not world-frame consistent with trajectory positions"
         )
 
+
+
+# ── unit test: scalar/batch outer-loop parity ──────────────────────────────────
+
+def test_scalar_and_batched_outer_control_outputs_match() -> None:
+    ctrl = OmniBaseTrajectoryControl()
+    actual = torch.tensor([0.4, -0.2, 0.7], device=gs.device, dtype=TORCH_FLOAT)
+    current_velocity = torch.tensor([0.3, -0.1, 0.25], device=gs.device, dtype=TORCH_FLOAT)
+    desired = DesiredState(
+        positions=torch.tensor([0.8, 0.1, 1.0], device=gs.device, dtype=TORCH_FLOAT),
+        velocities=torch.tensor([0.2, 0.05, 0.1], device=gs.device, dtype=TORCH_FLOAT),
+        accelerations=torch.zeros(3, device=gs.device, dtype=TORCH_FLOAT),
+    )
+
+    scalar = ctrl.get_output_velocity(
+        actual,
+        desired,
+        dt=0.02,
+        current_velocities=current_velocity,
+    )
+    batched = ctrl.get_output_velocity_batch(
+        actual.unsqueeze(0),
+        desired.positions.unsqueeze(0),
+        desired.velocities.unsqueeze(0),
+        dt=0.02,
+        current_velocities=current_velocity.unsqueeze(0),
+    )[0]
+
+    assert torch.allclose(scalar, batched, atol=1.0e-6)
 
 # ── physics-based diagnostic tests ─────────────────────────────────────────────
 

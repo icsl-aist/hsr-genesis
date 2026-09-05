@@ -1,5 +1,29 @@
 """HSR base vehicle controller utilities and kinematics kernels.
 
+Control architecture
+--------------------
+The physical ``controller`` mode has two layers:
+
+1. ``OmniBaseTrajectoryControl`` accepts world/odom-frame trajectories,
+   computes feed-forward + P feedback + velocity damping, and rotates the
+   resulting planar velocity into the robot body frame.
+2. ``HSRBBaseController`` accepts that body-frame twist (or a raw ``CartSpace``
+   command), maps it to right-wheel, left-wheel, and steering-joint rates, then
+   sends wheel-velocity and integrated steering-position targets to Genesis.
+
+The mechanism is not a conventional differential drive.  Both driven wheels
+are mounted on ``base_roll_link``, which can yaw relative to ``base_link``.
+The wheels are 0.11 m behind that steering pivot; two front casters are
+passive.  Consequently, wheel-speed difference gives the absolute yaw rate of
+the wheel module, while chassis yaw is the module yaw rate minus the internal
+steering-joint rate.
+
+Frame invariant: trajectory positions and velocities and Genesis root feedback
+are world-frame.  The inner controller input is body-frame
+``[forward, left, counter-clockwise yaw]``.  Raw ``CartSpace`` callers must
+already provide body-frame velocities; they do not pass through a frame
+rotation.
+
 Porting status:
 - Source: hsrb_base_controllers (ROS/hsrb_base_controllers).
 - Scope: ported from the HSRB base controller package with API-aligned data
@@ -52,6 +76,26 @@ def _vehicle_inverse_kernel(
     wheel_velocity_limit: TI_FLOAT,
     out_jcmd: ti.types.ndarray(dtype=TI_FLOAT, ndim=2),
 ):
+    # Body command: dot_x is forward [m/s], dot_y is left [m/s], and
+    # dot_r is counter-clockwise chassis yaw rate [rad/s].
+    #
+    # Let s be steer_angle and rotate the requested translation into the
+    # steerable wheel-module frame:
+    #
+    #   u =  cos(s) * dot_x + sin(s) * dot_y   (along-wheel velocity)
+    #   v = -sin(s) * dot_x + cos(s) * dot_y   (cross-wheel velocity)
+    #
+    # With wheel radius R, separation B, and the drive axle D metres behind
+    # the steering pivot, the equations below are:
+    #
+    #   wheel_r = u/R + B*v/(2*R*D)
+    #   wheel_l = u/R - B*v/(2*R*D)
+    #   steer   = v/D - dot_r
+    #
+    # Therefore the wheel module's absolute yaw rate is
+    # R/B * (wheel_r-wheel_l) = dot_r+steer.  In particular, pure chassis yaw
+    # commands zero wheel rates and the opposite steering rate.  Do not replace
+    # this with ordinary differential-drive kinematics.
     for i in range(n):
         dot_x = cmd[i, 0]
         dot_y = cmd[i, 1]
@@ -248,6 +292,10 @@ class HSRBBaseControllersConfig:
         "base_l_passive_wheel_z_joint",
     )
     steer_joint: str = "base_roll_joint"
+    # Geometry must match hsrb4s.urdf: the right/left drive wheels have radius
+    # 0.04 m and centres at (-0.11, -0.133)/(-0.11, +0.133) relative to the
+    # base_roll_link steering pivot.  Hence separation B=0.266 and rearward
+    # pivot-to-axle distance D=0.11.
 
     wheel_separation: float = 0.266
     wheel_radius: float = 0.04
@@ -273,6 +321,16 @@ class HSRBBaseControllersConfig:
 
 
 class HSRBBaseController:
+    """Inner body-twist controller for the steerable dual-wheel mechanism.
+
+    Input commands are robot-body velocities ``[forward, left, CCW yaw]``.
+    ``step_batch`` reads the measured steering angle for inverse kinematics,
+    velocity-controls the drive wheels, and integrates the requested steering
+    rate into a position target for ``base_roll_joint``.  World-frame
+    trajectory handling belongs to ``OmniBaseTrajectoryControl`` and must not
+    be duplicated here.
+    """
+
     def __init__(
         self,
         entity,
@@ -345,6 +403,10 @@ class HSRBBaseController:
                 dofs_idx_local=passive,
             )
 
+        # HSRRigidEntity._hsr_apply_default_gains also writes steering gains.
+        # These controller-owned values are currently different; construction
+        # order determines which set remains active.  Until gain ownership is
+        # consolidated, changing this block requires reviewing that site too.
         steer = [self.steer_dof_idx_local]
         self.entity.set_dofs_kp(
             kp=torch.tensor([self.config.kp_steer], device=gs.device, dtype=TORCH_FLOAT),
@@ -460,6 +522,11 @@ class HSRBBaseController:
         if bool(torch.any(init_mask).item()):
             self._desired_steer_pos_batch[envs_idx_arr[init_mask]] = steer[init_mask]
             self._initialized_desired_steer_pos_batch[envs_idx_arr[init_mask]] = True
+        # Timeout uses this controller's accumulated step time, not wall time.
+        # Trajectory following refreshes active commands every controller tick;
+        # persistent raw-velocity callers must do the same.  Scaling a stale
+        # command to zero before inverse kinematics stops all three actuators
+        # coherently.
 
         active = (self._time - self._last_cmd_time_batch[envs_idx_arr]) <= self.config.command_timeout
         cmd = torch.zeros((envs_idx_arr.numel(), 3), device=gs.device, dtype=TORCH_FLOAT)
@@ -490,6 +557,11 @@ class HSRBBaseController:
             envs_idx=envs_idx_arr,
         )
 
+        # Steering is position-controlled, so integrate the rate command once
+        # per physics/control step.  The inverse kinematics uses the measured
+        # steering angle above, but this desired position is intentionally only
+        # seeded from measurement on the first step and is not re-synchronised
+        # on later steps.
         self._desired_steer_pos_batch[envs_idx_arr] += out[:, 2] * dt
         self.entity.control_dofs_position(
             self._desired_steer_pos_batch[envs_idx_arr].reshape(-1, 1),
@@ -523,6 +595,10 @@ class Trajectory:
     If ``velocities`` is None the controller falls back to finite-difference
     (``(p[i+1] - p[i]) / dt``), which is automatically world-frame because the
     positions are world-frame.
+
+    ``accelerations`` are validated and interpolated into ``DesiredState`` for
+    API compatibility, but the current velocity-output controller does not use
+    them.
     """
 
     positions: torch.Tensor  # (T, 3) – world frame [x, y, yaw]
@@ -546,6 +622,13 @@ class DesiredState:
     accelerations: torch.Tensor  # (3,) world frame
 
 
+@dataclass(frozen=True)
+class _TrajectoryControlTuning:
+    feedback_gain: tuple[float, float, float]
+    yaw_derivative_gain: float
+    xy_derivative_gain: float
+
+
 class OmniBaseTrajectoryControl:
     """Trajectory following controller for the HSR omnidirectional base.
 
@@ -564,21 +647,23 @@ class OmniBaseTrajectoryControl:
     the robot body frame (via R(−yaw)) before returning it to the base joint
     controller.  Callers must not pre-rotate velocities into body frame.
 
-    Derivative damping
-    ------------------
-    ``yaw_derivative_gain`` adds a D-term on the yaw channel:
-        output_yaw_rate -= kd * current_ω_z
-    This damps overshoot from the P term without requiring explicit velocity
-    trajectory waypoints.  ``xy_derivative_gain`` does the same for the linear
-    axes.  Both default to 0 (pure P+FF behaviour).
+    Tuning
+    ------
+    Outer-loop gains are controller-owned and immutable (``TUNING``); they cannot
+    be supplied or overridden by a trajectory request.  The scalar
+    ``get_output_velocity`` delegates to the shared batched calculation
+    ``get_output_velocity_batch`` so both production paths use identical math.
     """
+
+    TUNING = _TrajectoryControlTuning(
+        feedback_gain=(1.0, 1.0, 1.5),
+        yaw_derivative_gain=0.3,
+        xy_derivative_gain=0.1,
+    )
 
     def __init__(
         self,
         coordinate_names: Sequence[str] = ("odom_x", "odom_y", "odom_t"),
-        feedback_gain: torch.Tensor | None = None,
-        yaw_derivative_gain: float = 0.0,
-        xy_derivative_gain: float = 0.0,
         stop_velocity_threshold: float = 0.001,
         stop_time_margin: float = 0.2,
     ) -> None:
@@ -588,17 +673,18 @@ class OmniBaseTrajectoryControl:
 
         self.stop_velocity_threshold = float(stop_velocity_threshold)
         self.stop_time_margin = float(stop_time_margin)
-        self.yaw_derivative_gain = float(yaw_derivative_gain)
-        self.xy_derivative_gain = float(xy_derivative_gain)
 
-        if feedback_gain is None:
-            feedback_gain = torch.tensor([1.0, 1.0, 1.0], device=gs.device, dtype=TORCH_FLOAT)
-        self.feedback_gain = to_torch(feedback_gain).to(device=gs.device, dtype=TORCH_FLOAT).reshape(3)
+        self._feedback_gain = torch.tensor(
+            self.TUNING.feedback_gain,
+            device=gs.device,
+            dtype=TORCH_FLOAT,
+        )
 
         self._trajectory: Trajectory | None = None
         self._trajectory_start_time: float | None = None
         self._sampled_already = False
         self._point_before: DesiredState | None = None
+
 
     @staticmethod
     def _wrap_to_pi(angle: torch.Tensor | float) -> torch.Tensor | float:
@@ -802,6 +888,48 @@ class OmniBaseTrajectoryControl:
         time_from_point = t - t0
         return True, desired, before_last, time_from_point
 
+    def get_output_velocity_batch(
+        self,
+        actual_positions: torch.Tensor,
+        desired_positions: torch.Tensor,
+        desired_velocities: torch.Tensor,
+        *,
+        dt: float,
+        current_velocities: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute body-frame velocity commands for a batch of robots.
+
+        All inputs are world/odom frame ``[x, y, yaw]`` / ``[ẋ, ẏ, ω_z]``.
+        Returns ``(N, 3)`` body-frame velocities ``[forward, left, yaw_rate]``.
+
+        This is the single source of truth for the outer-loop calculation; the
+        scalar ``get_output_velocity`` delegates here with a one-row tensor.
+        """
+        actual = to_torch(actual_positions).to(device=gs.device, dtype=TORCH_FLOAT).reshape(-1, 3)
+        desired_pos = to_torch(desired_positions).to(device=gs.device, dtype=TORCH_FLOAT).reshape(-1, 3)
+        desired_vel = to_torch(desired_velocities).to(device=gs.device, dtype=TORCH_FLOAT).reshape(-1, 3)
+        current_vel = to_torch(current_velocities).to(device=gs.device, dtype=TORCH_FLOAT).reshape(-1, 3)
+
+        error = desired_pos - actual
+        error = error.clone()
+        error[:, 2] = self._wrap_to_pi(error[:, 2])
+        output_world = desired_vel + self._feedback_gain.unsqueeze(0) * error
+        output_world = output_world.clone()
+        output_world[:, :2] -= self.TUNING.xy_derivative_gain * current_vel[:, :2]
+        output_world[:, 2] -= self.TUNING.yaw_derivative_gain * current_vel[:, 2]
+
+        yaw_mid = actual[:, 2] + 0.5 * current_vel[:, 2] * float(dt)
+        c = torch.cos(yaw_mid)
+        s = torch.sin(yaw_mid)
+        return torch.stack(
+            (
+                c * output_world[:, 0] + s * output_world[:, 1],
+                -s * output_world[:, 0] + c * output_world[:, 1],
+                output_world[:, 2],
+            ),
+            dim=1,
+        )
+
     def get_output_velocity(
         self,
         actual_positions: torch.Tensor,
@@ -816,61 +944,21 @@ class OmniBaseTrajectoryControl:
           desired_state     – world-frame (see DesiredState docstring)
           current_velocities – [ẋ_world, ẏ_world, ω_z_world]  (optional, for RK2)
 
-        Steps
-        -----
-        1. Compute world-frame positional error (yaw component wrapped to [-π, π]).
-        2. Build world-frame output velocity = ff_velocity + gain * error.
-        3. RK2 midpoint: advance yaw by half a step using current ω_z so the
-           rotation is evaluated at the midpoint heading rather than the current
-           heading, reducing discretisation error during turning.
-        4. Rotate the world-frame output into body frame via R(−yaw):
-               [[cos, sin, 0], [−sin, cos, 0], [0, 0, 1]]
-           The yaw channel (index 2) passes through unchanged because world ω_z
-           equals body ω_z for planar motion.
+        Delegates to ``get_output_velocity_batch`` with a one-row tensor so the
+        scalar and vector production paths share one calculation.
 
         Returns body-frame velocity [dot_x_body, dot_y_body, dot_r].
         """
-        actual_positions = to_torch(actual_positions).to(device=gs.device, dtype=TORCH_FLOAT).reshape(3)
-
-        # Step 1 – world-frame position error
-        error_pos = desired_state.positions - actual_positions
-        error_pos = error_pos.clone()
-        error_pos[2] = self._wrap_to_pi(error_pos[2])
-
-        # Step 2 – world-frame output velocity (feed-forward + proportional)
-        output_velocity = desired_state.velocities + self.feedback_gain * error_pos
-
-        # Step 3 – RK2 midpoint yaw for the world→body rotation
-        # current_velocities[2] is world-frame ω_z (== body yaw rate for planar)
-        yaw = actual_positions[2]
-        if current_velocities is not None:
-            current_velocities = to_torch(current_velocities).to(device=gs.device, dtype=TORCH_FLOAT).reshape(3)
-            diff_r = current_velocities[2] * dt
-            yaw = yaw + 0.5 * diff_r
-
-            # Derivative damping: subtract kd * current_rate to damp overshoot.
-            # Applied in world frame before the rotation; for planar motion ω_z is
-            # the same in world and body frame so the direction is unambiguous.
-            if self.yaw_derivative_gain != 0.0:
-                output_velocity = output_velocity.clone()
-                output_velocity[2] = output_velocity[2] - self.yaw_derivative_gain * current_velocities[2]
-            if self.xy_derivative_gain != 0.0:
-                output_velocity = output_velocity.clone()
-                output_velocity[0] = output_velocity[0] - self.xy_derivative_gain * current_velocities[0]
-                output_velocity[1] = output_velocity[1] - self.xy_derivative_gain * current_velocities[1]
-
-        # Step 4 – rotate world → body:  R(−yaw) = [[c, s, 0], [−s, c, 0], [0, 0, 1]]
-        c = torch.cos(yaw)
-        s = torch.sin(yaw)
-        rot = torch.stack(
-            [
-                torch.stack([c, s, torch.zeros_like(c)], dim=0),
-                torch.stack([-s, c, torch.zeros_like(c)], dim=0),
-                torch.tensor([0.0, 0.0, 1.0], device=gs.device, dtype=TORCH_FLOAT),
-            ],
-            dim=0,
-        )
-        return rot @ output_velocity
+        actual = to_torch(actual_positions).to(device=gs.device, dtype=TORCH_FLOAT).reshape(3)
+        if current_velocities is None:
+            current_velocities = torch.zeros_like(actual)
+        return self.get_output_velocity_batch(
+            actual.unsqueeze(0),
+            desired_state.positions.unsqueeze(0),
+            desired_state.velocities.unsqueeze(0),
+            dt=dt,
+            current_velocities=current_velocities.unsqueeze(0),
+        )[0]
 
     def terminate_control_if_stopped(self, time: float, current_velocities: torch.Tensor) -> bool:
         if self._trajectory is None or self._trajectory_start_time is None:
