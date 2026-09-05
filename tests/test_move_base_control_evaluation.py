@@ -35,7 +35,7 @@ _active_recorder: _VideoRecorder | None = None
 
 
 class _VideoRecorder:
-    """Collects offscreen camera frames and writes them to an mp4 file."""
+    """Collects offscreen camera frames and writes mp4 + animated GIF."""
 
     def __init__(self, camera, output_path: Path, fps: int) -> None:
         self._camera = camera
@@ -51,12 +51,19 @@ class _VideoRecorder:
         self._frames.append(np.asarray(rgb, dtype=np.uint8))
 
     def save(self) -> None:
-        """Write buffered frames to ``self._output_path`` as an mp4."""
+        """Write buffered frames to mp4 and animated GIF.
+
+        The mp4 preserves every captured frame at full fps.  The GIF is
+        sub-sampled to ~30 fps and capped at 600 frames (20 s) so the file
+        stays reasonably sized for quick preview.
+        """
         if not self._frames:
             return
         import imageio.v2 as imageio
 
         self._output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # mp4 — every frame at full capture fps.
         imageio.mimsave(
             str(self._output_path),
             self._frames,
@@ -64,6 +71,20 @@ class _VideoRecorder:
             codec="libx264",
         )
         print(f"  Video saved: {self._output_path} ({len(self._frames)} frames)")
+
+        # Animated GIF — sub-sample to ~30 fps, cap at 600 frames.
+        gif_fps = 30
+        stride = max(1, self._fps // gif_fps)
+        gif_frames = self._frames[::stride][:600]
+        actual_gif_fps = min(gif_fps, self._fps // stride)
+        gif_path = self._output_path.with_suffix(".gif")
+        imageio.mimsave(
+            str(gif_path),
+            gif_frames,
+            duration=1000 / actual_gif_fps,
+            loop=0,
+        )
+        print(f"  GIF saved: {gif_path} ({len(gif_frames)} frames)")
 
 
 def _capture_frame() -> None:
