@@ -714,6 +714,12 @@ class HSRRigidEntity(RigidEntity):
         self._hsr_high_friction_applied = True
 
     def _hsr_apply_default_gains(self) -> None:
+        """Apply tuned PD gains for arm, head, hand, torso, and spring joints.
+
+        Steering gains are owned solely by ``HSRBBaseControllersConfig`` and
+        applied by ``HSRBBaseController._initialize_joints``; this method has
+        no steering fallback and no initialization-order warning.
+        """
         if self._hsr_default_gains_applied:
             return
         if self._scene is None or self._scene.sim is None:
@@ -1127,6 +1133,13 @@ class HSRRigidEntity(RigidEntity):
         envs_idx,
         start_time: float | Sequence[float] | None = None,
     ) -> None:
+        """Accept a base trajectory for one or more environments.
+
+        Trajectory positions, velocities, and accelerations are world/odom
+        frame ``[x, y, yaw]``.  Each accepted trajectory remains active —
+        holding its final pose under feedback control — until
+        ``reset_base_trajectory_batched`` or replacement via a subsequent call.
+        """
         if self._solver_n_envs() > 0:
             envs_idx = self._scene._sanitize_envs_idx(envs_idx)
         envs_idx_arr = torch.as_tensor(envs_idx, device=gs.device, dtype=gs.tc_int).reshape(-1)

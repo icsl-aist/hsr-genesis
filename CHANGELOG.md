@@ -2,6 +2,14 @@
 
 All notable changes to this package will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+- Base trajectories now hold their final pose until `reset_base_trajectory_batched` or replacement; removed the automatic-stop constructor options `stop_velocity_threshold` and `stop_time_margin`.
+- Outer trajectory feedback and damping now use one controller-owned production tuning value instead of per-instance constructor overrides.
+- Single-waypoint batched base control now uses shortest-path yaw and routes named or derivative-bearing trajectories through the canonical controller.
+- Steering gains now have one controller-owned source and no longer depend on initialization order.
+
 ## [0.1.0] - 2026-02-24
 
 ### Initial Import

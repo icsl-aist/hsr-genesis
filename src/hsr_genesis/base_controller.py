@@ -570,12 +570,16 @@ class HSRBBaseController:
 
 @dataclass(frozen=True)
 class Trajectory:
-    """Base trajectory waypoints in the world/odom frame.
+    """Base trajectory waypoints — world-frame data only; no controller tuning.
 
-    All fields use world-frame (odom) coordinates:
+    All fields use world/odom-frame coordinates:
       positions[:, 0]  – world X [m]
       positions[:, 1]  – world Y [m]
       positions[:, 2]  – world yaw [rad]
+
+    This dataclass carries trajectory geometry only.  Outer-loop feedback and
+    damping gains are owned by ``OmniBaseTrajectoryControl.TUNING`` and cannot
+    be supplied or overridden through a trajectory request.
 
     Frame contract for optional velocities
     ----------------------------------------
@@ -585,9 +589,9 @@ class Trajectory:
     Rationale: ``OmniBaseTrajectoryControl`` keeps the internal ``_point_before``
     state in world frame (seeded from ``get_vel`` / ``get_ang`` which are world-
     frame Genesis outputs). The interpolated feed-forward velocity is therefore
-    also world-frame. ``get_output_velocity`` rotates the combined feed-forward +
-    P-error term into body frame as its final step, so callers never need to
-    supply body-frame velocities here.
+    also world-frame. ``get_output_velocity_batch`` rotates the combined
+    feed-forward + P-error term into body frame as its final step, so callers
+    never need to supply body-frame velocities here.
 
     If ``velocities`` is None the controller falls back to finite-difference
     (``(p[i+1] - p[i]) / dt``), which is automatically world-frame because the
@@ -640,16 +644,36 @@ class OmniBaseTrajectoryControl:
     Trajectory waypoint velocities (``Trajectory.velocities``) must also be
     world-frame for interpolation to be consistent — see ``Trajectory`` docstring.
 
-    ``get_output_velocity`` converts the combined world-frame output velocity into
-    the robot body frame (via R(−yaw)) before returning it to the base joint
-    controller.  Callers must not pre-rotate velocities into body frame.
+    ``get_output_velocity_batch`` converts the combined world-frame output
+    velocity into the robot body frame (via R(−yaw)) before returning it to the
+    base joint controller.  Callers must not pre-rotate velocities into body
+    frame.
 
     Tuning
     ------
-    Outer-loop gains are controller-owned and immutable (``TUNING``); they cannot
-    be supplied or overridden by a trajectory request.  The scalar
+    Outer-loop gains are controller-owned and immutable (``TUNING``); they
+    cannot be supplied or overridden by a trajectory request.  The scalar
     ``get_output_velocity`` delegates to the shared batched calculation
     ``get_output_velocity_batch`` so both production paths use identical math.
+
+    Validation and time boundaries
+    ------------------------------
+    ``validate_trajectory`` rejects non-finite positions, timestamps,
+    velocities, and accelerations, and rejects a negative first timestamp.
+    Strict timestamp increase and existing shape/name validation are preserved.
+
+    Before a delayed start (``t < 0``) the pose captured at acceptance is held
+    with zero feed-forward velocity.  A zero-time first waypoint is reached
+    immediately at ``t == 0``.  At and after the final timestamp the final
+    position is held with **zero** feed-forward velocity — explicit final
+    velocity is ignored.
+
+    Lifecycle
+    ---------
+    An accepted trajectory remains active until ``reset_current_trajectory``
+    or replacement via ``accept_trajectory``.  Sampling past the horizon does
+    not release it; the controller keeps issuing feedback-only commands toward
+    the final pose.
     """
 
     TUNING = _TrajectoryControlTuning(
