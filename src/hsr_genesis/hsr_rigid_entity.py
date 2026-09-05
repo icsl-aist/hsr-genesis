@@ -734,15 +734,6 @@ class HSRRigidEntity(RigidEntity):
             "hand_motor_joint": 10.0,
             # torso: mimic joint controlled via arm_lift; needs PD to hold against gravity
             "torso_lift_joint": 10000.0,
-            # base_roll_joint is the steering joint for the whole wheel module.
-            # Effective inertia is roughly 2-5 kg*m^2; the earlier
-            # kp=100/kv=10 combination was severely underdamped and caused
-            # whole-body oscillation with the arm extended.
-            # This housekeeping path provides a heavily damped fallback.
-            # HSRBBaseController also configures this DOF when constructed;
-            # the values differ, so whichever initialization path runs last
-            # determines the effective steering gains.
-            "base_roll_joint": 100.0,
         }
         tuned_kv = {
             # kv tuned for critical damping using effective downstream mass.
@@ -760,10 +751,6 @@ class HSRRigidEntity(RigidEntity):
             # torso_lift_link mass ~3.4 kg -> kv_crit = 2*sqrt(kp*m) ≈ 370.
             # Using 400 for slight overdamping.
             "torso_lift_joint": 400.0,
-            # base_roll: kv=50 gives zeta ≈ 1.1 for I_eff ≈ 5 kg·m²,
-            # providing critical damping for the steering joint without
-            # making the steering response sluggish.
-            "base_roll_joint": 50.0,
         }
         if self._hsr_arm_dofs_idx_local:
             arm_kp = torch.tensor(
@@ -900,27 +887,6 @@ class HSRRigidEntity(RigidEntity):
             self.set_dofs_force_range(
                 -torso_force_limit, torso_force_limit, dofs_idx_local=[torso_idx],
             )
-        # Apply the housekeeping steering gains.  This is not currently the
-        # sole owner of base_roll_joint tuning: HSRBBaseController.__init__
-        # writes kp=50/kv≈6.325.  Raw velocity control can construct that
-        # controller before this one-shot housekeeping call, whereas a
-        # trajectory can construct it afterward, making the final gains
-        # initialization-order dependent.  Keep both sites in mind when
-        # changing steering response.
-        try:
-            steer_joint = self.get_joint("base_roll_joint")
-            steer_dofs = steer_joint.dofs_idx_local
-            steer_idx = int(steer_dofs[0]) if isinstance(steer_dofs, (list, tuple)) else int(steer_dofs)
-            self.set_dofs_kp(
-                torch.tensor([tuned_kp["base_roll_joint"]], device=gs.device, dtype=gs.tc_float),
-                dofs_idx_local=[steer_idx],
-            )
-            self.set_dofs_kv(
-                torch.tensor([tuned_kv["base_roll_joint"]], device=gs.device, dtype=gs.tc_float),
-                dofs_idx_local=[steer_idx],
-            )
-        except Exception:
-            pass
         # Cache arm_lift and torso gains for manual PD + feed-forward computation.
         self._hsr_arm_lift_kp = tuned_kp["arm_lift_joint"]
         self._hsr_arm_lift_kv = tuned_kv["arm_lift_joint"]

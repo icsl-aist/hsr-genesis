@@ -403,10 +403,7 @@ class HSRBBaseController:
                 dofs_idx_local=passive,
             )
 
-        # HSRRigidEntity._hsr_apply_default_gains also writes steering gains.
-        # These controller-owned values are currently different; construction
-        # order determines which set remains active.  Until gain ownership is
-        # consolidated, changing this block requires reviewing that site too.
+        # The inner base controller exclusively owns base_roll_joint gains and limits.
         steer = [self.steer_dof_idx_local]
         self.entity.set_dofs_kp(
             kp=torch.tensor([self.config.kp_steer], device=gs.device, dtype=TORCH_FLOAT),

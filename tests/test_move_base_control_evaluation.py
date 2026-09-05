@@ -1157,6 +1157,26 @@ class TestMoveBaseControlEvaluation:
         print("\n" + "=" * 60)
 
 
+def _effective_steer_gains(controller_first: bool) -> tuple[float, float]:
+    _, robot = _create_scene(dt=0.01)
+    if controller_first:
+        controller = robot.get_base_controller()
+        robot._hsr_apply_default_gains()
+    else:
+        robot._hsr_apply_default_gains()
+        controller = robot.get_base_controller()
+    steer = [controller.steer_dof_idx_local]
+    kp = float(robot.get_dofs_kp(dofs_idx_local=steer).reshape(-1)[0].item())
+    kv = float(robot.get_dofs_kv(dofs_idx_local=steer).reshape(-1)[0].item())
+    return kp, kv
+
+
+def test_steering_gains_do_not_depend_on_initialization_order() -> None:
+    controller_then_housekeeping = _effective_steer_gains(controller_first=True)
+    housekeeping_then_controller = _effective_steer_gains(controller_first=False)
+    assert controller_then_housekeeping == pytest.approx(housekeeping_then_controller)
+
+
 if __name__ == "__main__":
     # Allow running tests directly
     pytest.main([__file__, "-v"])
