@@ -1177,6 +1177,285 @@ def test_steering_gains_do_not_depend_on_initialization_order() -> None:
     assert controller_then_housekeeping == pytest.approx(housekeeping_then_controller)
 
 
+# ---------------------------------------------------------------------------
+# Permanent selected-gain stability regressions (Task 5)
+# ---------------------------------------------------------------------------
+
+ARM_EXTENDED = (0.50, -1.50, 0.0, 0.0, 0.0)
+
+_SELECTED_GAIN_DT = pytest.param(0.01, id="dt001")
+_SELECTED_GAIN_DT_002 = pytest.param(0.02, id="dt002")
+
+
+def _run_selected_gain_trajectory(
+    dt: float,
+    target_x: float,
+    target_y: float,
+    target_yaw: float,
+    arm_extended: bool,
+) -> dict:
+    """Run a trajectory with the selected steering gains and return metrics."""
+    scene, robot = _create_scene(dt=dt)
+    physics_dt = float(scene.sim.dt)
+
+    # Initialize vec state so step_base_trajectory_batched can access it.
+    robot._ensure_whole_body_state(1)
+
+    # Set arm position.
+    if arm_extended:
+        arm_pos = torch.tensor(ARM_EXTENDED, device=gs.device, dtype=gs.tc_float)
+        robot.set_dofs_position(arm_pos, dofs_idx_local=robot._hsr_arm_dofs_idx_local)
+    else:
+        arm_pos = robot.get_dofs_position(
+            dofs_idx_local=robot._hsr_arm_dofs_idx_local, envs_idx=[0],
+        )
+        if arm_pos.ndim > 1:
+            arm_pos = arm_pos[0]
+        arm_pos = arm_pos.reshape(-1).clone()
+
+    # Settle for 1 second.
+    settle_steps = round(1.0 / physics_dt)
+    for _ in range(settle_steps):
+        robot.step_base_trajectory_batched(physics_dt, envs_idx=[0])
+        robot.control_dofs_position(
+            arm_pos, dofs_idx_local=robot._hsr_arm_dofs_idx_local, envs_idx=[0],
+        )
+        scene.step()
+
+    # Capture initial pose after settling.
+    init_pos = robot.get_pos()
+    if init_pos.ndim > 1:
+        init_pos = init_pos[0]
+    init_x = float(init_pos[0])
+    init_y = float(init_pos[1])
+
+    # Create and accept trajectory.
+    duration = 3.0
+    positions = torch.tensor(
+        [[target_x, target_y, target_yaw]],
+        device=gs.device, dtype=gs.tc_float,
+    )
+    time_from_start = torch.tensor([duration], device=gs.device, dtype=gs.tc_float)
+    trajectory = Trajectory(positions=positions, time_from_start=time_from_start)
+    robot.set_base_trajectory_batched(trajectory, envs_idx=[0])
+
+    # Run trajectory for 3.5 s (duration + 0.5 s hold).
+    total_time = 3.5
+    steps = int(round(total_time / physics_dt))
+    roll_history: list[float] = []
+    pitch_history: list[float] = []
+    for _ in range(steps):
+        robot.step_base_trajectory_batched(physics_dt, envs_idx=[0])
+        robot.control_dofs_position(
+            arm_pos, dofs_idx_local=robot._hsr_arm_dofs_idx_local, envs_idx=[0],
+        )
+        scene.step()
+        quat = robot.get_quat()
+        if quat.ndim > 1:
+            quat = quat[0]
+        roll, pitch = _roll_pitch_from_quat(quat)
+        roll_history.append(abs(roll))
+        pitch_history.append(abs(pitch))
+
+    # Final state.
+    final_pos = robot.get_pos()
+    final_quat = robot.get_quat()
+    if final_pos.ndim > 1:
+        final_pos = final_pos[0]
+    if final_quat.ndim > 1:
+        final_quat = final_quat[0]
+    final_yaw = _yaw_from_quat(final_quat)
+
+    final_translation_error = math.hypot(
+        target_x - float(final_pos[0]), target_y - float(final_pos[1]),
+    )
+    final_yaw_error = _compute_yaw_error(target_yaw, final_yaw)
+    max_roll = max(roll_history) if roll_history else 0.0
+    max_pitch = max(pitch_history) if pitch_history else 0.0
+
+    return {
+        "max_roll": max_roll,
+        "max_pitch": max_pitch,
+        "final_translation_error": final_translation_error,
+        "final_yaw_error": final_yaw_error,
+        "all_finite": all(math.isfinite(v) for v in (
+            max_roll, max_pitch, final_translation_error, final_yaw_error,
+        )),
+    }
+
+
+def _run_selected_gain_raw(
+    dt: float,
+    command: tuple[float, float, float],
+    arm_extended: bool,
+) -> dict:
+    """Run a raw velocity command with the selected steering gains."""
+    from hsr_genesis.base_controller import CartSpace
+
+    scene, robot = _create_scene(dt=dt)
+    physics_dt = float(scene.sim.dt)
+    robot._ensure_whole_body_state(1)
+    controller = robot.get_base_controller()
+
+    # Set arm position.
+    if arm_extended:
+        arm_pos = torch.tensor(ARM_EXTENDED, device=gs.device, dtype=gs.tc_float)
+        robot.set_dofs_position(arm_pos, dofs_idx_local=robot._hsr_arm_dofs_idx_local)
+    else:
+        arm_pos = robot.get_dofs_position(
+            dofs_idx_local=robot._hsr_arm_dofs_idx_local, envs_idx=[0],
+        )
+        if arm_pos.ndim > 1:
+            arm_pos = arm_pos[0]
+        arm_pos = arm_pos.reshape(-1).clone()
+
+    # Settle for 1 second.
+    settle_steps = round(1.0 / physics_dt)
+    for _ in range(settle_steps):
+        robot.step_base_trajectory_batched(physics_dt, envs_idx=[0])
+        robot.control_dofs_position(
+            arm_pos, dofs_idx_local=robot._hsr_arm_dofs_idx_local, envs_idx=[0],
+        )
+        scene.step()
+
+    # Driven phase: refresh command for 2.0 s.
+    driven_steps = int(round(2.0 / physics_dt))
+    roll_history: list[float] = []
+    pitch_history: list[float] = []
+    track_count = 0
+    for _ in range(driven_steps):
+        cmd = CartSpace()
+        cmd.dot_x, cmd.dot_y, cmd.dot_r = command
+        controller.update_velocity_command(cmd, envs_idx=[0])
+        robot.step_base_trajectory_batched(physics_dt, envs_idx=[0])
+        robot.control_dofs_position(
+            arm_pos, dofs_idx_local=robot._hsr_arm_dofs_idx_local, envs_idx=[0],
+        )
+        scene.step()
+        quat = robot.get_quat()
+        if quat.ndim > 1:
+            quat = quat[0]
+        roll, pitch = _roll_pitch_from_quat(quat)
+        roll_history.append(abs(roll))
+        pitch_history.append(abs(pitch))
+
+        # Body-frame velocity tracking check.
+        vel = robot.get_vel()
+        ang = robot.get_ang()
+        if vel.ndim > 1:
+            vel = vel[0]
+        if ang.ndim > 1:
+            ang = ang[0]
+        yaw = _yaw_from_quat(quat)
+        body_vx = math.cos(yaw) * float(vel[0]) + math.sin(yaw) * float(vel[1])
+        body_vy = -math.sin(yaw) * float(vel[0]) + math.cos(yaw) * float(vel[1])
+        body_wz = float(ang[2])
+        cmd_norm = max(math.sqrt(sum(c ** 2 for c in command)), 1e-6)
+        err_norm = math.sqrt(
+            (body_vx - command[0]) ** 2
+            + (body_vy - command[1]) ** 2
+            + (body_wz - command[2]) ** 2
+        )
+        if err_norm / cmd_norm < 0.5:
+            track_count += 1
+
+    # Settle phase: zero command for 0.5 s.
+    settle_steps_raw = int(round(0.5 / physics_dt))
+    settle_count = 0
+    for _ in range(settle_steps_raw):
+        cmd = CartSpace()
+        cmd.dot_x, cmd.dot_y, cmd.dot_r = 0.0, 0.0, 0.0
+        controller.update_velocity_command(cmd, envs_idx=[0])
+        robot.step_base_trajectory_batched(physics_dt, envs_idx=[0])
+        robot.control_dofs_position(
+            arm_pos, dofs_idx_local=robot._hsr_arm_dofs_idx_local, envs_idx=[0],
+        )
+        scene.step()
+        quat = robot.get_quat()
+        if quat.ndim > 1:
+            quat = quat[0]
+        roll, pitch = _roll_pitch_from_quat(quat)
+        roll_history.append(abs(roll))
+        pitch_history.append(abs(pitch))
+
+        vel = robot.get_vel()
+        ang = robot.get_ang()
+        if vel.ndim > 1:
+            vel = vel[0]
+        if ang.ndim > 1:
+            ang = ang[0]
+        yaw = _yaw_from_quat(quat)
+        body_vx = math.cos(yaw) * float(vel[0]) + math.sin(yaw) * float(vel[1])
+        body_vy = -math.sin(yaw) * float(vel[0]) + math.cos(yaw) * float(vel[1])
+        body_wz = float(ang[2])
+        vel_norm = math.sqrt(body_vx ** 2 + body_vy ** 2 + body_wz ** 2)
+        if vel_norm < 0.05:
+            settle_count += 1
+
+    tracking_fraction = track_count / driven_steps if driven_steps > 0 else 0.0
+    settle_fraction = settle_count / settle_steps_raw if settle_steps_raw > 0 else 0.0
+    max_roll = max(roll_history) if roll_history else 0.0
+    max_pitch = max(pitch_history) if pitch_history else 0.0
+
+    return {
+        "max_roll": max_roll,
+        "max_pitch": max_pitch,
+        "raw_tracking_fraction": tracking_fraction,
+        "raw_settle_fraction": settle_fraction,
+        "all_finite": all(math.isfinite(v) for v in (
+            max_roll, max_pitch, tracking_fraction, settle_fraction,
+        )),
+    }
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("dt", [0.01, 0.02], ids=["dt001", "dt002"])
+def test_selected_steering_gains_yaw_arm_extended(dt: float) -> None:
+    """Selected gains hold stability during yaw with arm extended."""
+    metrics = _run_selected_gain_trajectory(
+        dt=dt,
+        target_x=0.0, target_y=0.0, target_yaw=math.pi / 2.0,
+        arm_extended=True,
+    )
+    assert metrics["max_roll"] <= 0.02
+    assert metrics["max_pitch"] <= 0.02
+    assert metrics["final_translation_error"] <= 0.05
+    assert metrics["final_yaw_error"] <= math.radians(5.0)
+    assert metrics["all_finite"]
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("dt", [0.01, 0.02], ids=["dt001", "dt002"])
+def test_selected_steering_gains_diagonal_arm_extended(dt: float) -> None:
+    """Selected gains hold stability during diagonal motion with arm extended."""
+    metrics = _run_selected_gain_trajectory(
+        dt=dt,
+        target_x=0.4, target_y=0.3, target_yaw=math.pi / 4.0,
+        arm_extended=True,
+    )
+    assert metrics["max_roll"] <= 0.02
+    assert metrics["max_pitch"] <= 0.02
+    assert metrics["final_translation_error"] <= 0.05
+    assert metrics["final_yaw_error"] <= math.radians(5.0)
+    assert metrics["all_finite"]
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("dt", [0.01, 0.02], ids=["dt001", "dt002"])
+def test_selected_steering_gains_raw_diagonal_arm_extended(dt: float) -> None:
+    """Selected gains track raw diagonal commands and settle with arm extended."""
+    metrics = _run_selected_gain_raw(
+        dt=dt,
+        command=(0.15, 0.15, 0.3),
+        arm_extended=True,
+    )
+    assert metrics["raw_tracking_fraction"] >= 0.25
+    assert metrics["raw_settle_fraction"] >= 0.10
+    assert metrics["max_roll"] <= 0.02
+    assert metrics["max_pitch"] <= 0.02
+    assert metrics["all_finite"]
+
+
 if __name__ == "__main__":
     # Allow running tests directly
     pytest.main([__file__, "-v"])
