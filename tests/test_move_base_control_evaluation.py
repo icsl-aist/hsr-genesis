@@ -26,6 +26,59 @@ from hsr_genesis.hsr_rigid_entity import HSRBURDF  # noqa: E402
 
 URDF_PATH = Path(__file__).resolve().parents[1] / "data" / "urdf" / "hsrb4s.urdf"
 
+# ---------------------------------------------------------------------------
+# Video recording (--record-video)
+# ---------------------------------------------------------------------------
+
+_VIDEO_DIR: Path = Path(__file__).resolve().parent / "videos"
+_active_recorder: _VideoRecorder | None = None
+
+
+class _VideoRecorder:
+    """Collects offscreen camera frames and writes them to an mp4 file."""
+
+    def __init__(self, camera, output_path: Path, fps: int) -> None:
+        self._camera = camera
+        self._output_path = output_path
+        self._fps = fps
+        self._frames: list[np.ndarray] = []
+
+    def capture(self) -> None:
+        """Render one frame and append it to the buffer."""
+        rgb = self._camera.render()[0]
+        if hasattr(rgb, "cpu"):
+            rgb = rgb.cpu()
+        self._frames.append(np.asarray(rgb, dtype=np.uint8))
+
+    def save(self) -> None:
+        """Write buffered frames to ``self._output_path`` as an mp4."""
+        if not self._frames:
+            return
+        import imageio.v2 as imageio
+
+        self._output_path.parent.mkdir(parents=True, exist_ok=True)
+        imageio.mimsave(
+            str(self._output_path),
+            self._frames,
+            fps=self._fps,
+            codec="libx264",
+        )
+        print(f"  Video saved: {self._output_path} ({len(self._frames)} frames)")
+
+
+def _capture_frame() -> None:
+    """Capture a frame if a recorder is active, otherwise no-op."""
+    if _active_recorder is not None:
+        _active_recorder.capture()
+
+
+def _save_active_video() -> None:
+    """Save and clear the active recorder, if any."""
+    global _active_recorder
+    if _active_recorder is not None:
+        _active_recorder.save()
+        _active_recorder = None
+
 
 @dataclass
 class MovementResult:
@@ -73,8 +126,19 @@ class TestScenario:
 def _create_scene(
     dt: float = 0.01,
     show_viewer: bool = False,
+    record_video: bool = False,
+    video_name: str | None = None,
 ) -> tuple[gs.Scene, HSRBURDF]:
-    """Create a Genesis scene with HSR robot in controller mode."""
+    """Create a Genesis scene with HSR robot in controller mode.
+
+    When *record_video* is True an offscreen camera is added to the scene and
+    a :class:`_VideoRecorder` is activated so that every ``scene.step()`` in
+    the execution helpers captures a frame.  Call :func:`_save_active_video`
+    after the test to write the mp4.
+    """
+    global _active_recorder
+    _active_recorder = None  # clear any previous recorder
+
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=dt,
@@ -108,7 +172,23 @@ def _create_scene(
         ),
     )
 
+    camera = None
+    if record_video:
+        camera = scene.add_camera(
+            res=(320, 240),
+            pos=(2.0, 0.0, 1.5),
+            lookat=(0.0, 0.0, 0.5),
+            fov=45,
+            GUI=False,
+        )
+
     scene.build()
+
+    if record_video and camera is not None and video_name:
+        fps = max(1, int(round(1.0 / dt)))
+        output_path = _VIDEO_DIR / f"{video_name}.mp4"
+        _active_recorder = _VideoRecorder(camera, output_path, fps)
+
     return scene, robot
 
 
@@ -231,6 +311,7 @@ def _execute_base_movement_with_vibration_monitoring(
         # Hold arm joints in initial position to prevent arm from falling
         robot.control_dofs_position(arm_pos, dofs_idx_local=robot._hsr_arm_dofs_idx_local, envs_idx=[0])
         scene.step()
+        _capture_frame()
 
         # Monitor roll/pitch
         quat = robot.get_quat()
@@ -369,6 +450,7 @@ def _execute_base_movement(
         # Hold arm joints in initial position to prevent arm from falling
         robot.control_dofs_position(arm_pos, dofs_idx_local=robot._hsr_arm_dofs_idx_local, envs_idx=[0])
         scene.step()
+        _capture_frame()
 
     # Get final state
     final_pos = robot.get_pos()
@@ -535,6 +617,7 @@ def _execute_base_movement_with_wheel_monitoring(
         # Hold arm joints in initial position to prevent arm from falling
         robot.control_dofs_position(arm_pos, dofs_idx_local=robot._hsr_arm_dofs_idx_local, envs_idx=[0])
         scene.step()
+        _capture_frame()
         current_time += dt
 
     # Compute statistics
@@ -588,11 +671,18 @@ class TestMoveBaseControlEvaluation:
     """Test class for evaluating move base control precision."""
 
     @pytest.fixture
-    def scene_and_robot(self, pytestconfig):
+    def scene_and_robot(self, pytestconfig, request):
         """Fixture providing scene and robot for tests."""
         show_viewer = pytestconfig.getoption("--visualize")
-        scene, robot = _create_scene(show_viewer=show_viewer)
+        record_video = pytestconfig.getoption("--record-video", default=False)
+        video_name = request.node.name if record_video else None
+        scene, robot = _create_scene(
+            show_viewer=show_viewer,
+            record_video=record_video,
+            video_name=video_name,
+        )
         yield scene, robot
+        _save_active_video()
         # Cleanup - Genesis doesn't support multiple scenes with viewer
         if show_viewer:
             scene._viewer = None
@@ -1170,9 +1260,10 @@ def _run_selected_gain_trajectory(
     target_y: float,
     target_yaw: float,
     arm_extended: bool,
+    video_name: str | None = None,
 ) -> dict:
     """Run a trajectory with the selected steering gains and return metrics."""
-    scene, robot = _create_scene(dt=dt)
+    scene, robot = _create_scene(dt=dt, record_video=video_name is not None, video_name=video_name)
     physics_dt = float(scene.sim.dt)
 
     # Initialize vec state so step_base_trajectory_batched can access it.
@@ -1198,6 +1289,7 @@ def _run_selected_gain_trajectory(
             arm_pos, dofs_idx_local=robot._hsr_arm_dofs_idx_local, envs_idx=[0],
         )
         scene.step()
+        _capture_frame()
 
     # Capture initial pose after settling.
     init_pos = robot.get_pos()
@@ -1227,6 +1319,7 @@ def _run_selected_gain_trajectory(
             arm_pos, dofs_idx_local=robot._hsr_arm_dofs_idx_local, envs_idx=[0],
         )
         scene.step()
+        _capture_frame()
         quat = robot.get_quat()
         if quat.ndim > 1:
             quat = quat[0]
@@ -1250,6 +1343,8 @@ def _run_selected_gain_trajectory(
     max_roll = max(roll_history) if roll_history else 0.0
     max_pitch = max(pitch_history) if pitch_history else 0.0
 
+    _save_active_video()
+
     return {
         "max_roll": max_roll,
         "max_pitch": max_pitch,
@@ -1260,16 +1355,16 @@ def _run_selected_gain_trajectory(
         )),
     }
 
-
 def _run_selected_gain_raw(
     dt: float,
     command: tuple[float, float, float],
     arm_extended: bool,
+    video_name: str | None = None,
 ) -> dict:
     """Run a raw velocity command with the selected steering gains."""
     from hsr_genesis.base_controller import CartSpace
 
-    scene, robot = _create_scene(dt=dt)
+    scene, robot = _create_scene(dt=dt, record_video=video_name is not None, video_name=video_name)
     physics_dt = float(scene.sim.dt)
     robot._ensure_whole_body_state(1)
     controller = robot.get_base_controller()
@@ -1294,6 +1389,7 @@ def _run_selected_gain_raw(
             arm_pos, dofs_idx_local=robot._hsr_arm_dofs_idx_local, envs_idx=[0],
         )
         scene.step()
+        _capture_frame()
 
     # Driven phase: refresh command for 2.0 s.
     driven_steps = int(round(2.0 / physics_dt))
@@ -1309,6 +1405,7 @@ def _run_selected_gain_raw(
             arm_pos, dofs_idx_local=robot._hsr_arm_dofs_idx_local, envs_idx=[0],
         )
         scene.step()
+        _capture_frame()
         quat = robot.get_quat()
         if quat.ndim > 1:
             quat = quat[0]
@@ -1348,6 +1445,7 @@ def _run_selected_gain_raw(
             arm_pos, dofs_idx_local=robot._hsr_arm_dofs_idx_local, envs_idx=[0],
         )
         scene.step()
+        _capture_frame()
         quat = robot.get_quat()
         if quat.ndim > 1:
             quat = quat[0]
@@ -1374,6 +1472,8 @@ def _run_selected_gain_raw(
     max_roll = max(roll_history) if roll_history else 0.0
     max_pitch = max(pitch_history) if pitch_history else 0.0
 
+    _save_active_video()
+
     return {
         "max_roll": max_roll,
         "max_pitch": max_pitch,
@@ -1387,12 +1487,13 @@ def _run_selected_gain_raw(
 
 @pytest.mark.slow
 @pytest.mark.parametrize("dt", [0.01, 0.02], ids=["dt001", "dt002"])
-def test_selected_steering_gains_yaw_arm_extended(dt: float) -> None:
+def test_selected_steering_gains_yaw_arm_extended(dt: float, request) -> None:
     """Selected gains hold stability during yaw with arm extended."""
     metrics = _run_selected_gain_trajectory(
         dt=dt,
         target_x=0.0, target_y=0.0, target_yaw=math.pi / 2.0,
         arm_extended=True,
+        video_name=request.node.name if request.config.getoption("--record-video", default=False) else None,
     )
     assert metrics["max_roll"] <= 0.02
     assert metrics["max_pitch"] <= 0.02
@@ -1403,12 +1504,13 @@ def test_selected_steering_gains_yaw_arm_extended(dt: float) -> None:
 
 @pytest.mark.slow
 @pytest.mark.parametrize("dt", [0.01, 0.02], ids=["dt001", "dt002"])
-def test_selected_steering_gains_diagonal_arm_extended(dt: float) -> None:
+def test_selected_steering_gains_diagonal_arm_extended(dt: float, request) -> None:
     """Selected gains hold stability during diagonal motion with arm extended."""
     metrics = _run_selected_gain_trajectory(
         dt=dt,
         target_x=0.4, target_y=0.3, target_yaw=math.pi / 4.0,
         arm_extended=True,
+        video_name=request.node.name if request.config.getoption("--record-video", default=False) else None,
     )
     assert metrics["max_roll"] <= 0.02
     assert metrics["max_pitch"] <= 0.02
@@ -1419,12 +1521,13 @@ def test_selected_steering_gains_diagonal_arm_extended(dt: float) -> None:
 
 @pytest.mark.slow
 @pytest.mark.parametrize("dt", [0.01, 0.02], ids=["dt001", "dt002"])
-def test_selected_steering_gains_raw_diagonal_arm_extended(dt: float) -> None:
+def test_selected_steering_gains_raw_diagonal_arm_extended(dt: float, request) -> None:
     """Selected gains track raw diagonal commands and settle with arm extended."""
     metrics = _run_selected_gain_raw(
         dt=dt,
         command=(0.15, 0.15, 0.3),
         arm_extended=True,
+        video_name=request.node.name if request.config.getoption("--record-video", default=False) else None,
     )
     assert metrics["raw_tracking_fraction"] >= 0.25
     assert metrics["raw_settle_fraction"] >= 0.10

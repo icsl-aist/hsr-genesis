@@ -211,3 +211,4 @@ __marimo__/
 .internal/
 .firecrawl/
 results/
+tests/videos/
