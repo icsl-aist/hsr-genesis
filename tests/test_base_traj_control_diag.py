@@ -238,6 +238,75 @@ def test_scalar_and_batched_outer_control_outputs_match() -> None:
 
     assert torch.allclose(scalar, batched, atol=1.0e-6)
 
+# ── unit tests: trajectory validation and time boundaries ─────────────────────
+
+def _trajectory(
+    positions: list[list[float]],
+    times: list[float],
+    *,
+    velocities: list[list[float]] | None = None,
+    accelerations: list[list[float]] | None = None,
+) -> Trajectory:
+    return Trajectory(
+        positions=torch.tensor(positions, device=gs.device, dtype=TORCH_FLOAT),
+        time_from_start=torch.tensor(times, device=gs.device, dtype=TORCH_FLOAT),
+        velocities=None if velocities is None else torch.tensor(velocities, device=gs.device, dtype=TORCH_FLOAT),
+        accelerations=None if accelerations is None else torch.tensor(accelerations, device=gs.device, dtype=TORCH_FLOAT),
+    )
+
+
+def test_trajectory_rejects_nonfinite_and_negative_time() -> None:
+    ctrl = OmniBaseTrajectoryControl()
+    start = torch.zeros(3, device=gs.device, dtype=TORCH_FLOAT)
+    invalid = (
+        _trajectory([[float("nan"), 0.0, 0.0]], [1.0]),
+        _trajectory([[0.0, 0.0, 0.0]], [float("inf")]),
+        _trajectory([[0.0, 0.0, 0.0]], [1.0], velocities=[[0.0, float("nan"), 0.0]]),
+        _trajectory([[0.0, 0.0, 0.0]], [1.0], accelerations=[[0.0, 0.0, float("inf")]]),
+        _trajectory([[0.0, 0.0, 0.0]], [-0.01]),
+    )
+    for trajectory in invalid:
+        with pytest.raises(ValueError, match="invalid trajectory"):
+            ctrl.accept_trajectory(trajectory, start)
+
+
+def test_delayed_trajectory_holds_acceptance_pose_before_start() -> None:
+    ctrl = OmniBaseTrajectoryControl()
+    start = torch.tensor([0.2, -0.1, 0.3], device=gs.device, dtype=TORCH_FLOAT)
+    ctrl.accept_trajectory(_trajectory([[1.0, 0.5, 0.8]], [2.0]), start, start_time=5.0)
+    ok, desired, _, _ = ctrl.sample_desired_state(4.5, start + 0.1, torch.ones_like(start))
+    assert ok and desired is not None
+    assert torch.allclose(desired.positions, start)
+    assert torch.equal(desired.velocities, torch.zeros_like(start))
+
+
+def test_zero_time_waypoint_is_immediate_hold_target() -> None:
+    ctrl = OmniBaseTrajectoryControl()
+    start = torch.tensor([0.2, -0.1, 0.3], device=gs.device, dtype=TORCH_FLOAT)
+    target = torch.tensor([0.7, 0.4, -0.2], device=gs.device, dtype=TORCH_FLOAT)
+    ctrl.accept_trajectory(_trajectory([target.tolist()], [0.0]), start, start_time=1.0)
+    ok, desired, _, _ = ctrl.sample_desired_state(1.0, start, torch.ones_like(start))
+    assert ok and desired is not None
+    assert torch.allclose(desired.positions, target)
+    assert torch.equal(desired.velocities, torch.zeros_like(target))
+
+
+def test_final_waypoint_velocity_becomes_zero_during_hold() -> None:
+    ctrl = OmniBaseTrajectoryControl()
+    start = torch.zeros(3, device=gs.device, dtype=TORCH_FLOAT)
+    ctrl.accept_trajectory(
+        _trajectory([[1.0, 0.0, 0.0]], [2.0], velocities=[[0.4, 0.0, 0.0]]),
+        start,
+        start_time=0.0,
+    )
+    _, during, _, _ = ctrl.sample_desired_state(1.0, start, torch.zeros_like(start))
+    _, final, _, _ = ctrl.sample_desired_state(2.0, start, torch.zeros_like(start))
+    _, after, _, _ = ctrl.sample_desired_state(3.0, start, torch.zeros_like(start))
+    assert during is not None and 0.0 < float(during.velocities[0]) < 0.4
+    assert final is not None and torch.equal(final.velocities, torch.zeros_like(start))
+    assert after is not None and torch.equal(after.velocities, torch.zeros_like(start))
+    assert ctrl.update_active_trajectory()
+
 # ── physics-based diagnostic tests ─────────────────────────────────────────────
 
 @pytest.fixture(scope="function")

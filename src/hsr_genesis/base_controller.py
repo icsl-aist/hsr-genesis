@@ -685,6 +685,7 @@ class OmniBaseTrajectoryControl:
         self._sampled_already = False
         self._point_before: DesiredState | None = None
 
+        self._accepted_start_position: torch.Tensor | None = None
 
     @staticmethod
     def _wrap_to_pi(angle: torch.Tensor | float) -> torch.Tensor | float:
@@ -725,7 +726,15 @@ class OmniBaseTrajectoryControl:
             if accelerations.shape != positions.shape:
                 return False
 
+        if not torch.isfinite(positions).all() or not torch.isfinite(time_from_start).all():
+            return False
+        if traj.velocities is not None and not torch.isfinite(velocities).all():
+            return False
+        if traj.accelerations is not None and not torch.isfinite(accelerations).all():
+            return False
         if time_from_start.numel() == 0:
+            return False
+        if float(time_from_start[0].item()) < 0.0:
             return False
         if not torch.all(time_from_start[1:] > time_from_start[:-1]):
             return False
@@ -768,6 +777,7 @@ class OmniBaseTrajectoryControl:
                 accelerations = accelerations[:, perm]
 
         base_positions = to_torch(base_positions).to(device=gs.device, dtype=TORCH_FLOAT).reshape(3)
+        self._accepted_start_position = base_positions.clone()
         prev = float(base_positions[2].item())
         yaws = positions[:, 2].clone()
         for i in range(yaws.shape[0]):
@@ -793,6 +803,7 @@ class OmniBaseTrajectoryControl:
         self._trajectory_start_time = None
         self._sampled_already = False
         self._point_before = None
+        self._accepted_start_position = None
 
     def update_active_trajectory(self) -> bool:
         return self._trajectory is not None and self._trajectory.positions.numel() > 0
@@ -808,11 +819,37 @@ class OmniBaseTrajectoryControl:
         current_positions: torch.Tensor,
         current_velocities: torch.Tensor,
     ) -> tuple[bool, DesiredState | None, bool, float]:
+        """Sample the desired state at *time* for the accepted trajectory.
+
+        Time boundary contract
+        ----------------------
+        * Before the trajectory's time zero (``t < 0``), the pose captured at
+          acceptance is held with zero feed-forward velocity.
+        * A first waypoint at ``time_from_start[0] == 0`` is reached
+          immediately at ``t == 0``.
+        * At and after the final timestamp the final position is held with
+          **zero** feed-forward velocity (explicit final-velocity is ignored).
+
+        The controller retains an accepted trajectory until ``reset_current_trajectory``
+        or replacement via ``accept_trajectory``; sampling past the horizon does
+        not release it.
+        """
         if self._trajectory is None:
             return False, None, False, 0.0
 
         start_time = self._ensure_start_time(time)
         t = float(time - start_time)
+
+        # Pre-start hold: before time zero, hold the pose captured at
+        # acceptance with zero feed-forward velocity and acceleration.
+        if t < 0.0:
+            hold_pos = self._accepted_start_position
+            desired = DesiredState(
+                positions=hold_pos.clone(),
+                velocities=torch.zeros_like(hold_pos),
+                accelerations=torch.zeros_like(hold_pos),
+            )
+            return True, desired, True, t
 
         cur_pos = to_torch(current_positions).to(device=gs.device, dtype=TORCH_FLOAT).reshape(3)
         cur_vel = to_torch(current_velocities).to(device=gs.device, dtype=TORCH_FLOAT).reshape(3)
@@ -838,6 +875,40 @@ class OmniBaseTrajectoryControl:
             )
             self._sampled_already = True
 
+        # Zero-time first waypoint: reached immediately at t == 0.  For a
+        # single waypoint the desired velocity is zero; for multiple waypoints
+        # use velocities[0] when present, otherwise the finite-difference to
+        # the next waypoint.
+        if float(times[0].item()) == 0.0 and t == 0.0:
+            p1 = positions[0]
+            if positions.shape[0] == 1:
+                vel = torch.zeros_like(p1)
+            elif velocities is not None:
+                vel = velocities[0].clone()
+            else:
+                vel = (positions[1] - positions[0]) / (
+                    float(times[1].item()) - float(times[0].item())
+                )
+            acc = accelerations[0].clone() if accelerations is not None else torch.zeros_like(p1)
+            desired = DesiredState(
+                positions=p1.clone(),
+                velocities=vel,
+                accelerations=acc,
+            )
+            return True, desired, True, 0.0
+
+        if t >= float(times[-1].item()):
+            # Post-horizon hold: final position with zero feed-forward
+            # velocity.  Explicit final-velocity is intentionally ignored;
+            # acceleration retains its existing field behavior.
+            p1 = positions[-1]
+            a1 = accelerations[-1] if accelerations is not None else None
+            desired = DesiredState(
+                positions=p1.clone(),
+                velocities=torch.zeros_like(p1),
+                accelerations=a1.clone() if a1 is not None else torch.zeros_like(p1),
+            )
+            return True, desired, False, t - float(times[-1].item())
         if t <= float(times[0].item()):
             t0 = 0.0
             t1 = float(times[0].item())
@@ -848,16 +919,6 @@ class OmniBaseTrajectoryControl:
             a0 = self._point_before.accelerations
             a1 = accelerations[0] if accelerations is not None else None
             before_last = True
-        elif t >= float(times[-1].item()):
-            p1 = positions[-1]
-            v1 = velocities[-1] if velocities is not None else None
-            a1 = accelerations[-1] if accelerations is not None else None
-            desired = DesiredState(
-                positions=p1.clone(),
-                velocities=v1.clone() if v1 is not None else torch.zeros_like(p1),
-                accelerations=a1.clone() if a1 is not None else torch.zeros_like(p1),
-            )
-            return True, desired, False, t - float(times[-1].item())
         else:
             idx = int(torch.searchsorted(times, torch.tensor(t, device=times.device)).item())
             t0 = float(times[idx - 1].item())
