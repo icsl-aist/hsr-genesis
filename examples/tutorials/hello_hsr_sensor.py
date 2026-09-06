@@ -186,16 +186,17 @@ rng = torch.Generator(device=gs.device)
 
 sensors: dict[str, object] = {}
 if n_envs == 1:
+    _enable_sensors = IS_DEBUG or args.record_video
     sensors = URDFSensorManager(scene=scene, entity=hsr).create_from_urdf(
         URDF_PATH,
         create_lidar=True,
-        create_cameras=IS_DEBUG,
-        create_depth_cameras=IS_DEBUG,
+        create_cameras=_enable_sensors,
+        create_depth_cameras=_enable_sensors,
         create_imu=True,
         create_force_torque=True,
         camera_backend="rasterizer",
         depth_res_override=depth_res_override,
-        draw_debug=IS_DEBUG,
+        draw_debug=_enable_sensors,
     )
 
     for name, sensor in sensors.items():
@@ -375,8 +376,40 @@ while True:
 
     scene.step()
     sim_time[0] += dt
+
     if rec is not None:
-        rec.capture()
+        # Composite robot sensor camera feeds as picture-in-picture overlays
+        # into the main offscreen frame before capturing.
+        import numpy as _np
+
+        frame = rec._camera.render()[0]
+        if hasattr(frame, "cpu"):
+            frame = frame.cpu()
+        frame = _np.asarray(frame, dtype=_np.uint8).copy()  # (H, W, 3)
+        fh, fw = frame.shape[:2]
+        # Small PiP thumbnails in the top-right corner.
+        pip_h = fh // 4
+        pip_w = fw // 4
+        for cam_name in ("hand_camera", "head_center_camera"):
+            cam = sensors.get(cam_name)
+            if cam is None:
+                continue
+            rgb = cam.read().rgb
+            if rgb.ndim == 4:
+                rgb = rgb[0]
+            rgb_np = rgb.detach().cpu().numpy()
+            rgb_np = _np.asarray(rgb_np, dtype=_np.uint8)
+            # Resize to thumbnail.
+            rgb_small = cv2.resize(rgb_np, (pip_w, pip_h), interpolation=cv2.INTER_AREA)
+            # Place in top-right, stacking vertically.
+            y0 = 0 if cam_name == "hand_camera" else pip_h
+            frame[y0:y0 + pip_h, fw - pip_w:fw] = rgb_small
+            # Draw a thin border.
+            frame[y0, fw - pip_w:fw] = 255
+            frame[y0 + pip_h - 1, fw - pip_w:fw] = 255
+            frame[y0:y0 + pip_h, fw - pip_w] = 255
+            frame[y0:y0 + pip_h, fw - 1] = 255
+        rec._frames.append(frame)
 
     if IS_DEBUG:
         for cam_name in ("hand_camera", "head_center_camera"):
