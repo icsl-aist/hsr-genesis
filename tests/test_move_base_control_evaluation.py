@@ -72,21 +72,11 @@ class _VideoRecorder:
         )
         print(f"  Video saved: {self._output_path} ({len(self._frames)} frames)")
 
-        # Animated GIF — even sub-sampling covering the full sequence.
-        max_gif_frames = 1500
-        target_gif_fps = 30
-        stride = max(1, -(-len(self._frames) // max_gif_frames))  # ceil
-        stride = max(stride, self._fps // target_gif_fps)
-        gif_frames = self._frames[::stride]
-        actual_gif_fps = self._fps / stride
+        # Animated GIF — palette-quantized via ffmpeg for small file size.
+        from hsr_genesis.tutorial_utils import _save_gif_optimized
+
         gif_path = self._output_path.with_suffix(".gif")
-        imageio.mimsave(
-            str(gif_path),
-            gif_frames,
-            duration=1000 / actual_gif_fps,
-            loop=0,
-        )
-        print(f"  GIF saved: {gif_path} ({len(gif_frames)} frames)")
+        _save_gif_optimized(str(gif_path), self._frames, fps=self._fps)
 
 
 def _capture_frame() -> None:

@@ -426,28 +426,100 @@ def save_video(path: str, fps: int | None = None) -> None:
 
     print(f"Saved video to {path} ({len(frames_np)} frames)")
 
+def _save_gif_optimized(
+    path: str,
+    frames: list[np.ndarray],
+    *,
+    fps: float,
+    max_frames: int = 500,
+    max_width: int = 480,
+    max_colors: int = 128,
+) -> None:
+    """Write an animated GIF with palette quantization for small file size.
+
+    Frames are sub-sampled to at most *max_frames*, downscaled to *max_width*
+    pixels wide, and quantized to a shared *max_colors*-entry palette.  Uses
+    ffmpeg for palette-based encoding when available (5-10× smaller than
+    ``imageio.mimsave``); falls back to Pillow otherwise.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    # Sub-sample to max_frames with even stride (covers full sequence).
+    stride = max(1, -(-len(frames) // max_frames))
+    # Also cap at ~15 fps to reduce frame count for large captures.
+    target_fps = 15
+    stride = max(stride, max(1, int(round(fps / target_fps))))
+    sub = frames[::stride]
+    actual_fps = fps / stride
+
+    # Downscale if wider than max_width.
+    h, w = sub[0].shape[:2]
+    if w > max_width:
+        new_w = max_width
+        new_h = max(new_w * h // w, 1)
+    else:
+        new_w, new_h = w, h
+
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is not None:
+        # Write sub-sampled frames to a temp lossless mp4, then use ffmpeg's
+        # palettegen/paletteuse filters for optimal GIF encoding.
+        import imageio.v2 as imageio
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_mp4 = str(Path(tmp) / "src.mp4")
+            imageio.mimsave(tmp_mp4, sub, fps=actual_fps, codec="libx264")
+            vf = (
+                f"scale={new_w}:{new_h}:flags=lanczos,"
+                f"split[s0][s1];[s0]palettegen=max_colors={max_colors}[p];"
+                f"[s1][p]paletteuse=dither=bayer:bayer_scale=5"
+            )
+            subprocess.run(
+                [ffmpeg, "-y", "-i", tmp_mp4, "-vf", vf, "-r",
+                 str(int(round(actual_fps))), path],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        print(f"Saved GIF to {path} ({len(sub)} frames, {new_w}x{new_h})")
+        return
+
+    # Fallback: Pillow palette quantization (no ffmpeg).
+    from PIL import Image
+
+    mid = sub[len(sub) // 2]
+    mid_img = Image.fromarray(mid).resize((new_w, new_h), Image.LANCZOS)
+    palette_img = mid_img.quantize(colors=max_colors, method=Image.MEDIANCUT)
+
+    pil_frames: list[Image.Image] = []
+    for f in sub:
+        img = Image.fromarray(f).resize((new_w, new_h), Image.LANCZOS)
+        pil_frames.append(img.quantize(palette=palette_img))
+
+    pil_frames[0].save(
+        path,
+        save_all=True,
+        append_images=pil_frames[1:],
+        duration=int(round(1000 / actual_fps)),
+        loop=0,
+        optimize=False,
+    )
+    print(f"Saved GIF to {path} ({len(pil_frames)} frames, {new_w}x{new_h})")
+
 
 def save_gif(path: str, fps: int = 30, max_frames: int = 1500) -> None:
     """Save captured frames as an animated GIF.
 
     The GIF covers the **entire** captured sequence: frames are evenly
     sub-sampled so that at most *max_frames* are kept, without truncating
-    the tail.
+    the tail.  Palette quantization keeps the file size small.
     """
     if not _state.frames:
         print("No frames captured.")
         return
     capture_fps = int(round(1.0 / _state.dt))
-    # Even stride: covers full sequence, stays near *fps*, caps at max_frames.
-    stride = max(1, -(-len(_state.frames) // max_frames))  # ceil
-    stride = max(stride, capture_fps // fps)
-    gif_frames = [np.asarray(f) for f in _state.frames[::stride]]
-    actual_fps = capture_fps / stride
-
-    import imageio.v2 as imageio
-
-    imageio.mimsave(path, gif_frames, duration=1000 / actual_fps, loop=0)
-    print(f"Saved GIF to {path} ({len(gif_frames)} frames)")
+    all_frames = [np.asarray(f) for f in _state.frames]
+    _save_gif_optimized(path, all_frames, fps=capture_fps, max_frames=max_frames)
 
 
 class VideoRecorder:
@@ -512,20 +584,10 @@ class VideoRecorder:
         print(f"Video saved: {out} ({len(self._frames)} frames)")
 
         if gif:
-            max_gif_frames = 1500  # ~50 s at 30 fps; keeps gif < ~15 MB
-            target_gif_fps = 30
-            # Pick the stride so we never exceed max_gif_frames, while
-            # staying as close to target_gif_fps as possible.
-            stride = max(1, -(-len(self._frames) // max_gif_frames))  # ceil
-            stride = max(stride, self._fps // target_gif_fps)
-            gif_frames = self._frames[::stride]
-            actual_gif_fps = self._fps / stride
             gif_path = out.with_suffix(".gif")
-            imageio.mimsave(
-                str(gif_path), gif_frames,
-                duration=1000 / actual_gif_fps, loop=0,
+            _save_gif_optimized(
+                str(gif_path), self._frames, fps=self._fps,
             )
-            print(f"GIF saved: {gif_path} ({len(gif_frames)} frames)")
 
 
 # ---------------------------------------------------------------------------
