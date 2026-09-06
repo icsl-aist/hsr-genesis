@@ -103,9 +103,9 @@ If you see a viewer window, the example is running correctly.
 
 ## Demos
 
-### Parallel simulation (16 envs)
+### GPU parallel simulation (1024 envs)
 
-![hello_hsr_parallel](https://github.com/icsl-aist/hsr-genesis/releases/download/gif-assets/hello_hsr_parallel.gif)
+![promo_video](https://github.com/icsl-aist/hsr-genesis/releases/download/gif-assets/promo_video.gif)
 
 ### Sensor demo (debug visualization)
 
