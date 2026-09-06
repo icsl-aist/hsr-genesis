@@ -204,25 +204,35 @@ simultaneously on the same GPU. Increasing the number of parallel environments
 scene.build(n_envs=1024)   # tune to your GPU VRAM
 ```
 
-#### Measured throughput (NVIDIA A100-80GB)
+#### Measured throughput
 
 Benchmarked on the YCB grasp pipeline (approach → descend → grasp → lift)
-with `dt=0.02` s, 4 substeps, `show_viewer=False`:
+with `dt=0.02` s, 4 substeps, `show_viewer=False`. Realtime factor is
+steps/s relative to wall-clock (1.0× = realtime):
 
-| N envs | steps/s | envs·steps/s | grasp success |
-|--------|---------|--------------|---------------|
-| 1      | 29.8    | 30           | 100 %         |
-| 8      | 27.2    | 217          | 93.8 %        |
-| 32     | 25.1    | 802          | 93.8 %        |
-| 128    | 23.5    | 3,004        | 94.9 %        |
-| 256    | 21.9    | 5,616        | 95.1 %        |
-| 512    | 20.6    | 10,527       | 95.8 %        |
-| 1024   | 19.0    | 19,491       | 96.1 %        |
+| N envs | RTX 5060 Ti (16 GB) | | | A100-SXM4 (80 GB) | | |
+|--------|---------------------|------|------|--------------------|------|------|
+|        | steps/s | RT factor | envs·steps/s | steps/s | RT factor | envs·steps/s |
+| 1      | 32.4    | 0.65×     | 32           | 24.6    | 0.49×     | 25            |
+| 8      | 28.8    | 0.58×     | 230          | 21.0    | 0.42×     | 168           |
+| 32     | 27.4    | 0.55×     | 878          | 19.9    | 0.40×     | 636           |
+| 128    | 25.8    | 0.52×     | 3,308        | 18.9    | 0.38×     | 2,416         |
+| 256    | 24.8    | 0.50×     | 6,338        | 17.8    | 0.36×     | 4,546         |
+| 512    | 22.9    | 0.46×     | 11,702       | 16.7    | 0.33×     | 8,555         |
+| 1024   | 19.8    | 0.40×     | 20,224       | 15.6    | 0.31×     | 15,972        |
+| 4096   | 12.1    | 0.24×     | 49,605       | 10.3    | 0.21×     | 42,161        |
 
-At 1024 envs the simulator delivers **~19,500 envs·steps/s** — a **653×**
-throughput improvement over a single environment. Wall-clock time increases
-only 1.6× (31.9 s → 49.9 s) despite running 1024× more environments, because
-batched IK solves all environments in a single GPU kernel call.
+The 5060 Ti is competitive with the A100 at low-to-mid N (higher clock
+speeds win when the GPU is underutilized), reaching **20,224 envs·steps/s**
+at 1024 envs — a **632×** throughput improvement over a single environment.
+At 4096 envs it peaks at **49,605 envs·steps/s** (1,550× over N=1) before
+hitting the 16 GB VRAM ceiling. The A100 scales further (max N=16,384,
+90,050 envs·steps/s) but is engine-limited, not VRAM-limited.
+
+Even at N=1 the 5060 Ti runs at **0.65× realtime** — fast enough for
+interactive development. At 1024 envs it still maintains 0.40× realtime
+per environment, meaning 1024 independent simulations complete in the
+time 410 sequential ones would.
 
 #### IK performance
 
