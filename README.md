@@ -201,8 +201,39 @@ simultaneously on the same GPU. Increasing the number of parallel environments
 (`n_envs`) amortizes kernel-launch overhead and keeps the GPU fully utilized.
 
 ```python
-scene.build(n_envs=512)   # tune to your GPU VRAM
+scene.build(n_envs=1024)   # tune to your GPU VRAM
 ```
+
+#### Measured throughput (NVIDIA A100-80GB)
+
+Benchmarked on the YCB grasp pipeline (approach → descend → grasp → lift)
+with `dt=0.02` s, 4 substeps, `show_viewer=False`:
+
+| N envs | steps/s | envs·steps/s | grasp success |
+|--------|---------|--------------|---------------|
+| 1      | 29.8    | 30           | 100 %         |
+| 8      | 27.2    | 217          | 93.8 %        |
+| 32     | 25.1    | 802          | 93.8 %        |
+| 128    | 23.5    | 3,004        | 94.9 %        |
+| 256    | 21.9    | 5,616        | 95.1 %        |
+| 512    | 20.6    | 10,527       | 95.8 %        |
+| 1024   | 19.0    | 19,491       | 96.1 %        |
+
+At 1024 envs the simulator delivers **~19,500 envs·steps/s** — a **653×**
+throughput improvement over a single environment. Wall-clock time increases
+only 1.6× (31.9 s → 49.9 s) despite running 1024× more environments, because
+batched IK solves all environments in a single GPU kernel call.
+
+#### IK performance
+
+| Configuration | Time per call | Per-env |
+|---------------|---------------|---------|
+| Single env    | 5.78 ms       | 5.78 ms |
+| 256-env batch | 7.71 ms       | 0.030 ms |
+
+The 256-env batch achieves **0.030 ms/env** — a **192×** reduction in
+per-environment IK latency, enabling the IK planner to pre-compute
+approach/descend/lift trajectories for all environments at episode reset.
 
 Practical guidance:
 
