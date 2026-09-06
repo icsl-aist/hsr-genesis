@@ -254,3 +254,16 @@ Practical guidance:
   compute; profile with `nvitop` or `nsys` to find the sweet spot.
 - Combining `show_viewer=False` with a high `n_envs` is the recommended setup
   for RL training and large-scale data collection.
+
+## Citation
+
+If you use this work in your research, please cite the following paper:
+
+```bibtex
+@inproceedings{matsusaka2026hsr_genesis,
+  author    = {Yosuke Matsusaka and Keisuke Takeshita and Ryuichi Sakakibara and Takashi Yamamoto},
+  title     = {Development and Evaluation of a Massively Parallel Physics Simulator with GPU-Accelerated Inverse Kinematics for Mobile Manipulators},
+  booktitle = {Proceedings of the Robotics Society of Japan Annual Conference (RSJ)},
+  year      = {2026},
+}
+```
