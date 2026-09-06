@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from pathlib import Path
 
@@ -74,7 +75,7 @@ def main() -> None:
             max_FPS=60,
         ),
         sim_options=gs.options.SimOptions(dt=0.02),
-        show_viewer=True,
+        show_viewer=not args.record_video,
     )
 
     scene.add_entity(gs.morphs.Plane(), visualize_contact=True)

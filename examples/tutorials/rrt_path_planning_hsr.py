@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import sys
 from pathlib import Path
@@ -265,7 +266,7 @@ def main() -> None:
         rigid_options=gs.options.RigidOptions(
             use_gjk_collision=True,
         ),
-        show_viewer=True,
+        show_viewer=not args.record_video,
     )
 
     scene.add_entity(gs.morphs.Plane(), visualize_contact=True)

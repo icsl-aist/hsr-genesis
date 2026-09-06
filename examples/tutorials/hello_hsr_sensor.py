@@ -25,7 +25,7 @@ parser.add_argument(
 )
 args = parser.parse_args()
 
-IS_DEBUG = True
+IS_DEBUG = True and not args.record_video
 n_envs = 1
 
 
@@ -123,7 +123,7 @@ scene = gs.Scene(
     rigid_options=gs.options.RigidOptions(
         use_gjk_collision=True,
     ),
-    show_viewer=IS_DEBUG,
+    show_viewer=IS_DEBUG and not args.record_video,
 )
 
 scene.add_entity(
