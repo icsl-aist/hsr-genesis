@@ -480,7 +480,7 @@ class VideoRecorder:
         fps: int | None = None,
     ) -> None:
         self._camera = scene.add_camera(
-            res=res, pos=pos, lookat=lookat, fov=fov, GUI=False,
+            res=res, pos=pos, lookat=lookat, fov=fov, GUI=False, debug=True,
         )
         self._fps = fps or 30
         self._frames: list[np.ndarray] = []

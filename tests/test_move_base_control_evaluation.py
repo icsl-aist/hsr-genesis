@@ -203,6 +203,7 @@ def _create_scene(
             lookat=(0.0, 0.0, 0.5),
             fov=45,
             GUI=False,
+            debug=True,
         )
 
     scene.build()
