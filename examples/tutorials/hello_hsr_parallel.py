@@ -55,9 +55,9 @@ URDF_PATH = Path(__file__).resolve().parents[2] / "data" / "urdf" / "hsrb4s.urdf
 
 scene = gs.Scene(
     viewer_options=gs.options.ViewerOptions(
-        camera_pos=(3, -1, 1.5),
-        camera_lookat=(0.0, 0.0, 0.5),
-        camera_fov=30,
+        camera_pos=(7, -7, 16),
+        camera_lookat=(0.0, 0.0, 0.0),
+        camera_fov=65,
         max_FPS=60,
     ),
     vis_options=gs.options.VisOptions(
@@ -112,8 +112,8 @@ if args.record_video:
     from hsr_genesis.tutorial_utils import VideoRecorder
 
     rec = VideoRecorder(
-        scene, res=(320, 240), pos=(3, -1, 1.5),
-        lookat=(0.0, 0.0, 0.5), fov=30, fps=50,
+        scene, res=(640, 480), pos=(7, -7, 16),
+        lookat=(0.0, 0.0, 0.0), fov=65, fps=50,
     )
 scene.build(n_envs=n_envs, env_spacing=(3.0, 3.0))
 
