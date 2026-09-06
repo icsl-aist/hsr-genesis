@@ -409,6 +409,20 @@ while True:
             frame[y0 + pip_h - 1, fw - pip_w:fw] = 255
             frame[y0:y0 + pip_h, fw - pip_w] = 255
             frame[y0:y0 + pip_h, fw - 1] = 255
+        # PiP camera reads use a standalone rasterizer context (created when
+        # show_viewer=False) whose update_sensors() redraws debug objects into
+        # that standalone context, leaving the main visualizer context's debug
+        # nodes orphaned.  Reset the main context's debug objects and the
+        # sensors' references so the next frame recreates them cleanly.
+        _ctx = scene.visualizer.context
+        _ctx.clear_debug_objects()
+        _sm = scene.sim._sensor_manager
+        for _s in _sm.sensors:
+            if hasattr(_s, "_debug_force_object"):
+                _s._debug_force_object = None
+                _s._debug_torque_object = None
+            if hasattr(_s, "debug_objects"):
+                _s.debug_objects.clear()
         rec._frames.append(frame)
 
     if IS_DEBUG:
