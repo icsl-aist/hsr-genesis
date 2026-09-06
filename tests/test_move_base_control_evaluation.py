@@ -53,9 +53,9 @@ class _VideoRecorder:
     def save(self) -> None:
         """Write buffered frames to mp4 and animated GIF.
 
-        The mp4 preserves every captured frame at full fps.  The GIF is
-        sub-sampled to ~30 fps and capped at 600 frames (20 s) so the file
-        stays reasonably sized for quick preview.
+        The mp4 preserves every captured frame at full fps.  The GIF covers
+        the **entire** sequence: frames are evenly sub-sampled so that at
+        most 1500 are kept, without truncating the tail.
         """
         if not self._frames:
             return
@@ -72,11 +72,13 @@ class _VideoRecorder:
         )
         print(f"  Video saved: {self._output_path} ({len(self._frames)} frames)")
 
-        # Animated GIF — sub-sample to ~30 fps, cap at 600 frames.
-        gif_fps = 30
-        stride = max(1, self._fps // gif_fps)
-        gif_frames = self._frames[::stride][:600]
-        actual_gif_fps = min(gif_fps, self._fps // stride)
+        # Animated GIF — even sub-sampling covering the full sequence.
+        max_gif_frames = 1500
+        target_gif_fps = 30
+        stride = max(1, -(-len(self._frames) // max_gif_frames))  # ceil
+        stride = max(stride, self._fps // target_gif_fps)
+        gif_frames = self._frames[::stride]
+        actual_gif_fps = self._fps / stride
         gif_path = self._output_path.with_suffix(".gif")
         imageio.mimsave(
             str(gif_path),

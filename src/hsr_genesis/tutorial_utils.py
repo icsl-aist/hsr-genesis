@@ -427,19 +427,22 @@ def save_video(path: str, fps: int | None = None) -> None:
     print(f"Saved video to {path} ({len(frames_np)} frames)")
 
 
-def save_gif(path: str, fps: int = 30, max_frames: int = 600) -> None:
+def save_gif(path: str, fps: int = 30, max_frames: int = 1500) -> None:
     """Save captured frames as an animated GIF.
 
-    Frames are sub-sampled to *fps* and capped at *max_frames* to keep the
-    file size reasonable for quick preview.
+    The GIF covers the **entire** captured sequence: frames are evenly
+    sub-sampled so that at most *max_frames* are kept, without truncating
+    the tail.
     """
     if not _state.frames:
         print("No frames captured.")
         return
     capture_fps = int(round(1.0 / _state.dt))
-    stride = max(1, capture_fps // fps)
-    gif_frames = [np.asarray(f) for f in _state.frames[::stride][:max_frames]]
-    actual_fps = min(fps, capture_fps // stride)
+    # Even stride: covers full sequence, stays near *fps*, caps at max_frames.
+    stride = max(1, -(-len(_state.frames) // max_frames))  # ceil
+    stride = max(stride, capture_fps // fps)
+    gif_frames = [np.asarray(f) for f in _state.frames[::stride]]
+    actual_fps = capture_fps / stride
 
     import imageio.v2 as imageio
 
@@ -492,7 +495,10 @@ class VideoRecorder:
     def save(self, path: str, *, gif: bool = True) -> None:
         """Write buffered frames to *path* (mp4) and optionally a GIF.
 
-        The GIF is sub-sampled to ~30 fps and capped at 600 frames.
+        The GIF covers the **entire** sequence: the stride is computed so
+        that at most *max_gif_frames* frames are kept, sub-sampling evenly
+        across the full duration.  This ensures no part of the animation is
+        truncated.
         """
         if not self._frames:
             return
@@ -506,10 +512,14 @@ class VideoRecorder:
         print(f"Video saved: {out} ({len(self._frames)} frames)")
 
         if gif:
-            gif_fps = 30
-            stride = max(1, self._fps // gif_fps)
-            gif_frames = self._frames[::stride][:600]
-            actual_gif_fps = min(gif_fps, self._fps // stride)
+            max_gif_frames = 1500  # ~50 s at 30 fps; keeps gif < ~15 MB
+            target_gif_fps = 30
+            # Pick the stride so we never exceed max_gif_frames, while
+            # staying as close to target_gif_fps as possible.
+            stride = max(1, -(-len(self._frames) // max_gif_frames))  # ceil
+            stride = max(stride, self._fps // target_gif_fps)
+            gif_frames = self._frames[::stride]
+            actual_gif_fps = self._fps / stride
             gif_path = out.with_suffix(".gif")
             imageio.mimsave(
                 str(gif_path), gif_frames,
