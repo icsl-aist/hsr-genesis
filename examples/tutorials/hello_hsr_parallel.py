@@ -74,7 +74,7 @@ scene = gs.Scene(
     rigid_options=gs.options.RigidOptions(
         use_gjk_collision=True,
     ),
-    show_viewer=True,
+    show_viewer=not args.record_video,
 )
 
 scene.add_entity(
