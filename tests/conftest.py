@@ -74,3 +74,15 @@ def pytest_addoption(parser):
         default=False,
         help="Enable visualization for tests",
     )
+    parser.addoption(
+        "--record-video",
+        action="store_true",
+        default=False,
+        help="Record offscreen camera video for each movement test (saves to tests/videos/)",
+    )
+    parser.addoption(
+        "--video-dir",
+        action="store",
+        default="tests/videos",
+        help="Directory for recorded test videos (default: tests/videos)",
+    )

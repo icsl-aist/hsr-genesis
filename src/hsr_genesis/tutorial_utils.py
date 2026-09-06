@@ -170,7 +170,10 @@ def _arm_traj_names() -> list[str]:
 
 def _step_once(render: bool = True) -> None:
     """Advance the simulation by one dt, handling velocity / gripper / housekeeping."""
-    # Re-apply base velocity command so it doesn't timeout.
+    # Raw velocity is already a robot-body command: +X forward, +Y left,
+    # +yaw counter-clockwise.  Do not rotate it by the world pose; only the
+    # trajectory follower performs a world-to-body conversion.  Refreshing the
+    # stored command here also keeps it inside the controller's 0.5 s timeout.
     if _state.base_vel_cmd is not None:
         from hsr_genesis.base_controller import CartSpace
 
@@ -400,16 +403,191 @@ def clear_frames() -> None:
 
 
 def save_video(path: str, fps: int | None = None) -> None:
-    """Save captured frames to an mp4 file."""
+    """Save captured frames to a video file (mp4 or gif).
+
+    Uses *mediapy* when available (Colab), otherwise falls back to *imageio*.
+    """
     if not _state.frames:
         print("No frames captured.")
         return
-    import mediapy as media
-
     if fps is None:
         fps = int(round(1.0 / _state.dt))
-    media.write_video(path, _state.frames, fps=fps)
-    print(f"Saved video to {path}")
+
+    frames_np = [np.asarray(f) for f in _state.frames]
+
+    try:
+        import mediapy as media
+
+        media.write_video(path, frames_np, fps=fps)
+    except ImportError:
+        import imageio.v2 as imageio
+
+        imageio.mimsave(path, frames_np, fps=fps, codec="libx264")
+
+    print(f"Saved video to {path} ({len(frames_np)} frames)")
+
+def _save_gif_optimized(
+    path: str,
+    frames: list[np.ndarray],
+    *,
+    fps: float,
+    max_frames: int = 500,
+    max_width: int = 480,
+    max_colors: int = 128,
+) -> None:
+    """Write an animated GIF with palette quantization for small file size.
+
+    Frames are sub-sampled to at most *max_frames*, downscaled to *max_width*
+    pixels wide, and quantized to a shared *max_colors*-entry palette.  Uses
+    ffmpeg for palette-based encoding when available (5-10× smaller than
+    ``imageio.mimsave``); falls back to Pillow otherwise.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    # Sub-sample to max_frames with even stride (covers full sequence).
+    stride = max(1, -(-len(frames) // max_frames))
+    # Also cap at ~15 fps to reduce frame count for large captures.
+    target_fps = 15
+    stride = max(stride, max(1, int(round(fps / target_fps))))
+    sub = frames[::stride]
+    actual_fps = fps / stride
+
+    # Downscale if wider than max_width.
+    h, w = sub[0].shape[:2]
+    if w > max_width:
+        new_w = max_width
+        new_h = max(new_w * h // w, 1)
+    else:
+        new_w, new_h = w, h
+
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is not None:
+        # Write sub-sampled frames to a temp lossless mp4, then use ffmpeg's
+        # palettegen/paletteuse filters for optimal GIF encoding.
+        import imageio.v2 as imageio
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_mp4 = str(Path(tmp) / "src.mp4")
+            imageio.mimsave(tmp_mp4, sub, fps=actual_fps, codec="libx264")
+            vf = (
+                f"scale={new_w}:{new_h}:flags=lanczos,"
+                f"split[s0][s1];[s0]palettegen=max_colors={max_colors}[p];"
+                f"[s1][p]paletteuse=dither=bayer:bayer_scale=5"
+            )
+            subprocess.run(
+                [ffmpeg, "-y", "-i", tmp_mp4, "-vf", vf, "-r",
+                 str(int(round(actual_fps))), path],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        print(f"Saved GIF to {path} ({len(sub)} frames, {new_w}x{new_h})")
+        return
+
+    # Fallback: Pillow palette quantization (no ffmpeg).
+    from PIL import Image
+
+    mid = sub[len(sub) // 2]
+    mid_img = Image.fromarray(mid).resize((new_w, new_h), Image.LANCZOS)
+    palette_img = mid_img.quantize(colors=max_colors, method=Image.MEDIANCUT)
+
+    pil_frames: list[Image.Image] = []
+    for f in sub:
+        img = Image.fromarray(f).resize((new_w, new_h), Image.LANCZOS)
+        pil_frames.append(img.quantize(palette=palette_img))
+
+    pil_frames[0].save(
+        path,
+        save_all=True,
+        append_images=pil_frames[1:],
+        duration=int(round(1000 / actual_fps)),
+        loop=0,
+        optimize=False,
+    )
+    print(f"Saved GIF to {path} ({len(pil_frames)} frames, {new_w}x{new_h})")
+
+
+def save_gif(path: str, fps: int = 30, max_frames: int = 1500) -> None:
+    """Save captured frames as an animated GIF.
+
+    The GIF covers the **entire** captured sequence: frames are evenly
+    sub-sampled so that at most *max_frames* are kept, without truncating
+    the tail.  Palette quantization keeps the file size small.
+    """
+    if not _state.frames:
+        print("No frames captured.")
+        return
+    capture_fps = int(round(1.0 / _state.dt))
+    all_frames = [np.asarray(f) for f in _state.frames]
+    _save_gif_optimized(path, all_frames, fps=capture_fps, max_frames=max_frames)
+
+
+class VideoRecorder:
+    """Offscreen camera frame collector for standalone scripts.
+
+    Unlike the notebook-oriented ``save_video``/``save_gif`` functions that
+    operate on ``_state.frames``, this class wraps its own camera and frame
+    list so it can be used alongside a viewer-based scene.
+
+    Usage::
+
+        rec = VideoRecorder(scene, res=(320, 240), pos=(2, 0, 1.5),
+                            lookat=(0, 0, 0.5), fps=50)
+        scene.build()
+        for _ in range(steps):
+            ...
+            scene.step()
+            rec.capture()
+        rec.save("output.mp4")   # also writes output.gif
+    """
+
+    def __init__(
+        self,
+        scene,
+        *,
+        res: tuple[int, int] = (320, 240),
+        pos: tuple[float, float, float] = (2.0, 0.0, 1.5),
+        lookat: tuple[float, float, float] = (0.0, 0.0, 0.5),
+        fov: float = 45,
+        fps: int | None = None,
+    ) -> None:
+        self._camera = scene.add_camera(
+            res=res, pos=pos, lookat=lookat, fov=fov, GUI=False, debug=True,
+        )
+        self._fps = fps or 30
+        self._frames: list[np.ndarray] = []
+
+    def capture(self) -> None:
+        """Render one frame and append it to the buffer."""
+        rgb = self._camera.render()[0]
+        if hasattr(rgb, "cpu"):
+            rgb = rgb.cpu()
+        self._frames.append(np.asarray(rgb, dtype=np.uint8))
+
+    def save(self, path: str, *, gif: bool = True) -> None:
+        """Write buffered frames to *path* (mp4) and optionally a GIF.
+
+        The GIF covers the **entire** sequence: the stride is computed so
+        that at most *max_gif_frames* frames are kept, sub-sampling evenly
+        across the full duration.  This ensures no part of the animation is
+        truncated.
+        """
+        if not self._frames:
+            return
+        import imageio.v2 as imageio
+
+        out = Path(path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+
+        # mp4 — every frame at full capture fps.
+        imageio.mimsave(str(out), self._frames, fps=self._fps, codec="libx264")
+        print(f"Video saved: {out} ({len(self._frames)} frames)")
+
+        if gif:
+            gif_path = out.with_suffix(".gif")
+            _save_gif_optimized(
+                str(gif_path), self._frames, fps=self._fps,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -452,7 +630,10 @@ def move_base_goal(x: float, y: float, theta: float, duration: float = 3.0) -> f
     from hsr_genesis.base_controller import Trajectory
 
     _maybe_build()
-    # Cancel any velocity command.
+    # Goal poses are world/odom-frame, unlike move_base_vel's body-frame twist.
+    # OmniBaseTrajectoryControl owns the world-to-body conversion.
+    # Cancel any raw velocity command so both producers cannot race to update
+    # the same inner HSRBBaseController command buffer.
     _state.base_vel_cmd = None
 
     yaw_rad = math.radians(theta)

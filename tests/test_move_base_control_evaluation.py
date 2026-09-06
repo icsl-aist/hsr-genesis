@@ -26,6 +26,72 @@ from hsr_genesis.hsr_rigid_entity import HSRBURDF  # noqa: E402
 
 URDF_PATH = Path(__file__).resolve().parents[1] / "data" / "urdf" / "hsrb4s.urdf"
 
+# ---------------------------------------------------------------------------
+# Video recording (--record-video)
+# ---------------------------------------------------------------------------
+
+_VIDEO_DIR: Path = Path(__file__).resolve().parent / "videos"
+_active_recorder: _VideoRecorder | None = None
+
+
+class _VideoRecorder:
+    """Collects offscreen camera frames and writes mp4 + animated GIF."""
+
+    def __init__(self, camera, output_path: Path, fps: int) -> None:
+        self._camera = camera
+        self._output_path = output_path
+        self._fps = fps
+        self._frames: list[np.ndarray] = []
+
+    def capture(self) -> None:
+        """Render one frame and append it to the buffer."""
+        rgb = self._camera.render()[0]
+        if hasattr(rgb, "cpu"):
+            rgb = rgb.cpu()
+        self._frames.append(np.asarray(rgb, dtype=np.uint8))
+
+    def save(self) -> None:
+        """Write buffered frames to mp4 and animated GIF.
+
+        The mp4 preserves every captured frame at full fps.  The GIF covers
+        the **entire** sequence: frames are evenly sub-sampled so that at
+        most 1500 are kept, without truncating the tail.
+        """
+        if not self._frames:
+            return
+        import imageio.v2 as imageio
+
+        self._output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # mp4 — every frame at full capture fps.
+        imageio.mimsave(
+            str(self._output_path),
+            self._frames,
+            fps=self._fps,
+            codec="libx264",
+        )
+        print(f"  Video saved: {self._output_path} ({len(self._frames)} frames)")
+
+        # Animated GIF — palette-quantized via ffmpeg for small file size.
+        from hsr_genesis.tutorial_utils import _save_gif_optimized
+
+        gif_path = self._output_path.with_suffix(".gif")
+        _save_gif_optimized(str(gif_path), self._frames, fps=self._fps)
+
+
+def _capture_frame() -> None:
+    """Capture a frame if a recorder is active, otherwise no-op."""
+    if _active_recorder is not None:
+        _active_recorder.capture()
+
+
+def _save_active_video() -> None:
+    """Save and clear the active recorder, if any."""
+    global _active_recorder
+    if _active_recorder is not None:
+        _active_recorder.save()
+        _active_recorder = None
+
 
 @dataclass
 class MovementResult:
@@ -43,11 +109,12 @@ class MovementResult:
 
 @dataclass
 class WheelSyncData:
-    """Data structure for wheel synchronization analysis."""
+    """Data structure for caster-aware wheel and chassis yaw analysis."""
 
     time: list[float]
     left_wheel_velocity: list[float]
     right_wheel_velocity: list[float]
+    steer_velocity: list[float]
     velocity_difference: list[float]
     yaw_rate: list[float]
     expected_yaw_rate: list[float]
@@ -72,8 +139,19 @@ class TestScenario:
 def _create_scene(
     dt: float = 0.01,
     show_viewer: bool = False,
+    record_video: bool = False,
+    video_name: str | None = None,
 ) -> tuple[gs.Scene, HSRBURDF]:
-    """Create a Genesis scene with HSR robot in controller mode."""
+    """Create a Genesis scene with HSR robot in controller mode.
+
+    When *record_video* is True an offscreen camera is added to the scene and
+    a :class:`_VideoRecorder` is activated so that every ``scene.step()`` in
+    the execution helpers captures a frame.  Call :func:`_save_active_video`
+    after the test to write the mp4.
+    """
+    global _active_recorder
+    _active_recorder = None  # clear any previous recorder
+
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=dt,
@@ -107,7 +185,24 @@ def _create_scene(
         ),
     )
 
+    camera = None
+    if record_video:
+        camera = scene.add_camera(
+            res=(320, 240),
+            pos=(2.0, 0.0, 1.5),
+            lookat=(0.0, 0.0, 0.5),
+            fov=45,
+            GUI=False,
+            debug=True,
+        )
+
     scene.build()
+
+    if record_video and camera is not None and video_name:
+        fps = max(1, int(round(1.0 / dt)))
+        output_path = _VIDEO_DIR / f"{video_name}.mp4"
+        _active_recorder = _VideoRecorder(camera, output_path, fps)
+
     return scene, robot
 
 
@@ -230,6 +325,7 @@ def _execute_base_movement_with_vibration_monitoring(
         # Hold arm joints in initial position to prevent arm from falling
         robot.control_dofs_position(arm_pos, dofs_idx_local=robot._hsr_arm_dofs_idx_local, envs_idx=[0])
         scene.step()
+        _capture_frame()
 
         # Monitor roll/pitch
         quat = robot.get_quat()
@@ -368,6 +464,7 @@ def _execute_base_movement(
         # Hold arm joints in initial position to prevent arm from falling
         robot.control_dofs_position(arm_pos, dofs_idx_local=robot._hsr_arm_dofs_idx_local, envs_idx=[0])
         scene.step()
+        _capture_frame()
 
     # Get final state
     final_pos = robot.get_pos()
@@ -411,10 +508,10 @@ def _execute_base_movement_with_wheel_monitoring(
     duration: float,
     dt: float = 0.01,
 ) -> tuple[MovementResult, WheelSyncData]:
-    """Execute movement while monitoring wheel synchronization.
+    """Execute movement while monitoring the caster and drive wheels.
 
-    This function tracks wheel velocities and yaw changes to detect
-    synchronization issues between wheel drive and yaw control.
+    The wheel-speed difference describes the caster module's absolute yaw rate.
+    Subtracting the steering-joint rate yields the chassis yaw rate.
 
     Args:
         scene: The Genesis scene
@@ -432,15 +529,19 @@ def _execute_base_movement_with_wheel_monitoring(
 
     # Get wheel joint DOF indices
     wheel_separation = 0.266  # meters
+    wheel_radius = 0.04  # meters
     left_wheel_joint = robot.get_joint("base_l_drive_wheel_joint")
     right_wheel_joint = robot.get_joint("base_r_drive_wheel_joint")
     left_dof_idx = left_wheel_joint.dofs_idx_local
     right_dof_idx = right_wheel_joint.dofs_idx_local
+    steer_joint = robot.get_joint("base_roll_joint")
+    steer_dof_idx = steer_joint.dofs_idx_local
 
     # Initialize tracking data
     time_data = []
     left_vel_data = []
     right_vel_data = []
+    steer_vel_data = []
     velocity_diff_data = []
     yaw_rate_data = []
     expected_yaw_rate_data = []
@@ -478,12 +579,23 @@ def _execute_base_movement_with_wheel_monitoring(
     current_time = 0.0
 
     for step in range(steps):
-        # Get wheel velocities before stepping
-        left_vel = robot.get_dofs_velocity(dofs_idx_local=left_dof_idx, envs_idx=torch.tensor([0], device=gs.device))
-        right_vel = robot.get_dofs_velocity(dofs_idx_local=right_dof_idx, envs_idx=torch.tensor([0], device=gs.device))
+        # Sample the steering and drive velocities at the same simulation state.
+        left_vel = robot.get_dofs_velocity(
+            dofs_idx_local=left_dof_idx,
+            envs_idx=torch.tensor([0], device=gs.device),
+        )
+        right_vel = robot.get_dofs_velocity(
+            dofs_idx_local=right_dof_idx,
+            envs_idx=torch.tensor([0], device=gs.device),
+        )
+        steer_vel = robot.get_dofs_velocity(
+            dofs_idx_local=steer_dof_idx,
+            envs_idx=torch.tensor([0], device=gs.device),
+        )
 
         left_v = left_vel[0].item() if left_vel.numel() > 0 else 0.0
         right_v = right_vel[0].item() if right_vel.numel() > 0 else 0.0
+        steer_v = steer_vel[0].item() if steer_vel.numel() > 0 else 0.0
 
         # Get current yaw for rate calculation
         current_quat = robot.get_quat()
@@ -491,17 +603,22 @@ def _execute_base_movement_with_wheel_monitoring(
             current_quat = current_quat[0]
         current_yaw = _yaw_from_quat(current_quat)
 
-        # Compute yaw rate (change per dt)
+        # The differential wheels rotate the entire caster module. Remove the
+        # module's steering rate to recover the chassis yaw rate:
+        #   chassis_yaw_rate = (right - left) * radius / separation - steer_rate
         if step > 0:
-            yaw_rate = (current_yaw - prev_yaw) / dt
-            # Compute expected yaw rate from wheel velocity difference
-            # yaw_rate = (v_right - v_left) * wheel_radius / wheel_separation
-            wheel_radius = 0.04  # meters
-            expected_yaw_rate = (right_v - left_v) * wheel_radius / wheel_separation
+            yaw_delta = math.atan2(
+                math.sin(current_yaw - prev_yaw),
+                math.cos(current_yaw - prev_yaw),
+            )
+            yaw_rate = yaw_delta / dt
+            module_yaw_rate = (right_v - left_v) * wheel_radius / wheel_separation
+            expected_yaw_rate = module_yaw_rate - steer_v
 
             time_data.append(current_time)
             left_vel_data.append(left_v)
             right_vel_data.append(right_v)
+            steer_vel_data.append(steer_v)
             velocity_diff_data.append(right_v - left_v)
             yaw_rate_data.append(yaw_rate)
             expected_yaw_rate_data.append(expected_yaw_rate)
@@ -514,6 +631,7 @@ def _execute_base_movement_with_wheel_monitoring(
         # Hold arm joints in initial position to prevent arm from falling
         robot.control_dofs_position(arm_pos, dofs_idx_local=robot._hsr_arm_dofs_idx_local, envs_idx=[0])
         scene.step()
+        _capture_frame()
         current_time += dt
 
     # Compute statistics
@@ -524,6 +642,7 @@ def _execute_base_movement_with_wheel_monitoring(
         time=time_data,
         left_wheel_velocity=left_vel_data,
         right_wheel_velocity=right_vel_data,
+        steer_velocity=steer_vel_data,
         velocity_difference=velocity_diff_data,
         yaw_rate=yaw_rate_data,
         expected_yaw_rate=expected_yaw_rate_data,
@@ -566,11 +685,18 @@ class TestMoveBaseControlEvaluation:
     """Test class for evaluating move base control precision."""
 
     @pytest.fixture
-    def scene_and_robot(self, pytestconfig):
+    def scene_and_robot(self, pytestconfig, request):
         """Fixture providing scene and robot for tests."""
         show_viewer = pytestconfig.getoption("--visualize")
-        scene, robot = _create_scene(show_viewer=show_viewer)
+        record_video = pytestconfig.getoption("--record-video", default=False)
+        video_name = request.node.name if record_video else None
+        scene, robot = _create_scene(
+            show_viewer=show_viewer,
+            record_video=record_video,
+            video_name=video_name,
+        )
         yield scene, robot
+        _save_active_video()
         # Cleanup - Genesis doesn't support multiple scenes with viewer
         if show_viewer:
             scene._viewer = None
@@ -878,14 +1004,15 @@ class TestMoveBaseControlEvaluation:
                 f"  t={sync_data.time[i]:.2f}s: "
                 f"L={sync_data.left_wheel_velocity[i]:.4f}, "
                 f"R={sync_data.right_wheel_velocity[i]:.4f}, "
+                f"steer={sync_data.steer_velocity[i]:.4f} rad/s, "
                 f"diff={sync_data.velocity_difference[i]:.4f} rad/s, "
                 f"yaw_err={sync_data.yaw_rate_error[i]:.4f} rad/s"
             )
 
         print("=" * 60)
 
-        # Assert reasonable wheel synchronization (documenting the issue)
-        # Note: Large velocity differences indicate wheel sync issues
+        # With a stationary caster, the raw differential-wheel metric is also
+        # a valid forward synchronization check.
         assert sync_data.max_velocity_diff < 7.0, (
             f"Max wheel velocity difference {sync_data.max_velocity_diff:.4f} rad/s too high"
         )
@@ -970,7 +1097,7 @@ class TestMoveBaseControlEvaluation:
         )
 
     def test_wheel_synchronization_backward(self, scene_and_robot):
-        """Test wheel synchronization during backward movement (where issues occur)."""
+        """Test caster-aware chassis yaw consistency during backward movement."""
         scene, robot = scene_and_robot
         dt = 0.01
 
@@ -984,100 +1111,54 @@ class TestMoveBaseControlEvaluation:
             dt=dt,
         )
 
+        velocity_diffs = np.abs(np.array(sync_data.velocity_difference))
+        yaw_rate_errors = np.abs(np.array(sync_data.yaw_rate_error))
+        settled_mask = np.array(sync_data.time) >= 8.0
+        settled_max_velocity_diff = float(np.max(velocity_diffs[settled_mask]))
+
         print("\n" + "=" * 60)
-        print("WHEEL SYNCHRONIZATION ANALYSIS - BACKWARD MOVEMENT")
+        print("CASTER-AWARE YAW ANALYSIS - BACKWARD MOVEMENT")
         print("=" * 60)
-        print(f"\nMovement Results:")
+        print("\nMovement Results:")
         print(f"  Position error: {result.position_error:.6f} m")
         print(f"  Yaw error: {math.degrees(result.yaw_error):.4f} deg")
 
-        print(f"\nWheel Synchronization Metrics:")
-        print(f"  Max velocity difference: {sync_data.max_velocity_diff:.4f} rad/s")
-        print(f"  Mean velocity difference: {sync_data.mean_velocity_diff:.4f} rad/s")
-        print(f"  Std velocity difference: {sync_data.std_velocity_diff:.4f} rad/s")
-        print(f"  Cumulative rotation error: {sync_data.cumulative_rotation_error:.4f} rad")
+        print("\nCaster-Aware Metrics:")
+        print(f"  Max transient wheel difference: {sync_data.max_velocity_diff:.4f} rad/s")
+        print(f"  Settled max wheel difference: {settled_max_velocity_diff:.4f} rad/s")
+        print(f"  Max chassis yaw-rate error: {np.max(yaw_rate_errors):.4f} rad/s")
+        print(f"  Mean chassis yaw-rate error: {np.mean(yaw_rate_errors):.4f} rad/s")
+        print(f"  Cumulative chassis rotation error: {sync_data.cumulative_rotation_error:.4f} rad")
 
-        # Find the worst synchronization moments
-        velocity_diffs = np.array(sync_data.velocity_difference)
-        if len(velocity_diffs) > 0:
-            worst_indices = np.argsort(np.abs(velocity_diffs))[-5:][::-1]
-            print(f"\nTop 5 Worst Synchronization Moments:")
-            for idx in worst_indices:
-                print(
-                    f"  t={sync_data.time[idx]:.2f}s: "
-                    f"L={sync_data.left_wheel_velocity[idx]:.4f}, "
-                    f"R={sync_data.right_wheel_velocity[idx]:.4f}, "
-                    f"diff={sync_data.velocity_difference[idx]:.4f} rad/s, "
-                    f"yaw_err={sync_data.yaw_rate_error[idx]:.4f} rad/s"
-                )
+        # During a backward caster flip, opposite wheel velocities rotate the
+        # caster module without imposing the same yaw rate on the chassis.
+        worst_indices = np.argsort(velocity_diffs)[-5:][::-1]
+        print("\nTop 5 Caster Rotation Moments:")
+        for idx in worst_indices:
+            print(
+                f"  t={sync_data.time[idx]:.2f}s: "
+                f"L={sync_data.left_wheel_velocity[idx]:.4f}, "
+                f"R={sync_data.right_wheel_velocity[idx]:.4f}, "
+                f"steer={sync_data.steer_velocity[idx]:.4f} rad/s, "
+                f"diff={sync_data.velocity_difference[idx]:.4f} rad/s, "
+                f"yaw_err={sync_data.yaw_rate_error[idx]:.4f} rad/s"
+            )
 
-        # Check for correlation between velocity diff and yaw error
-        if len(sync_data.yaw_rate_error) > 0:
-            yaw_rate_errors = np.array(sync_data.yaw_rate_error)
-            velocity_diffs = np.array(sync_data.velocity_difference)
-            correlation = np.corrcoef(np.abs(velocity_diffs), np.abs(yaw_rate_errors))[0, 1]
-            print(f"\nCorrelation between wheel velocity diff and yaw rate error: {correlation:.4f}")
-
-        # Assertions documenting wheel synchronization quality
-        # Backward movement can show transient velocity spikes during initial
-        # acceleration, so allow a generous max while keeping mean tight.
-        assert sync_data.max_velocity_diff < 15.0, (
-            f"Max wheel velocity difference {sync_data.max_velocity_diff:.4f} rad/s too high"
+        # A raw wheel-speed difference is expected while the caster turns from
+        # its forward equilibrium toward the stable backward equilibrium. Test
+        # the observable chassis yaw invariant and the settled wheel behavior.
+        assert settled_max_velocity_diff < 0.5, (
+            f"Settled wheel velocity difference {settled_max_velocity_diff:.4f} rad/s too high"
         )
-        assert sync_data.mean_velocity_diff < 6.0, (
-            f"Mean wheel velocity difference {sync_data.mean_velocity_diff:.4f} rad/s too high"
+        assert np.max(yaw_rate_errors) < 0.50, (
+            f"Max chassis yaw-rate error {np.max(yaw_rate_errors):.4f} rad/s too high"
         )
-        assert sync_data.cumulative_rotation_error < 10.0, (
-            f"Cumulative rotation error {sync_data.cumulative_rotation_error:.4f} rad too high"
+        assert np.mean(yaw_rate_errors) < 0.05, (
+            f"Mean chassis yaw-rate error {np.mean(yaw_rate_errors):.4f} rad/s too high"
         )
-
-    def test_wheel_sync_vs_yaw_error_correlation(self, scene_and_robot):
-        """Analyze correlation between wheel sync errors and final yaw errors."""
-        scene, robot = scene_and_robot
-        dt = 0.01
-
-        scenarios = [
-            ("Forward 3m", 3.0, 0.0, 0.0, 10.0),
-            ("Backward 3m", -3.0, 0.0, 0.0, 10.0),
-            ("Lateral 3m", 0.0, 3.0, 0.0, 10.0),
-        ]
-
-        print("\n" + "=" * 60)
-        print("WHEEL SYNC vs YAW ERROR CORRELATION ANALYSIS")
-        print("=" * 60)
-
-        results = []
-        for name, tx, ty, tyaw, dur in scenarios:
-            result, sync_data = _execute_base_movement_with_wheel_monitoring(scene, robot, tx, ty, tyaw, dur, dt)
-            results.append((name, result, sync_data))
-
-            print(f"\n{name}:")
-            print(f"  Final yaw error: {math.degrees(result.yaw_error):.4f} deg")
-            print(f"  Mean wheel vel diff: {sync_data.mean_velocity_diff:.4f} rad/s")
-            print(f"  Max wheel vel diff: {sync_data.max_velocity_diff:.4f} rad/s")
-            print(f"  Cumulative rot error: {sync_data.cumulative_rotation_error:.4f} rad")
-
-        # Compute overall correlation
-        yaw_errors = [math.degrees(r[1].yaw_error) for r in results]
-        mean_vel_diffs = [r[2].mean_velocity_diff for r in results]
-        max_vel_diffs = [r[2].max_velocity_diff for r in results]
-        cum_rot_errors = [r[2].cumulative_rotation_error for r in results]
-
-        if len(yaw_errors) > 1:
-            corr_mean = np.corrcoef(yaw_errors, mean_vel_diffs)[0, 1]
-            corr_max = np.corrcoef(yaw_errors, max_vel_diffs)[0, 1]
-            corr_cum = np.corrcoef(yaw_errors, cum_rot_errors)[0, 1]
-
-            print(f"\nCorrelation Analysis:")
-            print(f"  Yaw error vs mean wheel vel diff: {corr_mean:.4f}")
-            print(f"  Yaw error vs max wheel vel diff: {corr_max:.4f}")
-            print(f"  Yaw error vs cumulative rot error: {corr_cum:.4f}")
-
-        print("=" * 60)
-
-        # Assert some correlation exists (wheels should affect rotation)
-        # This is mainly for information - correlation might not be perfect
-        assert len(results) > 0, "No results collected"
+        assert sync_data.cumulative_rotation_error < 0.5, (
+            f"Cumulative chassis rotation error {sync_data.cumulative_rotation_error:.4f} rad too high"
+        )
 
     def test_slow_movement_with_small_dt(self, scene_and_robot):
         """Test precision with smaller dt AND slower velocity (longer duration).
@@ -1155,6 +1236,318 @@ class TestMoveBaseControlEvaluation:
                 )
 
         print("\n" + "=" * 60)
+
+
+def _effective_steer_gains(controller_first: bool) -> tuple[float, float]:
+    _, robot = _create_scene(dt=0.01)
+    if controller_first:
+        controller = robot.get_base_controller()
+        robot._hsr_apply_default_gains()
+    else:
+        robot._hsr_apply_default_gains()
+        controller = robot.get_base_controller()
+    steer = [controller.steer_dof_idx_local]
+    kp = float(robot.get_dofs_kp(dofs_idx_local=steer).reshape(-1)[0].item())
+    kv = float(robot.get_dofs_kv(dofs_idx_local=steer).reshape(-1)[0].item())
+    return kp, kv
+
+
+def test_steering_gains_do_not_depend_on_initialization_order() -> None:
+    controller_then_housekeeping = _effective_steer_gains(controller_first=True)
+    housekeeping_then_controller = _effective_steer_gains(controller_first=False)
+    assert controller_then_housekeeping == pytest.approx(housekeeping_then_controller)
+
+
+# ---------------------------------------------------------------------------
+# Permanent selected-gain stability regressions (Task 5)
+# ---------------------------------------------------------------------------
+
+ARM_EXTENDED = (0.50, -1.50, 0.0, 0.0, 0.0)
+
+_SELECTED_GAIN_DT = pytest.param(0.01, id="dt001")
+_SELECTED_GAIN_DT_002 = pytest.param(0.02, id="dt002")
+
+
+def _run_selected_gain_trajectory(
+    dt: float,
+    target_x: float,
+    target_y: float,
+    target_yaw: float,
+    arm_extended: bool,
+    video_name: str | None = None,
+) -> dict:
+    """Run a trajectory with the selected steering gains and return metrics."""
+    scene, robot = _create_scene(dt=dt, record_video=video_name is not None, video_name=video_name)
+    physics_dt = float(scene.sim.dt)
+
+    # Initialize vec state so step_base_trajectory_batched can access it.
+    robot._ensure_whole_body_state(1)
+
+    # Set arm position.
+    if arm_extended:
+        arm_pos = torch.tensor(ARM_EXTENDED, device=gs.device, dtype=gs.tc_float)
+        robot.set_dofs_position(arm_pos, dofs_idx_local=robot._hsr_arm_dofs_idx_local)
+    else:
+        arm_pos = robot.get_dofs_position(
+            dofs_idx_local=robot._hsr_arm_dofs_idx_local, envs_idx=[0],
+        )
+        if arm_pos.ndim > 1:
+            arm_pos = arm_pos[0]
+        arm_pos = arm_pos.reshape(-1).clone()
+
+    # Settle for 1 second.
+    settle_steps = round(1.0 / physics_dt)
+    for _ in range(settle_steps):
+        robot.step_base_trajectory_batched(physics_dt, envs_idx=[0])
+        robot.control_dofs_position(
+            arm_pos, dofs_idx_local=robot._hsr_arm_dofs_idx_local, envs_idx=[0],
+        )
+        scene.step()
+        _capture_frame()
+
+    # Capture initial pose after settling.
+    init_pos = robot.get_pos()
+    if init_pos.ndim > 1:
+        init_pos = init_pos[0]
+    init_x = float(init_pos[0])
+    init_y = float(init_pos[1])
+
+    # Create and accept trajectory.
+    duration = 3.0
+    positions = torch.tensor(
+        [[target_x, target_y, target_yaw]],
+        device=gs.device, dtype=gs.tc_float,
+    )
+    time_from_start = torch.tensor([duration], device=gs.device, dtype=gs.tc_float)
+    trajectory = Trajectory(positions=positions, time_from_start=time_from_start)
+    robot.set_base_trajectory_batched(trajectory, envs_idx=[0])
+
+    # Run trajectory for 3.5 s (duration + 0.5 s hold).
+    total_time = 3.5
+    steps = int(round(total_time / physics_dt))
+    roll_history: list[float] = []
+    pitch_history: list[float] = []
+    for _ in range(steps):
+        robot.step_base_trajectory_batched(physics_dt, envs_idx=[0])
+        robot.control_dofs_position(
+            arm_pos, dofs_idx_local=robot._hsr_arm_dofs_idx_local, envs_idx=[0],
+        )
+        scene.step()
+        _capture_frame()
+        quat = robot.get_quat()
+        if quat.ndim > 1:
+            quat = quat[0]
+        roll, pitch = _roll_pitch_from_quat(quat)
+        roll_history.append(abs(roll))
+        pitch_history.append(abs(pitch))
+
+    # Final state.
+    final_pos = robot.get_pos()
+    final_quat = robot.get_quat()
+    if final_pos.ndim > 1:
+        final_pos = final_pos[0]
+    if final_quat.ndim > 1:
+        final_quat = final_quat[0]
+    final_yaw = _yaw_from_quat(final_quat)
+
+    final_translation_error = math.hypot(
+        target_x - float(final_pos[0]), target_y - float(final_pos[1]),
+    )
+    final_yaw_error = _compute_yaw_error(target_yaw, final_yaw)
+    max_roll = max(roll_history) if roll_history else 0.0
+    max_pitch = max(pitch_history) if pitch_history else 0.0
+
+    _save_active_video()
+
+    return {
+        "max_roll": max_roll,
+        "max_pitch": max_pitch,
+        "final_translation_error": final_translation_error,
+        "final_yaw_error": final_yaw_error,
+        "all_finite": all(math.isfinite(v) for v in (
+            max_roll, max_pitch, final_translation_error, final_yaw_error,
+        )),
+    }
+
+def _run_selected_gain_raw(
+    dt: float,
+    command: tuple[float, float, float],
+    arm_extended: bool,
+    video_name: str | None = None,
+) -> dict:
+    """Run a raw velocity command with the selected steering gains."""
+    from hsr_genesis.base_controller import CartSpace
+
+    scene, robot = _create_scene(dt=dt, record_video=video_name is not None, video_name=video_name)
+    physics_dt = float(scene.sim.dt)
+    robot._ensure_whole_body_state(1)
+    controller = robot.get_base_controller()
+
+    # Set arm position.
+    if arm_extended:
+        arm_pos = torch.tensor(ARM_EXTENDED, device=gs.device, dtype=gs.tc_float)
+        robot.set_dofs_position(arm_pos, dofs_idx_local=robot._hsr_arm_dofs_idx_local)
+    else:
+        arm_pos = robot.get_dofs_position(
+            dofs_idx_local=robot._hsr_arm_dofs_idx_local, envs_idx=[0],
+        )
+        if arm_pos.ndim > 1:
+            arm_pos = arm_pos[0]
+        arm_pos = arm_pos.reshape(-1).clone()
+
+    # Settle for 1 second.
+    settle_steps = round(1.0 / physics_dt)
+    for _ in range(settle_steps):
+        robot.step_base_trajectory_batched(physics_dt, envs_idx=[0])
+        robot.control_dofs_position(
+            arm_pos, dofs_idx_local=robot._hsr_arm_dofs_idx_local, envs_idx=[0],
+        )
+        scene.step()
+        _capture_frame()
+
+    # Driven phase: refresh command for 2.0 s.
+    driven_steps = int(round(2.0 / physics_dt))
+    roll_history: list[float] = []
+    pitch_history: list[float] = []
+    track_count = 0
+    for _ in range(driven_steps):
+        cmd = CartSpace()
+        cmd.dot_x, cmd.dot_y, cmd.dot_r = command
+        controller.update_velocity_command(cmd, envs_idx=[0])
+        robot.step_base_trajectory_batched(physics_dt, envs_idx=[0])
+        robot.control_dofs_position(
+            arm_pos, dofs_idx_local=robot._hsr_arm_dofs_idx_local, envs_idx=[0],
+        )
+        scene.step()
+        _capture_frame()
+        quat = robot.get_quat()
+        if quat.ndim > 1:
+            quat = quat[0]
+        roll, pitch = _roll_pitch_from_quat(quat)
+        roll_history.append(abs(roll))
+        pitch_history.append(abs(pitch))
+
+        # Body-frame velocity tracking check.
+        vel = robot.get_vel()
+        ang = robot.get_ang()
+        if vel.ndim > 1:
+            vel = vel[0]
+        if ang.ndim > 1:
+            ang = ang[0]
+        yaw = _yaw_from_quat(quat)
+        body_vx = math.cos(yaw) * float(vel[0]) + math.sin(yaw) * float(vel[1])
+        body_vy = -math.sin(yaw) * float(vel[0]) + math.cos(yaw) * float(vel[1])
+        body_wz = float(ang[2])
+        cmd_norm = max(math.sqrt(sum(c ** 2 for c in command)), 1e-6)
+        err_norm = math.sqrt(
+            (body_vx - command[0]) ** 2
+            + (body_vy - command[1]) ** 2
+            + (body_wz - command[2]) ** 2
+        )
+        if err_norm / cmd_norm < 0.5:
+            track_count += 1
+
+    # Settle phase: zero command for 0.5 s.
+    settle_steps_raw = int(round(0.5 / physics_dt))
+    settle_count = 0
+    for _ in range(settle_steps_raw):
+        cmd = CartSpace()
+        cmd.dot_x, cmd.dot_y, cmd.dot_r = 0.0, 0.0, 0.0
+        controller.update_velocity_command(cmd, envs_idx=[0])
+        robot.step_base_trajectory_batched(physics_dt, envs_idx=[0])
+        robot.control_dofs_position(
+            arm_pos, dofs_idx_local=robot._hsr_arm_dofs_idx_local, envs_idx=[0],
+        )
+        scene.step()
+        _capture_frame()
+        quat = robot.get_quat()
+        if quat.ndim > 1:
+            quat = quat[0]
+        roll, pitch = _roll_pitch_from_quat(quat)
+        roll_history.append(abs(roll))
+        pitch_history.append(abs(pitch))
+
+        vel = robot.get_vel()
+        ang = robot.get_ang()
+        if vel.ndim > 1:
+            vel = vel[0]
+        if ang.ndim > 1:
+            ang = ang[0]
+        yaw = _yaw_from_quat(quat)
+        body_vx = math.cos(yaw) * float(vel[0]) + math.sin(yaw) * float(vel[1])
+        body_vy = -math.sin(yaw) * float(vel[0]) + math.cos(yaw) * float(vel[1])
+        body_wz = float(ang[2])
+        vel_norm = math.sqrt(body_vx ** 2 + body_vy ** 2 + body_wz ** 2)
+        if vel_norm < 0.05:
+            settle_count += 1
+
+    tracking_fraction = track_count / driven_steps if driven_steps > 0 else 0.0
+    settle_fraction = settle_count / settle_steps_raw if settle_steps_raw > 0 else 0.0
+    max_roll = max(roll_history) if roll_history else 0.0
+    max_pitch = max(pitch_history) if pitch_history else 0.0
+
+    _save_active_video()
+
+    return {
+        "max_roll": max_roll,
+        "max_pitch": max_pitch,
+        "raw_tracking_fraction": tracking_fraction,
+        "raw_settle_fraction": settle_fraction,
+        "all_finite": all(math.isfinite(v) for v in (
+            max_roll, max_pitch, tracking_fraction, settle_fraction,
+        )),
+    }
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("dt", [0.01, 0.02], ids=["dt001", "dt002"])
+def test_selected_steering_gains_yaw_arm_extended(dt: float, request) -> None:
+    """Selected gains hold stability during yaw with arm extended."""
+    metrics = _run_selected_gain_trajectory(
+        dt=dt,
+        target_x=0.0, target_y=0.0, target_yaw=math.pi / 2.0,
+        arm_extended=True,
+        video_name=request.node.name if request.config.getoption("--record-video", default=False) else None,
+    )
+    assert metrics["max_roll"] <= 0.02
+    assert metrics["max_pitch"] <= 0.02
+    assert metrics["final_translation_error"] <= 0.05
+    assert metrics["final_yaw_error"] <= math.radians(5.0)
+    assert metrics["all_finite"]
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("dt", [0.01, 0.02], ids=["dt001", "dt002"])
+def test_selected_steering_gains_diagonal_arm_extended(dt: float, request) -> None:
+    """Selected gains hold stability during diagonal motion with arm extended."""
+    metrics = _run_selected_gain_trajectory(
+        dt=dt,
+        target_x=0.4, target_y=0.3, target_yaw=math.pi / 4.0,
+        arm_extended=True,
+        video_name=request.node.name if request.config.getoption("--record-video", default=False) else None,
+    )
+    assert metrics["max_roll"] <= 0.02
+    assert metrics["max_pitch"] <= 0.02
+    assert metrics["final_translation_error"] <= 0.05
+    assert metrics["final_yaw_error"] <= math.radians(5.0)
+    assert metrics["all_finite"]
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("dt", [0.01, 0.02], ids=["dt001", "dt002"])
+def test_selected_steering_gains_raw_diagonal_arm_extended(dt: float, request) -> None:
+    """Selected gains track raw diagonal commands and settle with arm extended."""
+    metrics = _run_selected_gain_raw(
+        dt=dt,
+        command=(0.15, 0.15, 0.3),
+        arm_extended=True,
+        video_name=request.node.name if request.config.getoption("--record-video", default=False) else None,
+    )
+    assert metrics["raw_tracking_fraction"] >= 0.25
+    assert metrics["raw_settle_fraction"] >= 0.10
+    assert metrics["max_roll"] <= 0.02
+    assert metrics["max_pitch"] <= 0.02
+    assert metrics["all_finite"]
 
 
 if __name__ == "__main__":

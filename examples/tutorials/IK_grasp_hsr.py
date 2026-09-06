@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import math
 import sys
 from pathlib import Path
@@ -58,6 +59,16 @@ def arm_traj_names() -> list[str]:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="IK grasp demo for HSR")
+    parser.add_argument(
+        "--record-video", action="store_true",
+        help="Record offscreen camera video (mp4 + gif) to examples/tutorials/videos/",
+    )
+    parser.add_argument(
+        "--video-dir", type=str, default="examples/tutorials/videos",
+        help="Output directory for recorded videos",
+    )
+    args = parser.parse_args()
     gs.init(backend=gs.gpu)
     from hsr_genesis.hsr_rigid_entity import HSRBURDF, JointTrajectory
     from hsr_genesis.base_controller import Trajectory
@@ -73,7 +84,7 @@ def main() -> None:
         rigid_options=gs.options.RigidOptions(
             use_gjk_collision=True,
         ),
-        show_viewer=True,
+        show_viewer=not args.record_video,
     )
 
     scene.add_entity(gs.morphs.Plane(), visualize_contact=True)
@@ -118,6 +129,14 @@ def main() -> None:
         )
     )
 
+    rec = None
+    if args.record_video:
+        from hsr_genesis.tutorial_utils import VideoRecorder
+
+        rec = VideoRecorder(
+            scene, res=(320, 240), pos=(3, -1, 1.5),
+            lookat=(0.0, 0.0, 0.5), fov=30, fps=50,
+        )
     scene.build()
 
     end_effector = hsr.get_link("hand_palm_link")
@@ -171,6 +190,8 @@ def main() -> None:
         if step == 0:
             hsr.control_dofs_position(hand_open, dofs_idx_local=[motor_idx])
         scene.step()
+        if rec is not None:
+            rec.capture()
 
     # --- Close gripper using apply-force action for torque-controlled grasp ---
     gripper = hsr.get_gripper_batched()
@@ -182,6 +203,8 @@ def main() -> None:
         gripper.step_apply_force(dt, envs_idx=[0])
         hsr.step_whole_body_trajectory_batched(dt, envs_idx=[0])
         scene.step()
+        if rec is not None:
+            rec.capture()
 
     # --- Lift: raise grasped object ---
     current_qpos = hsr.get_qpos().clone()
@@ -220,11 +243,21 @@ def main() -> None:
         gripper.step_apply_force(dt, envs_idx=[0])
         hsr.step_whole_body_trajectory_batched(dt, envs_idx=[0])
         scene.step()
+        if rec is not None:
+            rec.capture()
 
     for _ in range(100):
         gripper.step_apply_force(dt, envs_idx=[0])
         hsr.step_whole_body_trajectory_batched(dt, envs_idx=[0])
         scene.step()
+        if rec is not None:
+            rec.capture()
+
+    if rec is not None:
+        import os
+        out_dir = args.video_dir
+        os.makedirs(out_dir, exist_ok=True)
+        rec.save(os.path.join(out_dir, "IK_grasp_hsr.mp4"))
 
 
 if __name__ == "__main__":

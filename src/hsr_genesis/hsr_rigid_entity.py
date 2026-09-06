@@ -719,6 +719,12 @@ class HSRRigidEntity(RigidEntity):
         self._hsr_high_friction_applied = True
 
     def _hsr_apply_default_gains(self) -> None:
+        """Apply tuned PD gains for arm, head, hand, torso, and spring joints.
+
+        Steering gains are owned solely by ``HSRBBaseControllersConfig`` and
+        applied by ``HSRBBaseController._initialize_joints``; this method has
+        no steering fallback and no initialization-order warning.
+        """
         if self._hsr_default_gains_applied:
             return
         if self._scene is None or self._scene.sim is None:
@@ -739,12 +745,6 @@ class HSRRigidEntity(RigidEntity):
             "hand_motor_joint": 10.0,
             # torso: mimic joint controlled via arm_lift; needs PD to hold against gravity
             "torso_lift_joint": 10000.0,
-            # base_roll_joint is the steering joint actively controlled by
-            # the base controller.  Effective inertia ~2-5 kg·m² (entire
-            # upper body rotating about the yaw axis).  kp=100 with kv=10
-            # gave zeta ≈ 0.1-0.35 (severely underdamped) causing violent
-            # whole-body oscillation when the arm extends forward.
-            "base_roll_joint": 100.0,
         }
         tuned_kv = {
             # kv tuned for critical damping using effective downstream mass.
@@ -762,10 +762,6 @@ class HSRRigidEntity(RigidEntity):
             # torso_lift_link mass ~3.4 kg -> kv_crit = 2*sqrt(kp*m) ≈ 370.
             # Using 400 for slight overdamping.
             "torso_lift_joint": 400.0,
-            # base_roll: kv=50 gives zeta ≈ 1.1 for I_eff ≈ 5 kg·m²,
-            # providing critical damping for the steering joint without
-            # making the steering response sluggish.
-            "base_roll_joint": 50.0,
         }
         if self._hsr_arm_dofs_idx_local:
             arm_kp = torch.tensor(
@@ -904,23 +900,6 @@ class HSRRigidEntity(RigidEntity):
             self.set_dofs_force_range(
                 -torso_force_limit, torso_force_limit, dofs_idx_local=[torso_idx],
             )
-        # Apply critically-damped gains to the base_roll_joint (steering).
-        # Genesis applies default kp=100/kv=10 to all joints, which gives
-        # zeta ≈ 0.1 for the ~60 kg upper body — violently underdamped.
-        try:
-            steer_joint = self.get_joint("base_roll_joint")
-            steer_dofs = steer_joint.dofs_idx_local
-            steer_idx = int(steer_dofs[0]) if isinstance(steer_dofs, (list, tuple)) else int(steer_dofs)
-            self.set_dofs_kp(
-                torch.tensor([tuned_kp["base_roll_joint"]], device=gs.device, dtype=gs.tc_float),
-                dofs_idx_local=[steer_idx],
-            )
-            self.set_dofs_kv(
-                torch.tensor([tuned_kv["base_roll_joint"]], device=gs.device, dtype=gs.tc_float),
-                dofs_idx_local=[steer_idx],
-            )
-        except Exception:
-            pass
         # Cache arm_lift and torso gains for manual PD + feed-forward computation.
         self._hsr_arm_lift_kp = tuned_kp["arm_lift_joint"]
         self._hsr_arm_lift_kv = tuned_kv["arm_lift_joint"]
@@ -1022,21 +1001,10 @@ class HSRRigidEntity(RigidEntity):
             self._hsr_base_traj_ctrls = []
         if len(self._hsr_base_traj_ctrls) < n_envs:
             for _ in range(len(self._hsr_base_traj_ctrls), n_envs):
-                # Feedback gains: xy=1.0, yaw=1.5.
-                # Yaw gain was previously 5.0, which caused overshoot because the
-                # outer P term drives the inner velocity controller too aggressively
-                # without any derivative damping.  1.5 keeps tracking tight while
-                # staying well below the nested loop's saturation threshold.
-                # The derivative gains add damping proportional to current velocity,
-                # suppressing the residual overshoot after the trajectory ends.
-                feedback_gain = torch.tensor([1.0, 1.0, 1.5], device=gs.device, dtype=gs.tc_float)
-                self._hsr_base_traj_ctrls.append(
-                    OmniBaseTrajectoryControl(
-                        feedback_gain=feedback_gain,
-                        yaw_derivative_gain=0.3,
-                        xy_derivative_gain=0.1,
-                    )
-                )
+                # Tuning (feedback gains, derivative damping) is owned by
+                # OmniBaseTrajectoryControl.TUNING — see that class for the
+                # rationale behind the gain values.
+                self._hsr_base_traj_ctrls.append(OmniBaseTrajectoryControl())
         if self._hsr_base_traj_time is None or self._hsr_base_traj_time.numel() < n_envs:
             old = self._hsr_base_traj_time
             self._hsr_base_traj_time = torch.zeros((n_envs,), device=gs.device, dtype=gs.tc_float)
@@ -1188,6 +1156,13 @@ class HSRRigidEntity(RigidEntity):
         envs_idx,
         start_time: float | Sequence[float] | None = None,
     ) -> None:
+        """Accept a base trajectory for one or more environments.
+
+        Trajectory positions, velocities, and accelerations are world/odom
+        frame ``[x, y, yaw]``.  Each accepted trajectory remains active —
+        holding its final pose under feedback control — until
+        ``reset_base_trajectory_batched`` or replacement via a subsequent call.
+        """
         if self._solver_n_envs() > 0:
             envs_idx = self._scene._sanitize_envs_idx(envs_idx)
         envs_idx_arr = torch.as_tensor(envs_idx, device=gs.device, dtype=gs.tc_int).reshape(-1)
@@ -1242,7 +1217,20 @@ class HSRRigidEntity(RigidEntity):
         base_positions: torch.Tensor,
         start_times: Sequence[float | None],
     ) -> None:
-        """Populate flattened base trajectory tensors for the vectorized fast path."""
+        """Populate flattened tensors for the vectorized single-waypoint fast path.
+
+        Eligibility (all four conditions required for every member):
+          * ``positions`` is a 2-D tensor with shape ``(1, 3)``
+          * ``joint_names`` is ``None`` (no named-coordinate permutation)
+          * ``velocities`` is ``None`` (no explicit feed-forward)
+          * ``accelerations`` is ``None``
+
+        If any member is ineligible the entire batch falls back to the
+        per-environment canonical controller — the batch is never partitioned.
+        When eligible, the terminal yaw is normalized to the shortest-path
+        angle relative to the acceptance pose so that ``+179°`` → ``-179°``
+        commands a ``+2°`` turn rather than a ``-358°`` turn.
+        """
         n = int(envs_idx_arr.numel())
         all_simple = True
         end_pos = torch.zeros((n, 3), device=gs.device, dtype=gs.tc_float)
@@ -1251,14 +1239,27 @@ class HSRRigidEntity(RigidEntity):
             traj = trajectories[i]
             positions = to_torch(traj.positions).to(device=gs.device, dtype=gs.tc_float)
             tfs = to_torch(traj.time_from_start).to(device=gs.device, dtype=gs.tc_float)
-            if positions.ndim != 2 or positions.shape[0] != 1:
+            is_simple = (
+                positions.ndim == 2
+                and positions.shape == (1, 3)
+                and traj.joint_names is None
+                and traj.velocities is None
+                and traj.accelerations is None
+            )
+            if not is_simple:
                 all_simple = False
                 break
             end_pos[i] = positions[0]
             durations[i] = float(tfs[0].item()) if tfs.numel() > 0 else 0.0
         if not all_simple:
+            # Batch-wide fallback: do not partition the batch.
             self._hsr_vec_base_active[envs_idx_arr] = False
+            self._hsr_vec_base_done[envs_idx_arr] = False
             return
+        # Normalize terminal yaw to shortest-path from the acceptance pose.
+        end_pos[:, 2] = base_positions[:, 2] + _wrap_to_pi_batch(
+            end_pos[:, 2] - base_positions[:, 2]
+        )
         self._hsr_vec_base_start_pos[envs_idx_arr] = base_positions
         self._hsr_vec_base_end_pos[envs_idx_arr] = end_pos
         self._hsr_vec_base_duration[envs_idx_arr] = durations
@@ -1291,6 +1292,19 @@ class HSRRigidEntity(RigidEntity):
         *,
         envs_idx,
     ) -> dict[str, torch.Tensor]:
+        """Advance base trajectory control one step and return commands.
+
+        ``active`` denotes trajectory **ownership**, not motion.  A trajectory
+        remains active after its time horizon — the final pose is held under
+        feedback control until ``reset_base_trajectory_batched`` or replacement
+        via ``set_base_trajectory_batched``.  If step calls stop, the inner
+        ``HSRBBaseController`` command timeout (0.5 s) zeroes the wheel command
+        automatically.
+
+        Returns a dict with:
+        * ``active`` — ``bool[N]``: whether each environment owns a trajectory.
+        * ``command`` — ``float[N, 3]``: body-frame ``[forward, left, CCW yaw]``.
+        """
         self._hsr_apply_default_collision_disable()
         self._hsr_apply_passive_wheel_friction()
         self._hsr_apply_high_friction_links()
@@ -1337,14 +1351,24 @@ class HSRRigidEntity(RigidEntity):
             use_vec_base = bool(vec_base_active.all().item())
         else:
             use_vec_base = False
-        # If none active, skip base trajectory entirely (no loop needed).
+        # If no vector path and no canonical trajectory is active, skip the
+        # base trajectory loop entirely.
         if not use_vec_base and not vec_base_active.any().item():
-            # No base trajectories active — just step the base controller.
-            if self._hsr_base_control_mode != BaseControlMode.QPOS:
-                base_controller = self.get_base_controller()
-                base_controller.step_batch(dt, envs_idx=envs_idx_arr.tolist())
-            return {"active": active, "command": out}
+            any_canonical_active = any(
+                self._hsr_base_traj_ctrls[int(env)].update_active_trajectory()
+                for env in envs_idx_arr.tolist()
+            )
+            if not any_canonical_active:
+                # No base trajectories active — just step the base controller.
+                if self._hsr_base_control_mode != BaseControlMode.QPOS:
+                    base_controller = self.get_base_controller()
+                    base_controller.step_batch(dt, envs_idx=envs_idx_arr.tolist())
+                return {"active": active, "command": out}
         if use_vec_base and self._hsr_base_control_mode != BaseControlMode.QPOS:
+            # This branch uses the controller-owned batched output calculation
+            # for throughput.  Keep its frame order invariant: interpolate and
+            # apply feedback in world coordinates first, then rotate exactly
+            # once into body coordinates before calling HSRBBaseController.
             # Sample desired state (linear interpolation with yaw wrap).
             times_now_b = self._hsr_base_traj_time[envs_idx_arr]
             start_times_b = self._hsr_vec_base_start_time[envs_idx_arr]
@@ -1357,45 +1381,34 @@ class HSRRigidEntity(RigidEntity):
             start_pos_b = self._hsr_vec_base_start_pos[envs_idx_arr]
             end_pos_b = self._hsr_vec_base_end_pos[envs_idx_arr]
             desired_positions = (1.0 - alpha_exp_b) * start_pos_b + alpha_exp_b * end_pos_b
-            # Desired velocity: finite difference during trajectory, zero after.
+            # Feed-forward is active only for 0 <= t < duration.  Before the
+            # start time the captured pose is held with zero feed-forward; at
+            # and after the horizon the endpoint is held with zero feed-forward.
+            # A zero-duration waypoint is immediate (alpha=1, zero feed-forward).
             dt_traj = torch.where(durations_b > 0, durations_b, torch.ones_like(durations_b))
-            desired_velocities = (end_pos_b - start_pos_b) / dt_traj.unsqueeze(1)
-            # Zero out velocity after trajectory ends (matches original behavior).
-            done_mask_b = self._hsr_vec_base_done[envs_idx_arr]
+            moving = (t_b >= 0.0) & (t_b < durations_b)
             desired_velocities = torch.where(
-                (t_b >= durations_b).unsqueeze(1),
-                torch.zeros_like(desired_velocities),
-                desired_velocities,
+                moving.unsqueeze(1),
+                (end_pos_b - start_pos_b) / dt_traj.unsqueeze(1),
+                torch.zeros_like(end_pos_b),
             )
 
-            # World-frame position error with yaw wrapping.
-            error_pos = desired_positions - current_positions
-            error_pos[:, 2] = _wrap_to_pi_batch(error_pos[:, 2])
-
-            # Feedback gain: [1.0, 1.0, 1.5] (matches OmniBaseTrajectoryControl).
-            feedback_gain = torch.tensor([1.0, 1.0, 1.5], device=gs.device, dtype=gs.tc_float)
-            output_velocity_world = desired_velocities + feedback_gain * error_pos
-
-            # Derivative damping.
-            yaw_dg = 0.3
-            xy_dg = 0.1
-            output_velocity_world[:, 2] = output_velocity_world[:, 2] - yaw_dg * current_velocities[:, 2]
-            output_velocity_world[:, 0] = output_velocity_world[:, 0] - xy_dg * current_velocities[:, 0]
-            output_velocity_world[:, 1] = output_velocity_world[:, 1] - xy_dg * current_velocities[:, 1]
-
-            # RK2 midpoint yaw.
-            yaw_mid = current_positions[:, 2] + 0.5 * current_velocities[:, 2] * dt
-            c = torch.cos(yaw_mid)
-            s = torch.sin(yaw_mid)
-            # R(-yaw) = [[c, s, 0], [-s, c, 0], [0, 0, 1]]
-            body_vx = c * output_velocity_world[:, 0] + s * output_velocity_world[:, 1]
-            body_vy = -s * output_velocity_world[:, 0] + c * output_velocity_world[:, 1]
-            out[:, 0] = body_vx
-            out[:, 1] = body_vy
-            out[:, 2] = output_velocity_world[:, 2]
+            # Controller-owned outer-loop calculation (feedback + damping +
+            # RK2 midpoint rotation into body frame).
+            outer_controller = self._hsr_base_traj_ctrls[int(envs_idx_arr[0].item())]
+            out[:] = outer_controller.get_output_velocity_batch(
+                current_positions,
+                desired_positions,
+                desired_velocities,
+                dt=dt,
+                current_velocities=current_velocities,
+            )
             active = torch.ones(envs_idx_arr.numel(), device=gs.device, dtype=torch.bool)
 
-            # Mark done.
+            # Record that the time horizon was crossed.  This deliberately
+            # describes current behavior rather than deactivating the fast
+            # path: _hsr_vec_base_active remains true and the controller keeps
+            # issuing feedback-only commands toward the final pose.
             done_mask_b = self._hsr_vec_base_done[envs_idx_arr]
             newly_done_b = (t_b >= durations_b) & (~done_mask_b)
             if newly_done_b.any():
@@ -1420,8 +1433,11 @@ class HSRRigidEntity(RigidEntity):
                 else:
                     out[i] = ctrl.get_output_velocity(current_positions[i], desired, dt=dt, current_velocities=current_velocities[i])
                 active[i] = True
-                ctrl.terminate_control_if_stopped(time_now, current_velocities[i])
 
+        # QPOS is a kinematic bypass, not another actuator controller.  It
+        # writes the interpolated world X/Y and yaw directly to the root pose,
+        # preserving current Z and bypassing wheel IK, joint limits, traction,
+        # steering dynamics, and controller tracking error.
         if self._hsr_base_control_mode == BaseControlMode.QPOS:
             active_envs = envs_idx_arr[active]
             if active_envs.numel() > 0:
@@ -1452,6 +1468,9 @@ class HSRRigidEntity(RigidEntity):
                     self.set_pos(base_pos, envs_idx=active_envs, zero_velocity=False)
                     self.set_quat(quat, envs_idx=active_envs, zero_velocity=False)
         else:
+            # Controller mode crosses the frame boundary here: ``out`` is
+            # already body-frame [forward, left, CCW yaw].  The inner
+            # controller must receive it unchanged for wheel/steer IK.
             base_controller = self.get_base_controller()
             # Only overwrite the velocity command for envs with an active
             # trajectory.  For envs without one, preserve any velocity command

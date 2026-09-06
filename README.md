@@ -101,6 +101,24 @@ PYTHONPATH=src python examples/tutorials/hello_hsr_sensor.py
 
 If you see a viewer window, the example is running correctly.
 
+## Demos
+
+### Parallel simulation (16 envs)
+
+![hello_hsr_parallel](https://github.com/icsl-aist/hsr-genesis/releases/download/gif-assets/hello_hsr_parallel.gif)
+
+### Sensor demo (debug visualization)
+
+![hello_hsr_sensor](https://github.com/icsl-aist/hsr-genesis/releases/download/gif-assets/hello_hsr_sensor.gif)
+
+### IK grasp
+
+![IK_grasp_hsr](https://github.com/icsl-aist/hsr-genesis/releases/download/gif-assets/IK_grasp_hsr.gif)
+
+### RRT path planning
+
+![rrt_path_planning_hsr](https://github.com/icsl-aist/hsr-genesis/releases/download/gif-assets/rrt_path_planning_hsr.gif)
+
 ## Docker
 
 The Docker environment provides a reproducible setup with CUDA 12.4,

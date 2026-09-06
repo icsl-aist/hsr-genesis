@@ -1,5 +1,29 @@
 """HSR base vehicle controller utilities and kinematics kernels.
 
+Control architecture
+--------------------
+The physical ``controller`` mode has two layers:
+
+1. ``OmniBaseTrajectoryControl`` accepts world/odom-frame trajectories,
+   computes feed-forward + P feedback + velocity damping, and rotates the
+   resulting planar velocity into the robot body frame.
+2. ``HSRBBaseController`` accepts that body-frame twist (or a raw ``CartSpace``
+   command), maps it to right-wheel, left-wheel, and steering-joint rates, then
+   sends wheel-velocity and integrated steering-position targets to Genesis.
+
+The mechanism is not a conventional differential drive.  Both driven wheels
+are mounted on ``base_roll_link``, which can yaw relative to ``base_link``.
+The wheels are 0.11 m behind that steering pivot; two front casters are
+passive.  Consequently, wheel-speed difference gives the absolute yaw rate of
+the wheel module, while chassis yaw is the module yaw rate minus the internal
+steering-joint rate.
+
+Frame invariant: trajectory positions and velocities and Genesis root feedback
+are world-frame.  The inner controller input is body-frame
+``[forward, left, counter-clockwise yaw]``.  Raw ``CartSpace`` callers must
+already provide body-frame velocities; they do not pass through a frame
+rotation.
+
 Porting status:
 - Source: hsrb_base_controllers (ROS/hsrb_base_controllers).
 - Scope: ported from the HSRB base controller package with API-aligned data
@@ -52,6 +76,26 @@ def _vehicle_inverse_kernel(
     wheel_velocity_limit: TI_FLOAT,
     out_jcmd: ti.types.ndarray(dtype=TI_FLOAT, ndim=2),
 ):
+    # Body command: dot_x is forward [m/s], dot_y is left [m/s], and
+    # dot_r is counter-clockwise chassis yaw rate [rad/s].
+    #
+    # Let s be steer_angle and rotate the requested translation into the
+    # steerable wheel-module frame:
+    #
+    #   u =  cos(s) * dot_x + sin(s) * dot_y   (along-wheel velocity)
+    #   v = -sin(s) * dot_x + cos(s) * dot_y   (cross-wheel velocity)
+    #
+    # With wheel radius R, separation B, and the drive axle D metres behind
+    # the steering pivot, the equations below are:
+    #
+    #   wheel_r = u/R + B*v/(2*R*D)
+    #   wheel_l = u/R - B*v/(2*R*D)
+    #   steer   = v/D - dot_r
+    #
+    # Therefore the wheel module's absolute yaw rate is
+    # R/B * (wheel_r-wheel_l) = dot_r+steer.  In particular, pure chassis yaw
+    # commands zero wheel rates and the opposite steering rate.  Do not replace
+    # this with ordinary differential-drive kinematics.
     for i in range(n):
         dot_x = cmd[i, 0]
         dot_y = cmd[i, 1]
@@ -233,6 +277,68 @@ def _iir_update_batch_kernel(
         out[e] = acc
 
 
+def _forward_kinematics_batch(
+    joint_rates: torch.Tensor,
+    steer_angles: torch.Tensor,
+    wheel_radius: float,
+    wheel_separation: float,
+    wheel_offset: float,
+) -> torch.Tensor:
+    """Convert joint rates [right, left, steer] to body velocity [vx, vy, yaw].
+
+    Mirrors ``TwinCasterDrive::ConvertForward`` from hsrb_base_controllers 3.0.0.
+    The Jacobian third row is ``[R/B, -R/B, -1]``, so chassis yaw is
+    ``R/B*(right - left) - steer``.
+    """
+    r = float(wheel_radius)
+    w = float(wheel_separation)
+    d = float(wheel_offset)
+    cos_s = torch.cos(steer_angles)
+    sin_s = torch.sin(steer_angles)
+    right = joint_rates[:, 0]
+    left = joint_rates[:, 1]
+    steer = joint_rates[:, 2]
+    j11 = r * cos_s * 0.5 - r * d * sin_s / w
+    j12 = r * cos_s * 0.5 + r * d * sin_s / w
+    j21 = r * sin_s * 0.5 + r * d * cos_s / w
+    j22 = r * sin_s * 0.5 - r * d * cos_s / w
+    base_x = j11 * right + j12 * left
+    base_y = j21 * right + j22 * left
+    base_yaw = (r / w) * (right - left) - steer
+    return torch.stack([base_x, base_y, base_yaw], dim=1)
+
+
+def _inverse_kinematics_batch(
+    base_vel: torch.Tensor,
+    steer_angles: torch.Tensor,
+    wheel_radius: float,
+    wheel_separation: float,
+    wheel_offset: float,
+) -> torch.Tensor:
+    """Convert body velocity [vx, vy, yaw] to joint rates [right, left, steer].
+
+    Torch equivalent of the Taichi ``_vehicle_inverse_kernel`` without speed
+    limiting.  Mirrors ``TwinCasterDrive::ConvertInverse`` from 3.0.0.
+    """
+    r = float(wheel_radius)
+    w = float(wheel_separation)
+    d = float(wheel_offset)
+    cos_s = torch.cos(steer_angles)
+    sin_s = torch.sin(steer_angles)
+    dot_x = base_vel[:, 0]
+    dot_y = base_vel[:, 1]
+    dot_r = base_vel[:, 2]
+    u = cos_s * dot_x + sin_s * dot_y
+    v = -sin_s * dot_x + cos_s * dot_y
+    inv_r = 1.0 / r
+    inv_d = 1.0 / d
+    half_w_inv_r_inv_d = w * 0.5 * inv_r * inv_d
+    vel_r = u * inv_r + v * half_w_inv_r_inv_d
+    vel_l = u * inv_r - v * half_w_inv_r_inv_d
+    vel_steer = v * inv_d - dot_r
+    return torch.stack([vel_r, vel_l, vel_steer], dim=1)
+
+
 @dataclass(frozen=True)
 class HSRBBaseControllersConfig:
     wheel_drive_joints: tuple[str, ...] = (
@@ -248,14 +354,24 @@ class HSRBBaseControllersConfig:
         "base_l_passive_wheel_z_joint",
     )
     steer_joint: str = "base_roll_joint"
+    # Geometry must match hsrb4s.urdf: the right/left drive wheels have radius
+    # 0.04 m and centres at (-0.11, -0.133)/(-0.11, +0.133) relative to the
+    # base_roll_link steering pivot.  Hence separation B=0.266 and rearward
+    # pivot-to-axle distance D=0.11.
 
     wheel_separation: float = 0.266
     wheel_radius: float = 0.04
     wheel_offset: float = 0.11
 
     command_timeout: float = 0.5
-    yaw_velocity_limit: float = 2.5
-    wheel_velocity_limit: float = 12.0
+    # Public HSR-B speed limits (hsrb_bringup/config/controllers.yaml, Jazzy).
+    yaw_velocity_limit: float = 1.8
+    wheel_velocity_limit: float = 8.5
+    # C++ defaults are 1.0e10, effectively disabling acceleration shaping.
+    yaw_acceleration_limit: float = 1.0e10
+    wheel_acceleration_limit: float = 1.0e10
+    # HSR-B default: velocity-mode steering (use_base_roll_velocity: true).
+    use_base_roll_velocity: bool = True
 
     wheel_command_velocity_filter_a: tuple[float, ...] = ()
     wheel_command_velocity_filter_b: tuple[float, ...] = ()
@@ -273,6 +389,19 @@ class HSRBBaseControllersConfig:
 
 
 class HSRBBaseController:
+    """Inner body-twist controller for the steerable dual-wheel mechanism.
+
+    Input commands are robot-body velocities ``[forward, left, CCW yaw]``.
+    ``step_batch`` reads the measured steering angle for inverse kinematics,
+    applies uniform speed scaling, optional IIR filters, and a C++-ordered
+    acceleration-feasibility search, then velocity-controls the drive wheels.
+    Steering defaults to velocity mode (HSR-B ``use_base_roll_velocity``);
+    position mode integrates the rate into a target.  Use
+    ``set_base_roll_velocity_mode`` for a live controller-wide transition.
+    World-frame trajectory handling belongs to ``OmniBaseTrajectoryControl``
+    and must not be duplicated here.
+    """
+
     def __init__(
         self,
         entity,
@@ -281,7 +410,7 @@ class HSRBBaseController:
     ) -> None:
         self.entity = entity
         self.config = config or HSRBBaseControllersConfig()
-
+        self._validate_config()
         self.wheel_drive_dofs_idx_local = []
         for joint_name in self.config.wheel_drive_joints:
             dofs = self.entity.get_joint(joint_name).dofs_idx_local
@@ -301,7 +430,6 @@ class HSRBBaseController:
             self.steer_dof_idx_local = int(steer_dofs[0]) if steer_dofs else 0
         else:
             self.steer_dof_idx_local = int(steer_dofs)
-
         self._time = 0.0
         self._wheel_filter_batch_r = None
         self._wheel_filter_batch_l = None
@@ -311,7 +439,24 @@ class HSRBBaseController:
         self._last_cmd_time_batch = None
         self._desired_steer_pos_batch = None
         self._initialized_desired_steer_pos_batch = None
+
+        self._use_base_roll_velocity = self.config.use_base_roll_velocity
+        self._pending_mode_transition: bool | None = None
+        self._previous_joint_output = None
+        self._previous_base_output = None
         self._initialize_joints()
+
+    def _validate_config(self) -> None:
+        """Validate that all limits are finite and strictly positive."""
+        for name in (
+            "yaw_velocity_limit",
+            "wheel_velocity_limit",
+            "yaw_acceleration_limit",
+            "wheel_acceleration_limit",
+        ):
+            value = getattr(self.config, name)
+            if not math.isfinite(value) or value <= 0.0:
+                raise ValueError(f"{name} must be finite and positive, got {value}")
 
     def _initialize_joints(self) -> None:
         drive = self.wheel_drive_dofs_idx_local
@@ -345,6 +490,7 @@ class HSRBBaseController:
                 dofs_idx_local=passive,
             )
 
+        # The inner base controller exclusively owns base_roll_joint gains and limits.
         steer = [self.steer_dof_idx_local]
         self.entity.set_dofs_kp(
             kp=torch.tensor([self.config.kp_steer], device=gs.device, dtype=TORCH_FLOAT),
@@ -366,18 +512,22 @@ class HSRBBaseController:
             old_cmd = self._cmd_batch
             old_last = self._last_cmd_time_batch
             old_desired = self._desired_steer_pos_batch
+            old_prev_joint = self._previous_joint_output
+            old_prev_base = self._previous_base_output
             old_init = self._initialized_desired_steer_pos_batch
             old_n = 0 if old_cmd is None else int(old_cmd.shape[0])
-
             self._cmd_batch = torch.zeros((n_envs, 3), device=gs.device, dtype=TORCH_FLOAT)
             self._last_cmd_time_batch = torch.full((n_envs,), -float("inf"), device=gs.device, dtype=TORCH_FLOAT)
             self._desired_steer_pos_batch = torch.zeros((n_envs,), device=gs.device, dtype=TORCH_FLOAT)
+            self._previous_joint_output = torch.zeros((n_envs, 3), device=gs.device, dtype=TORCH_FLOAT)
+            self._previous_base_output = torch.zeros((n_envs, 3), device=gs.device, dtype=TORCH_FLOAT)
             self._initialized_desired_steer_pos_batch = torch.zeros((n_envs,), device=gs.device, dtype=torch.bool)
-
             if old_n:
                 self._cmd_batch[:old_n] = old_cmd
                 self._last_cmd_time_batch[:old_n] = old_last
                 self._desired_steer_pos_batch[:old_n] = old_desired
+                self._previous_joint_output[:old_n] = old_prev_joint
+                self._previous_base_output[:old_n] = old_prev_base
                 self._initialized_desired_steer_pos_batch[:old_n] = old_init
             if self.config.wheel_command_velocity_filter_a or self.config.wheel_command_velocity_filter_b:
                 self._wheel_filter_batch_r = IIRFilterBatch(
@@ -436,8 +586,198 @@ class HSRBBaseController:
         else:
             self.step_batch(float(dt), envs_idx=envs_idx)
 
+    # Acceleration-feasibility search (hsrb_base_controllers 3.0.0 port)
+    # ------------------------------------------------------------------
+
+    _TERNARY_ITERATIONS = 36
+
+    @staticmethod
+    def _ternary_search(
+        cost_fn,
+        n: int,
+        prefer_right: bool,
+    ) -> torch.Tensor:
+        """Batched ternary search over ratio in [0, 1].
+
+        ``prefer_right=True`` uses strict ``<`` (MinRight: prefer target side).
+        ``prefer_right=False`` uses ``<=`` (MinLeft: prefer braking side).
+        Returns ``(n,)`` tensor of optimal ratios.
+        """
+        low = torch.zeros(n, device=gs.device, dtype=TORCH_FLOAT)
+        high = torch.ones(n, device=gs.device, dtype=TORCH_FLOAT)
+        for _ in range(HSRBBaseController._TERNARY_ITERATIONS):
+            mid1 = (2.0 * low + high) / 3.0
+            mid2 = (low + 2.0 * high) / 3.0
+            cost1 = cost_fn(mid1)
+            cost2 = cost_fn(mid2)
+            if prefer_right:
+                move_high = cost1 < cost2
+            else:
+                move_high = cost1 <= cost2
+            high = torch.where(move_high, mid2, high)
+            low = torch.where(move_high, low, mid1)
+        return (low + high) / 2.0
+
+    @staticmethod
+    def _calc_velocity_min_max(
+        prev: torch.Tensor,
+        vel_limit: torch.Tensor,
+        acc_limit: torch.Tensor,
+        dt: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Per-joint feasible box: max(prev - acc*dt, -vel_limit), min(prev + acc*dt, vel_limit)."""
+        vel_max = torch.minimum(prev + acc_limit * dt, vel_limit)
+        vel_min = torch.maximum(prev - acc_limit * dt, -vel_limit)
+        return vel_min, vel_max
+
+    @staticmethod
+    def _joint_command_distance(
+        joint_vel: torch.Tensor,
+        q_min: torch.Tensor,
+        q_max: torch.Tensor,
+    ) -> torch.Tensor:
+        """Sum of out-of-box distances per environment.  ``(n,)`` tensor."""
+        below = torch.clamp(q_min - joint_vel, min=0.0)
+        above = torch.clamp(joint_vel - q_max, min=0.0)
+        return (below + above).sum(dim=1)
+
+    @staticmethod
+    def _is_joint_command_valid(
+        joint_vel: torch.Tensor,
+        q_min: torch.Tensor,
+        q_max: torch.Tensor,
+    ) -> torch.Tensor:
+        """Boolean mask: True where every joint is inside the feasible box."""
+        return ((joint_vel >= q_min) & (joint_vel <= q_max)).all(dim=1)
+
+    def _apply_acceleration_limits_batch(
+        self,
+        desired_joint: torch.Tensor,
+        steer_angles: torch.Tensor,
+        dt: float,
+        envs_idx_arr: torch.Tensor,
+    ) -> torch.Tensor:
+        """C++-ordered acceleration-feasibility search (5 paths).
+
+        Returns the final joint command ``(N, 3)`` [right, left, steer].
+        """
+        n = desired_joint.shape[0]
+        R = float(self.config.wheel_radius)
+        W = float(self.config.wheel_separation)
+        D = float(self.config.wheel_offset)
+
+        prev_joint = self._previous_joint_output[envs_idx_arr]  # (n, 3)
+        prev_base = self._previous_base_output[envs_idx_arr]    # (n, 3)
+
+        vel_limit = torch.tensor(
+            [self.config.wheel_velocity_limit, self.config.wheel_velocity_limit,
+             self.config.yaw_velocity_limit],
+            device=gs.device, dtype=TORCH_FLOAT,
+        ).unsqueeze(0)
+        acc_limit = torch.tensor(
+            [self.config.wheel_acceleration_limit, self.config.wheel_acceleration_limit,
+             self.config.yaw_acceleration_limit],
+            device=gs.device, dtype=TORCH_FLOAT,
+        ).unsqueeze(0)
+
+        q_min, q_max = self._calc_velocity_min_max(prev_joint, vel_limit, acc_limit, dt)
+
+        # Early exit: desired is already feasible.
+        feasible = self._is_joint_command_valid(desired_joint, q_min, q_max)
+        if bool(feasible.all().item()):
+            return desired_joint
+
+        # Convert desired joint vector to base velocity for base-space searches.
+        base_desired = _forward_kinematics_batch(desired_joint, steer_angles, R, W, D)
+
+        # Path 1: Approach desired base velocity (MinRight).
+        def interp_cost(ratio):
+            base_cand = base_desired * ratio.unsqueeze(1) + prev_base * (1.0 - ratio.unsqueeze(1))
+            joint_cand = _inverse_kinematics_batch(base_cand, steer_angles, R, W, D)
+            return self._joint_command_distance(joint_cand, q_min, q_max)
+
+        ratio1 = self._ternary_search(interp_cost, n, prefer_right=True)
+        dist1 = interp_cost(ratio1)
+        success1 = dist1 == 0.0
+        if bool(success1.all().item()):
+            base_cand = base_desired * ratio1.unsqueeze(1) + prev_base * (1.0 - ratio1.unsqueeze(1))
+            return _inverse_kinematics_batch(base_cand, steer_angles, R, W, D)
+
+        # Path 2: Brake previous base velocity (MinLeft).
+        def brake_base_cost(ratio):
+            base_cand = prev_base * ratio.unsqueeze(1)
+            joint_cand = _inverse_kinematics_batch(base_cand, steer_angles, R, W, D)
+            return self._joint_command_distance(joint_cand, q_min, q_max)
+
+        ratio2 = self._ternary_search(brake_base_cost, n, prefer_right=False)
+        dist2 = brake_base_cost(ratio2)
+        success2 = (dist2 == 0.0) & ~success1
+        if bool(success2.any().item()):
+            base_cand = prev_base * ratio2.unsqueeze(1)
+            joint_cand = _inverse_kinematics_batch(base_cand, steer_angles, R, W, D)
+            result = torch.where(success2.unsqueeze(1), joint_cand, desired_joint)
+            if bool(success2.all().item()):
+                return result
+        else:
+            result = desired_joint
+
+        # Path 3: Hold previous base velocity.
+        joint_hold = _inverse_kinematics_batch(prev_base, steer_angles, R, W, D)
+        valid3 = self._is_joint_command_valid(joint_hold, q_min, q_max) & ~success1 & ~success2
+        if bool(valid3.any().item()):
+            result = torch.where(valid3.unsqueeze(1), joint_hold, result)
+            if bool(valid3.all().item()):
+                return result
+
+        # Path 4: Brake previous joint velocity (MinLeft).
+        def brake_joint_cost(ratio):
+            joint_cand = prev_joint * ratio.unsqueeze(1)
+            return self._joint_command_distance(joint_cand, q_min, q_max)
+
+        ratio4 = self._ternary_search(brake_joint_cost, n, prefer_right=False)
+        dist4 = brake_joint_cost(ratio4)
+        success4 = (dist4 == 0.0) & ~success1 & ~success2 & ~valid3
+        if bool(success4.any().item()):
+            joint_cand = prev_joint * ratio4.unsqueeze(1)
+            result = torch.where(success4.unsqueeze(1), joint_cand, result)
+
+        # Path 5: Fallback — use speed-limited filtered desired command.
+        return result
+
+    # ------------------------------------------------------------------
+    # Steering actuation modes
+    # ------------------------------------------------------------------
+
+    def set_base_roll_velocity_mode(self, enabled: bool) -> None:
+        """Transition between velocity and position steering mode.
+
+        Applied at the next ``step_batch`` tick:
+        - velocity → position: reseed position accumulator from measured position.
+        - position → velocity: discard position accumulator and send velocity.
+        Preserves ``previous_joint_output`` and ``previous_base_output``.
+        """
+        self._pending_mode_transition = bool(enabled)
+
+    def _apply_pending_mode_transition(self, steer: torch.Tensor) -> None:
+        """Apply a pending mode transition at the start of step_batch."""
+        if self._pending_mode_transition is None:
+            return
+        new_mode = self._pending_mode_transition
+        self._pending_mode_transition = None
+        if new_mode == self._use_base_roll_velocity:
+            # Already in the requested mode, no transition needed.
+            return
+        self._use_base_roll_velocity = new_mode
+        if not new_mode:
+            # velocity → position: reseed from measured position.
+            self._desired_steer_pos_batch[: steer.shape[0]] = steer
+            self._initialized_desired_steer_pos_batch[: steer.shape[0]] = True
+        # position → velocity: nothing to do; velocity command is sent directly.
+
     def step_batch(self, dt: float, *, envs_idx: Sequence[int]) -> None:
         dt = float(dt)
+        if dt <= 0.0:
+            return
         self._time += dt
         envs_idx_arr = torch.as_tensor(envs_idx, device=gs.device, dtype=torch.int64).reshape(-1)
         if envs_idx_arr.numel() == 0:
@@ -447,7 +787,10 @@ class HSRBBaseController:
         assert self._last_cmd_time_batch is not None
         assert self._desired_steer_pos_batch is not None
         assert self._initialized_desired_steer_pos_batch is not None
+        assert self._previous_joint_output is not None
+        assert self._previous_base_output is not None
 
+        # Read measured steering angle for inverse kinematics.
         steer = to_torch(
             self.entity.get_dofs_position(
                 dofs_idx_local=[self.steer_dof_idx_local],
@@ -456,15 +799,27 @@ class HSRBBaseController:
         )
         steer = steer.to(device=gs.device, dtype=TORCH_FLOAT).reshape(-1)
 
-        init_mask = ~self._initialized_desired_steer_pos_batch[envs_idx_arr]
-        if bool(torch.any(init_mask).item()):
-            self._desired_steer_pos_batch[envs_idx_arr[init_mask]] = steer[init_mask]
-            self._initialized_desired_steer_pos_batch[envs_idx_arr[init_mask]] = True
+        # Apply pending mode transition before any actuation.
+        self._apply_pending_mode_transition(steer)
 
+        # Position-mode seeding: initialize desired steering position from
+        # measured position on the first position-mode command.
+        if not self._use_base_roll_velocity:
+            init_mask = ~self._initialized_desired_steer_pos_batch[envs_idx_arr]
+            if bool(torch.any(init_mask).item()):
+                self._desired_steer_pos_batch[envs_idx_arr[init_mask]] = steer[init_mask]
+                self._initialized_desired_steer_pos_batch[envs_idx_arr[init_mask]] = True
+
+        # Timeout: zero stale commands before inverse kinematics.
         active = (self._time - self._last_cmd_time_batch[envs_idx_arr]) <= self.config.command_timeout
         cmd = torch.zeros((envs_idx_arr.numel(), 3), device=gs.device, dtype=TORCH_FLOAT)
         cmd[active] = self._cmd_batch[envs_idx_arr[active]]
 
+        # Reject non-finite commands before actuator calls.
+        if not bool(torch.isfinite(cmd).all().item()):
+            cmd = torch.nan_to_num(cmd, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # Inverse kinematics with uniform speed scaling (Taichi kernel).
         out = torch.zeros((envs_idx_arr.numel(), 3), device=gs.device, dtype=TORCH_FLOAT)
         _vehicle_inverse_kernel(
             int(envs_idx_arr.numel()),
@@ -478,35 +833,61 @@ class HSRBBaseController:
             out,
         )
 
+        # Optional IIR command filters (after speed limiting, before accel).
         if self._wheel_filter_batch_r is not None:
             out[:, 0] = self._wheel_filter_batch_r.update_batch(out[:, 0])
             out[:, 1] = self._wheel_filter_batch_l.update_batch(out[:, 1])
         if self._steer_filter_batch is not None:
             out[:, 2] = self._steer_filter_batch.update_batch(out[:, 2])
 
+        # Acceleration-feasibility search (C++ 5-path ternary search).
+        out = self._apply_acceleration_limits_batch(out, steer, dt, envs_idx_arr)
+
+        # Drive-wheel velocity commands.
         self.entity.control_dofs_velocity(
             out[:, :2],
             dofs_idx_local=self.wheel_drive_dofs_idx_local,
             envs_idx=envs_idx_arr,
         )
 
-        self._desired_steer_pos_batch[envs_idx_arr] += out[:, 2] * dt
-        self.entity.control_dofs_position(
-            self._desired_steer_pos_batch[envs_idx_arr].reshape(-1, 1),
-            dofs_idx_local=[self.steer_dof_idx_local],
-            envs_idx=envs_idx_arr,
+        # Steering actuation: velocity mode (default) or position mode.
+        if self._use_base_roll_velocity:
+            self.entity.control_dofs_velocity(
+                out[:, 2:3],
+                dofs_idx_local=[self.steer_dof_idx_local],
+                envs_idx=envs_idx_arr,
+            )
+        else:
+            self._desired_steer_pos_batch[envs_idx_arr] += out[:, 2] * dt
+            self.entity.control_dofs_position(
+                self._desired_steer_pos_batch[envs_idx_arr].reshape(-1, 1),
+                dofs_idx_local=[self.steer_dof_idx_local],
+                envs_idx=envs_idx_arr,
+            )
+
+        # Store previous joint and base output for next tick's acceleration search.
+        self._previous_joint_output[envs_idx_arr] = out
+        R = float(self.config.wheel_radius)
+        W = float(self.config.wheel_separation)
+        D = float(self.config.wheel_offset)
+        self._previous_base_output[envs_idx_arr] = _forward_kinematics_batch(
+            out, steer, R, W, D,
         )
 
 
 
 @dataclass(frozen=True)
 class Trajectory:
-    """Base trajectory waypoints in the world/odom frame.
+    """Base trajectory waypoints — world-frame data only; no controller tuning.
 
-    All fields use world-frame (odom) coordinates:
+    All fields use world/odom-frame coordinates:
       positions[:, 0]  – world X [m]
       positions[:, 1]  – world Y [m]
       positions[:, 2]  – world yaw [rad]
+
+    This dataclass carries trajectory geometry only.  Outer-loop feedback and
+    damping gains are owned by ``OmniBaseTrajectoryControl.TUNING`` and cannot
+    be supplied or overridden through a trajectory request.
 
     Frame contract for optional velocities
     ----------------------------------------
@@ -516,13 +897,17 @@ class Trajectory:
     Rationale: ``OmniBaseTrajectoryControl`` keeps the internal ``_point_before``
     state in world frame (seeded from ``get_vel`` / ``get_ang`` which are world-
     frame Genesis outputs). The interpolated feed-forward velocity is therefore
-    also world-frame. ``get_output_velocity`` rotates the combined feed-forward +
-    P-error term into body frame as its final step, so callers never need to
-    supply body-frame velocities here.
+    also world-frame. ``get_output_velocity_batch`` rotates the combined
+    feed-forward + P-error term into body frame as its final step, so callers
+    never need to supply body-frame velocities here.
 
     If ``velocities`` is None the controller falls back to finite-difference
     (``(p[i+1] - p[i]) / dt``), which is automatically world-frame because the
     positions are world-frame.
+
+    ``accelerations`` are validated and interpolated into ``DesiredState`` for
+    API compatibility, but the current velocity-output controller does not use
+    them.
     """
 
     positions: torch.Tensor  # (T, 3) – world frame [x, y, yaw]
@@ -546,6 +931,13 @@ class DesiredState:
     accelerations: torch.Tensor  # (3,) world frame
 
 
+@dataclass(frozen=True)
+class _TrajectoryControlTuning:
+    feedback_gain: tuple[float, float, float]
+    yaw_derivative_gain: float
+    xy_derivative_gain: float
+
+
 class OmniBaseTrajectoryControl:
     """Trajectory following controller for the HSR omnidirectional base.
 
@@ -560,45 +952,64 @@ class OmniBaseTrajectoryControl:
     Trajectory waypoint velocities (``Trajectory.velocities``) must also be
     world-frame for interpolation to be consistent — see ``Trajectory`` docstring.
 
-    ``get_output_velocity`` converts the combined world-frame output velocity into
-    the robot body frame (via R(−yaw)) before returning it to the base joint
-    controller.  Callers must not pre-rotate velocities into body frame.
+    ``get_output_velocity_batch`` converts the combined world-frame output
+    velocity into the robot body frame (via R(−yaw)) before returning it to the
+    base joint controller.  Callers must not pre-rotate velocities into body
+    frame.
 
-    Derivative damping
-    ------------------
-    ``yaw_derivative_gain`` adds a D-term on the yaw channel:
-        output_yaw_rate -= kd * current_ω_z
-    This damps overshoot from the P term without requiring explicit velocity
-    trajectory waypoints.  ``xy_derivative_gain`` does the same for the linear
-    axes.  Both default to 0 (pure P+FF behaviour).
+    Tuning
+    ------
+    Outer-loop gains are controller-owned and immutable (``TUNING``); they
+    cannot be supplied or overridden by a trajectory request.  The scalar
+    ``get_output_velocity`` delegates to the shared batched calculation
+    ``get_output_velocity_batch`` so both production paths use identical math.
+
+    Validation and time boundaries
+    ------------------------------
+    ``validate_trajectory`` rejects non-finite positions, timestamps,
+    velocities, and accelerations, and rejects a negative first timestamp.
+    Strict timestamp increase and existing shape/name validation are preserved.
+
+    Before a delayed start (``t < 0``) the pose captured at acceptance is held
+    with zero feed-forward velocity.  A zero-time first waypoint is reached
+    immediately at ``t == 0``.  At and after the final timestamp the final
+    position is held with **zero** feed-forward velocity — explicit final
+    velocity is ignored.
+
+    Lifecycle
+    ---------
+    An accepted trajectory remains active until ``reset_current_trajectory``
+    or replacement via ``accept_trajectory``.  Sampling past the horizon does
+    not release it; the controller keeps issuing feedback-only commands toward
+    the final pose.
     """
+
+    TUNING = _TrajectoryControlTuning(
+        feedback_gain=(1.0, 1.0, 1.5),
+        yaw_derivative_gain=0.3,
+        xy_derivative_gain=0.1,
+    )
 
     def __init__(
         self,
         coordinate_names: Sequence[str] = ("odom_x", "odom_y", "odom_t"),
-        feedback_gain: torch.Tensor | None = None,
-        yaw_derivative_gain: float = 0.0,
-        xy_derivative_gain: float = 0.0,
-        stop_velocity_threshold: float = 0.001,
-        stop_time_margin: float = 0.2,
     ) -> None:
         self.coordinate_names = list(coordinate_names)
         if len(self.coordinate_names) != 3:
             raise ValueError("coordinate_names must have length 3")
 
-        self.stop_velocity_threshold = float(stop_velocity_threshold)
-        self.stop_time_margin = float(stop_time_margin)
-        self.yaw_derivative_gain = float(yaw_derivative_gain)
-        self.xy_derivative_gain = float(xy_derivative_gain)
-
-        if feedback_gain is None:
-            feedback_gain = torch.tensor([1.0, 1.0, 1.0], device=gs.device, dtype=TORCH_FLOAT)
-        self.feedback_gain = to_torch(feedback_gain).to(device=gs.device, dtype=TORCH_FLOAT).reshape(3)
+        self._feedback_gain = torch.tensor(
+            self.TUNING.feedback_gain,
+            device=gs.device,
+            dtype=TORCH_FLOAT,
+        )
 
         self._trajectory: Trajectory | None = None
         self._trajectory_start_time: float | None = None
         self._sampled_already = False
         self._point_before: DesiredState | None = None
+
+        self._accepted_start_position: torch.Tensor | None = None
 
     @staticmethod
     def _wrap_to_pi(angle: torch.Tensor | float) -> torch.Tensor | float:
@@ -639,7 +1050,15 @@ class OmniBaseTrajectoryControl:
             if accelerations.shape != positions.shape:
                 return False
 
+        if not torch.isfinite(positions).all() or not torch.isfinite(time_from_start).all():
+            return False
+        if traj.velocities is not None and not torch.isfinite(velocities).all():
+            return False
+        if traj.accelerations is not None and not torch.isfinite(accelerations).all():
+            return False
         if time_from_start.numel() == 0:
+            return False
+        if float(time_from_start[0].item()) < 0.0:
             return False
         if not torch.all(time_from_start[1:] > time_from_start[:-1]):
             return False
@@ -682,6 +1101,7 @@ class OmniBaseTrajectoryControl:
                 accelerations = accelerations[:, perm]
 
         base_positions = to_torch(base_positions).to(device=gs.device, dtype=TORCH_FLOAT).reshape(3)
+        self._accepted_start_position = base_positions.clone()
         prev = float(base_positions[2].item())
         yaws = positions[:, 2].clone()
         for i in range(yaws.shape[0]):
@@ -707,6 +1127,7 @@ class OmniBaseTrajectoryControl:
         self._trajectory_start_time = None
         self._sampled_already = False
         self._point_before = None
+        self._accepted_start_position = None
 
     def update_active_trajectory(self) -> bool:
         return self._trajectory is not None and self._trajectory.positions.numel() > 0
@@ -722,11 +1143,37 @@ class OmniBaseTrajectoryControl:
         current_positions: torch.Tensor,
         current_velocities: torch.Tensor,
     ) -> tuple[bool, DesiredState | None, bool, float]:
+        """Sample the desired state at *time* for the accepted trajectory.
+
+        Time boundary contract
+        ----------------------
+        * Before the trajectory's time zero (``t < 0``), the pose captured at
+          acceptance is held with zero feed-forward velocity.
+        * A first waypoint at ``time_from_start[0] == 0`` is reached
+          immediately at ``t == 0``.
+        * At and after the final timestamp the final position is held with
+          **zero** feed-forward velocity (explicit final-velocity is ignored).
+
+        The controller retains an accepted trajectory until ``reset_current_trajectory``
+        or replacement via ``accept_trajectory``; sampling past the horizon does
+        not release it.
+        """
         if self._trajectory is None:
             return False, None, False, 0.0
 
         start_time = self._ensure_start_time(time)
         t = float(time - start_time)
+
+        # Pre-start hold: before time zero, hold the pose captured at
+        # acceptance with zero feed-forward velocity and acceleration.
+        if t < 0.0:
+            hold_pos = self._accepted_start_position
+            desired = DesiredState(
+                positions=hold_pos.clone(),
+                velocities=torch.zeros_like(hold_pos),
+                accelerations=torch.zeros_like(hold_pos),
+            )
+            return True, desired, True, t
 
         cur_pos = to_torch(current_positions).to(device=gs.device, dtype=TORCH_FLOAT).reshape(3)
         cur_vel = to_torch(current_velocities).to(device=gs.device, dtype=TORCH_FLOAT).reshape(3)
@@ -752,6 +1199,40 @@ class OmniBaseTrajectoryControl:
             )
             self._sampled_already = True
 
+        # Zero-time first waypoint: reached immediately at t == 0.  For a
+        # single waypoint the desired velocity is zero; for multiple waypoints
+        # use velocities[0] when present, otherwise the finite-difference to
+        # the next waypoint.
+        if float(times[0].item()) == 0.0 and t == 0.0:
+            p1 = positions[0]
+            if positions.shape[0] == 1:
+                vel = torch.zeros_like(p1)
+            elif velocities is not None:
+                vel = velocities[0].clone()
+            else:
+                vel = (positions[1] - positions[0]) / (
+                    float(times[1].item()) - float(times[0].item())
+                )
+            acc = accelerations[0].clone() if accelerations is not None else torch.zeros_like(p1)
+            desired = DesiredState(
+                positions=p1.clone(),
+                velocities=vel,
+                accelerations=acc,
+            )
+            return True, desired, True, 0.0
+
+        if t >= float(times[-1].item()):
+            # Post-horizon hold: final position with zero feed-forward
+            # velocity.  Explicit final-velocity is intentionally ignored;
+            # acceleration retains its existing field behavior.
+            p1 = positions[-1]
+            a1 = accelerations[-1] if accelerations is not None else None
+            desired = DesiredState(
+                positions=p1.clone(),
+                velocities=torch.zeros_like(p1),
+                accelerations=a1.clone() if a1 is not None else torch.zeros_like(p1),
+            )
+            return True, desired, False, t - float(times[-1].item())
         if t <= float(times[0].item()):
             t0 = 0.0
             t1 = float(times[0].item())
@@ -762,16 +1243,6 @@ class OmniBaseTrajectoryControl:
             a0 = self._point_before.accelerations
             a1 = accelerations[0] if accelerations is not None else None
             before_last = True
-        elif t >= float(times[-1].item()):
-            p1 = positions[-1]
-            v1 = velocities[-1] if velocities is not None else None
-            a1 = accelerations[-1] if accelerations is not None else None
-            desired = DesiredState(
-                positions=p1.clone(),
-                velocities=v1.clone() if v1 is not None else torch.zeros_like(p1),
-                accelerations=a1.clone() if a1 is not None else torch.zeros_like(p1),
-            )
-            return True, desired, False, t - float(times[-1].item())
         else:
             idx = int(torch.searchsorted(times, torch.tensor(t, device=times.device)).item())
             t0 = float(times[idx - 1].item())
@@ -802,6 +1273,48 @@ class OmniBaseTrajectoryControl:
         time_from_point = t - t0
         return True, desired, before_last, time_from_point
 
+    def get_output_velocity_batch(
+        self,
+        actual_positions: torch.Tensor,
+        desired_positions: torch.Tensor,
+        desired_velocities: torch.Tensor,
+        *,
+        dt: float,
+        current_velocities: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute body-frame velocity commands for a batch of robots.
+
+        All inputs are world/odom frame ``[x, y, yaw]`` / ``[ẋ, ẏ, ω_z]``.
+        Returns ``(N, 3)`` body-frame velocities ``[forward, left, yaw_rate]``.
+
+        This is the single source of truth for the outer-loop calculation; the
+        scalar ``get_output_velocity`` delegates here with a one-row tensor.
+        """
+        actual = to_torch(actual_positions).to(device=gs.device, dtype=TORCH_FLOAT).reshape(-1, 3)
+        desired_pos = to_torch(desired_positions).to(device=gs.device, dtype=TORCH_FLOAT).reshape(-1, 3)
+        desired_vel = to_torch(desired_velocities).to(device=gs.device, dtype=TORCH_FLOAT).reshape(-1, 3)
+        current_vel = to_torch(current_velocities).to(device=gs.device, dtype=TORCH_FLOAT).reshape(-1, 3)
+
+        error = desired_pos - actual
+        error = error.clone()
+        error[:, 2] = self._wrap_to_pi(error[:, 2])
+        output_world = desired_vel + self._feedback_gain.unsqueeze(0) * error
+        output_world = output_world.clone()
+        output_world[:, :2] -= self.TUNING.xy_derivative_gain * current_vel[:, :2]
+        output_world[:, 2] -= self.TUNING.yaw_derivative_gain * current_vel[:, 2]
+
+        yaw_mid = actual[:, 2] + 0.5 * current_vel[:, 2] * float(dt)
+        c = torch.cos(yaw_mid)
+        s = torch.sin(yaw_mid)
+        return torch.stack(
+            (
+                c * output_world[:, 0] + s * output_world[:, 1],
+                -s * output_world[:, 0] + c * output_world[:, 1],
+                output_world[:, 2],
+            ),
+            dim=1,
+        )
+
     def get_output_velocity(
         self,
         actual_positions: torch.Tensor,
@@ -816,77 +1329,22 @@ class OmniBaseTrajectoryControl:
           desired_state     – world-frame (see DesiredState docstring)
           current_velocities – [ẋ_world, ẏ_world, ω_z_world]  (optional, for RK2)
 
-        Steps
-        -----
-        1. Compute world-frame positional error (yaw component wrapped to [-π, π]).
-        2. Build world-frame output velocity = ff_velocity + gain * error.
-        3. RK2 midpoint: advance yaw by half a step using current ω_z so the
-           rotation is evaluated at the midpoint heading rather than the current
-           heading, reducing discretisation error during turning.
-        4. Rotate the world-frame output into body frame via R(−yaw):
-               [[cos, sin, 0], [−sin, cos, 0], [0, 0, 1]]
-           The yaw channel (index 2) passes through unchanged because world ω_z
-           equals body ω_z for planar motion.
+        Delegates to ``get_output_velocity_batch`` with a one-row tensor so the
+        scalar and vector production paths share one calculation.
 
         Returns body-frame velocity [dot_x_body, dot_y_body, dot_r].
         """
-        actual_positions = to_torch(actual_positions).to(device=gs.device, dtype=TORCH_FLOAT).reshape(3)
+        actual = to_torch(actual_positions).to(device=gs.device, dtype=TORCH_FLOAT).reshape(3)
+        if current_velocities is None:
+            current_velocities = torch.zeros_like(actual)
+        return self.get_output_velocity_batch(
+            actual.unsqueeze(0),
+            desired_state.positions.unsqueeze(0),
+            desired_state.velocities.unsqueeze(0),
+            dt=dt,
+            current_velocities=current_velocities.unsqueeze(0),
+        )[0]
 
-        # Step 1 – world-frame position error
-        error_pos = desired_state.positions - actual_positions
-        error_pos = error_pos.clone()
-        error_pos[2] = self._wrap_to_pi(error_pos[2])
-
-        # Step 2 – world-frame output velocity (feed-forward + proportional)
-        output_velocity = desired_state.velocities + self.feedback_gain * error_pos
-
-        # Step 3 – RK2 midpoint yaw for the world→body rotation
-        # current_velocities[2] is world-frame ω_z (== body yaw rate for planar)
-        yaw = actual_positions[2]
-        if current_velocities is not None:
-            current_velocities = to_torch(current_velocities).to(device=gs.device, dtype=TORCH_FLOAT).reshape(3)
-            diff_r = current_velocities[2] * dt
-            yaw = yaw + 0.5 * diff_r
-
-            # Derivative damping: subtract kd * current_rate to damp overshoot.
-            # Applied in world frame before the rotation; for planar motion ω_z is
-            # the same in world and body frame so the direction is unambiguous.
-            if self.yaw_derivative_gain != 0.0:
-                output_velocity = output_velocity.clone()
-                output_velocity[2] = output_velocity[2] - self.yaw_derivative_gain * current_velocities[2]
-            if self.xy_derivative_gain != 0.0:
-                output_velocity = output_velocity.clone()
-                output_velocity[0] = output_velocity[0] - self.xy_derivative_gain * current_velocities[0]
-                output_velocity[1] = output_velocity[1] - self.xy_derivative_gain * current_velocities[1]
-
-        # Step 4 – rotate world → body:  R(−yaw) = [[c, s, 0], [−s, c, 0], [0, 0, 1]]
-        c = torch.cos(yaw)
-        s = torch.sin(yaw)
-        rot = torch.stack(
-            [
-                torch.stack([c, s, torch.zeros_like(c)], dim=0),
-                torch.stack([-s, c, torch.zeros_like(c)], dim=0),
-                torch.tensor([0.0, 0.0, 1.0], device=gs.device, dtype=TORCH_FLOAT),
-            ],
-            dim=0,
-        )
-        return rot @ output_velocity
-
-    def terminate_control_if_stopped(self, time: float, current_velocities: torch.Tensor) -> bool:
-        if self._trajectory is None or self._trajectory_start_time is None:
-            return False
-
-        times = self._trajectory.time_from_start
-        last_time = float(times[-1].item())
-        if time - self._trajectory_start_time <= last_time + self.stop_time_margin:
-            return False
-
-        cur_vel = to_torch(current_velocities).to(device=gs.device, dtype=TORCH_FLOAT).reshape(3)
-        if torch.linalg.norm(cur_vel) >= self.stop_velocity_threshold:
-            return False
-
-        self.reset_current_trajectory()
-        return True
 
     def step(
         self,

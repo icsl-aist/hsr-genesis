@@ -37,6 +37,7 @@ if not getattr(gs, "_initialized", False):
     gs.init(backend=gs.cpu, precision="32", logging_level="warning")
 
 from hsr_genesis.base_controller import (  # noqa: E402
+    DesiredState,
     OmniBaseTrajectoryControl,
     Trajectory,
     TORCH_FLOAT,
@@ -59,7 +60,7 @@ def _wrap(a: float) -> float:
     return (a + math.pi) % (2 * math.pi) - math.pi
 
 
-def _make_scene(dt: float = 0.02) -> tuple[gs.Scene, HSRBURDF]:
+def _make_scene(dt: float = 0.02, n_envs: int = 0) -> tuple[gs.Scene, HSRBURDF]:
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=dt, substeps=4),
         show_viewer=False,
@@ -78,7 +79,10 @@ def _make_scene(dt: float = 0.02) -> tuple[gs.Scene, HSRBURDF]:
             pos=(0.0, 0.0, 0.05),
         )
     )
-    scene.build()
+    if n_envs > 0:
+        scene.build(n_envs=n_envs)
+    else:
+        scene.build()
     return scene, robot
 
 
@@ -119,9 +123,7 @@ class TestPointBeforeVelocityFrame:
     """
 
     def _make_ctrl(self) -> OmniBaseTrajectoryControl:
-        return OmniBaseTrajectoryControl(
-            feedback_gain=torch.tensor([0.0, 0.0, 0.0], dtype=TORCH_FLOAT, device=gs.device)
-        )
+        return OmniBaseTrajectoryControl()
 
     def test_no_explicit_velocities_uses_finite_difference(self) -> None:
         ctrl = self._make_ctrl()
@@ -209,6 +211,217 @@ class TestPointBeforeVelocityFrame:
             "FAIL: velocity is not world-frame consistent with trajectory positions"
         )
 
+
+
+# ── unit test: scalar/batch outer-loop parity ──────────────────────────────────
+
+def test_scalar_and_batched_outer_control_outputs_match() -> None:
+    ctrl = OmniBaseTrajectoryControl()
+    actual = torch.tensor([0.4, -0.2, 0.7], device=gs.device, dtype=TORCH_FLOAT)
+    current_velocity = torch.tensor([0.3, -0.1, 0.25], device=gs.device, dtype=TORCH_FLOAT)
+    desired = DesiredState(
+        positions=torch.tensor([0.8, 0.1, 1.0], device=gs.device, dtype=TORCH_FLOAT),
+        velocities=torch.tensor([0.2, 0.05, 0.1], device=gs.device, dtype=TORCH_FLOAT),
+        accelerations=torch.zeros(3, device=gs.device, dtype=TORCH_FLOAT),
+    )
+
+    scalar = ctrl.get_output_velocity(
+        actual,
+        desired,
+        dt=0.02,
+        current_velocities=current_velocity,
+    )
+    batched = ctrl.get_output_velocity_batch(
+        actual.unsqueeze(0),
+        desired.positions.unsqueeze(0),
+        desired.velocities.unsqueeze(0),
+        dt=0.02,
+        current_velocities=current_velocity.unsqueeze(0),
+    )[0]
+
+    assert torch.allclose(scalar, batched, atol=1.0e-6)
+
+# ── unit tests: trajectory validation and time boundaries ─────────────────────
+
+def _trajectory(
+    positions: list[list[float]],
+    times: list[float],
+    *,
+    velocities: list[list[float]] | None = None,
+    accelerations: list[list[float]] | None = None,
+) -> Trajectory:
+    return Trajectory(
+        positions=torch.tensor(positions, device=gs.device, dtype=TORCH_FLOAT),
+        time_from_start=torch.tensor(times, device=gs.device, dtype=TORCH_FLOAT),
+        velocities=None if velocities is None else torch.tensor(velocities, device=gs.device, dtype=TORCH_FLOAT),
+        accelerations=None if accelerations is None else torch.tensor(accelerations, device=gs.device, dtype=TORCH_FLOAT),
+    )
+
+
+def test_trajectory_rejects_nonfinite_and_negative_time() -> None:
+    ctrl = OmniBaseTrajectoryControl()
+    start = torch.zeros(3, device=gs.device, dtype=TORCH_FLOAT)
+    invalid = (
+        _trajectory([[float("nan"), 0.0, 0.0]], [1.0]),
+        _trajectory([[0.0, 0.0, 0.0]], [float("inf")]),
+        _trajectory([[0.0, 0.0, 0.0]], [1.0], velocities=[[0.0, float("nan"), 0.0]]),
+        _trajectory([[0.0, 0.0, 0.0]], [1.0], accelerations=[[0.0, 0.0, float("inf")]]),
+        _trajectory([[0.0, 0.0, 0.0]], [-0.01]),
+    )
+    for trajectory in invalid:
+        with pytest.raises(ValueError, match="invalid trajectory"):
+            ctrl.accept_trajectory(trajectory, start)
+
+
+def test_delayed_trajectory_holds_acceptance_pose_before_start() -> None:
+    ctrl = OmniBaseTrajectoryControl()
+    start = torch.tensor([0.2, -0.1, 0.3], device=gs.device, dtype=TORCH_FLOAT)
+    ctrl.accept_trajectory(_trajectory([[1.0, 0.5, 0.8]], [2.0]), start, start_time=5.0)
+    ok, desired, _, _ = ctrl.sample_desired_state(4.5, start + 0.1, torch.ones_like(start))
+    assert ok and desired is not None
+    assert torch.allclose(desired.positions, start)
+    assert torch.equal(desired.velocities, torch.zeros_like(start))
+
+
+def test_zero_time_waypoint_is_immediate_hold_target() -> None:
+    ctrl = OmniBaseTrajectoryControl()
+    start = torch.tensor([0.2, -0.1, 0.3], device=gs.device, dtype=TORCH_FLOAT)
+    target = torch.tensor([0.7, 0.4, -0.2], device=gs.device, dtype=TORCH_FLOAT)
+    ctrl.accept_trajectory(_trajectory([target.tolist()], [0.0]), start, start_time=1.0)
+    ok, desired, _, _ = ctrl.sample_desired_state(1.0, start, torch.ones_like(start))
+    assert ok and desired is not None
+    assert torch.allclose(desired.positions, target)
+    assert torch.equal(desired.velocities, torch.zeros_like(target))
+
+
+def test_final_waypoint_velocity_becomes_zero_during_hold() -> None:
+    ctrl = OmniBaseTrajectoryControl()
+    start = torch.zeros(3, device=gs.device, dtype=TORCH_FLOAT)
+    ctrl.accept_trajectory(
+        _trajectory([[1.0, 0.0, 0.0]], [2.0], velocities=[[0.4, 0.0, 0.0]]),
+        start,
+        start_time=0.0,
+    )
+    _, during, _, _ = ctrl.sample_desired_state(1.0, start, torch.zeros_like(start))
+    _, final, _, _ = ctrl.sample_desired_state(2.0, start, torch.zeros_like(start))
+    _, after, _, _ = ctrl.sample_desired_state(3.0, start, torch.zeros_like(start))
+    assert during is not None and 0.0 < float(during.velocities[0]) < 0.4
+    assert final is not None and torch.equal(final.velocities, torch.zeros_like(start))
+    assert after is not None and torch.equal(after.velocities, torch.zeros_like(start))
+    assert ctrl.update_active_trajectory()
+
+# ── vector trajectory semantics regressions ───────────────────────────────────
+
+
+class TestVectorTrajectorySemantics:
+    """Regression coverage for the guarded vector fast path and unified hold.
+
+    These tests exercise ``step_base_trajectory_batched`` as a consumer would,
+    asserting on the returned ``active`` and ``command`` values.
+    """
+
+    def test_shortest_path_yaw_command_is_positive(self) -> None:
+        scene, robot = _make_scene()
+        yaw = math.radians(179.0)
+        robot.set_quat(
+            torch.tensor([math.cos(yaw / 2.0), 0.0, 0.0, math.sin(yaw / 2.0)], device=gs.device, dtype=gs.tc_float),
+            zero_velocity=True,
+        )
+        trajectory = _trajectory([[0.0, 0.0, math.radians(-179.0)]], [1.0])
+        robot.set_base_trajectory_batched(trajectory, envs_idx=[0], start_time=0.0)
+        result = robot.step_base_trajectory_batched(0.02, envs_idx=[0])
+        assert bool(result["active"][0])
+        assert 0.0 < float(result["command"][0, 2]) < math.radians(10.0)
+
+    def test_named_coordinate_permutation_preserves_command(self) -> None:
+        scene, robot = _make_scene(n_envs=2)
+        ordered = Trajectory(
+            positions=torch.tensor([[0.3, -0.2, 0.4]], device=gs.device, dtype=TORCH_FLOAT),
+            time_from_start=torch.tensor([1.0], device=gs.device, dtype=TORCH_FLOAT),
+            velocities=torch.tensor([[0.2, 0.1, 0.0]], device=gs.device, dtype=TORCH_FLOAT),
+            joint_names=("odom_x", "odom_y", "odom_t"),
+        )
+        permuted = Trajectory(
+            positions=torch.tensor([[0.4, 0.3, -0.2]], device=gs.device, dtype=TORCH_FLOAT),
+            time_from_start=torch.tensor([1.0], device=gs.device, dtype=TORCH_FLOAT),
+            velocities=torch.tensor([[0.0, 0.2, 0.1]], device=gs.device, dtype=TORCH_FLOAT),
+            joint_names=("odom_t", "odom_x", "odom_y"),
+        )
+        robot.set_base_trajectory_batched([ordered, permuted], envs_idx=[0, 1], start_time=0.0)
+        result = robot.step_base_trajectory_batched(0.1, envs_idx=[0, 1])
+        assert result["active"].tolist() == [True, True]
+        assert torch.allclose(result["command"][0], result["command"][1], atol=1.0e-5)
+
+    def test_mixed_batch_preserves_explicit_velocity(self) -> None:
+        scene, robot = _make_scene(n_envs=2)
+        position_only = _trajectory([[0.3, -0.2, 0.4]], [1.0])
+        explicit_stop = _trajectory(
+            [[0.3, -0.2, 0.4]],
+            [1.0],
+            velocities=[[0.0, 0.0, 0.0]],
+        )
+        robot.set_base_trajectory_batched(
+            [position_only, explicit_stop],
+            envs_idx=[0, 1],
+            start_time=0.0,
+        )
+        result = robot.step_base_trajectory_batched(0.1, envs_idx=[0, 1])
+        oracle = OmniBaseTrajectoryControl()
+        zero = torch.zeros(3, device=gs.device, dtype=TORCH_FLOAT)
+        oracle.accept_trajectory(explicit_stop, zero, start_time=0.0)
+        ok, desired, _, _ = oracle.sample_desired_state(0.1, zero, zero)
+        assert ok and desired is not None
+        expected = oracle.get_output_velocity(
+            zero,
+            desired,
+            dt=0.1,
+            current_velocities=zero,
+        )
+        assert result["active"].tolist() == [True, True]
+        assert torch.isfinite(result["command"]).all()
+        assert not torch.allclose(result["command"][0], result["command"][1])
+        assert torch.allclose(result["command"][1], expected, atol=1.0e-5)
+
+    def test_canonical_hold_remains_active_until_reset(self) -> None:
+        scene, robot = _make_scene()
+        hold = _trajectory(
+            [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+            [0.05, 0.1],
+            velocities=[[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+        )
+        robot.set_base_trajectory_batched(hold, envs_idx=[0], start_time=0.0)
+        robot.step_base_trajectory_batched(0.4, envs_idx=[0])
+        held = robot.step_base_trajectory_batched(0.02, envs_idx=[0])
+        assert bool(held["active"][0])
+        robot.reset_base_trajectory_batched(envs_idx=[0])
+        released = robot.step_base_trajectory_batched(0.02, envs_idx=[0])
+        assert not bool(released["active"][0])
+
+    def test_vector_delayed_start_and_zero_duration_have_no_feedforward(self) -> None:
+        scene, robot = _make_scene()
+        delayed = _trajectory([[0.2, 0.0, 0.0]], [1.0])
+        robot.set_base_trajectory_batched(delayed, envs_idx=[0], start_time=1.0)
+        before = robot.step_base_trajectory_batched(0.1, envs_idx=[0])
+        assert torch.allclose(before["command"], torch.zeros_like(before["command"]), atol=1.0e-6)
+
+        immediate = _trajectory([[0.2, 0.0, 0.0]], [0.0])
+        robot.set_base_trajectory_batched(immediate, envs_idx=[0], start_time=0.1)
+        at_start = robot.step_base_trajectory_batched(0.0, envs_idx=[0])
+        assert 0.0 < float(at_start["command"][0, 0]) < 0.5
+
+    def test_homogeneous_batch_executes_vectorized(self) -> None:
+        scene, robot = _make_scene(n_envs=4)
+        traj = _trajectory([[0.3, 0.1, 0.2]], [1.0])
+        robot.set_base_trajectory_batched([traj] * 4, envs_idx=[0, 1, 2, 3], start_time=0.0)
+
+        def _raise_canonical(*_a, **_k):
+            raise AssertionError("canonical sampler used")
+
+        for i in range(4):
+            robot._hsr_base_traj_ctrls[i].sample_desired_state = _raise_canonical  # type: ignore[method-assign]
+        result = robot.step_base_trajectory_batched(0.1, envs_idx=[0, 1, 2, 3])
+        assert result["active"].tolist() == [True, True, True, True]
+        assert torch.isfinite(result["command"]).all()
 
 # ── physics-based diagnostic tests ─────────────────────────────────────────────
 

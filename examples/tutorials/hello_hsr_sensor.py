@@ -15,9 +15,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 parser = argparse.ArgumentParser()
 parser.add_argument("--steps", type=int, default=0)
 parser.add_argument("--depth-res", type=str, default="160x120")
+parser.add_argument(
+    "--record-video", action="store_true",
+    help="Record offscreen camera video (mp4 + gif) to examples/tutorials/videos/",
+)
+parser.add_argument(
+    "--video-dir", type=str, default="examples/tutorials/videos",
+    help="Output directory for recorded videos",
+)
 args = parser.parse_args()
 
-IS_DEBUG = True
+IS_DEBUG = True and not args.record_video
 n_envs = 1
 
 
@@ -115,7 +123,7 @@ scene = gs.Scene(
     rigid_options=gs.options.RigidOptions(
         use_gjk_collision=True,
     ),
-    show_viewer=IS_DEBUG,
+    show_viewer=IS_DEBUG and not args.record_video,
 )
 
 scene.add_entity(
@@ -178,16 +186,17 @@ rng = torch.Generator(device=gs.device)
 
 sensors: dict[str, object] = {}
 if n_envs == 1:
+    _enable_sensors = IS_DEBUG or args.record_video
     sensors = URDFSensorManager(scene=scene, entity=hsr).create_from_urdf(
         URDF_PATH,
         create_lidar=True,
-        create_cameras=IS_DEBUG,
-        create_depth_cameras=IS_DEBUG,
+        create_cameras=_enable_sensors,
+        create_depth_cameras=_enable_sensors,
         create_imu=True,
         create_force_torque=True,
         camera_backend="rasterizer",
         depth_res_override=depth_res_override,
-        draw_debug=IS_DEBUG,
+        draw_debug=_enable_sensors,
     )
 
     for name, sensor in sensors.items():
@@ -216,6 +225,14 @@ if n_envs == 1:
     surface=gs.surfaces.Default(color=(1.0, 0.0, 0.0)),
 )
 
+rec = None
+if args.record_video:
+    from hsr_genesis.tutorial_utils import VideoRecorder
+
+    rec = VideoRecorder(
+        scene, res=(320, 240), pos=(3, -1, 1.5),
+        lookat=(0.0, 0.0, 0.5), fov=30, fps=50,
+    )
 scene.build(n_envs=n_envs, env_spacing=(3.0, 3.0))
 
 envs_idx_all_torch = torch.arange(n_envs, device=gs.device, dtype=gs.tc_int)
@@ -360,6 +377,54 @@ while True:
     scene.step()
     sim_time[0] += dt
 
+    if rec is not None:
+        # Composite robot sensor camera feeds as picture-in-picture overlays
+        # into the main offscreen frame before capturing.
+        import numpy as _np
+
+        frame = rec._camera.render()[0]
+        if hasattr(frame, "cpu"):
+            frame = frame.cpu()
+        frame = _np.asarray(frame, dtype=_np.uint8).copy()  # (H, W, 3)
+        fh, fw = frame.shape[:2]
+        # Small PiP thumbnails in the top-right corner.
+        pip_h = fh // 4
+        pip_w = fw // 4
+        for cam_name in ("hand_camera", "head_center_camera"):
+            cam = sensors.get(cam_name)
+            if cam is None:
+                continue
+            rgb = cam.read().rgb
+            if rgb.ndim == 4:
+                rgb = rgb[0]
+            rgb_np = rgb.detach().cpu().numpy()
+            rgb_np = _np.asarray(rgb_np, dtype=_np.uint8)
+            # Resize to thumbnail.
+            rgb_small = cv2.resize(rgb_np, (pip_w, pip_h), interpolation=cv2.INTER_AREA)
+            # Place in top-right, stacking vertically.
+            y0 = 0 if cam_name == "hand_camera" else pip_h
+            frame[y0:y0 + pip_h, fw - pip_w:fw] = rgb_small
+            # Draw a thin border.
+            frame[y0, fw - pip_w:fw] = 255
+            frame[y0 + pip_h - 1, fw - pip_w:fw] = 255
+            frame[y0:y0 + pip_h, fw - pip_w] = 255
+            frame[y0:y0 + pip_h, fw - 1] = 255
+        # PiP camera reads use a standalone rasterizer context (created when
+        # show_viewer=False) whose update_sensors() redraws debug objects into
+        # that standalone context, leaving the main visualizer context's debug
+        # nodes orphaned.  Reset the main context's debug objects and the
+        # sensors' references so the next frame recreates them cleanly.
+        _ctx = scene.visualizer.context
+        _ctx.clear_debug_objects()
+        _sm = scene.sim._sensor_manager
+        for _s in _sm.sensors:
+            if hasattr(_s, "_debug_force_object"):
+                _s._debug_force_object = None
+                _s._debug_torque_object = None
+            if hasattr(_s, "debug_objects"):
+                _s.debug_objects.clear()
+        rec._frames.append(frame)
+
     if IS_DEBUG:
         for cam_name in ("hand_camera", "head_center_camera"):
             cam = sensors.get(cam_name)
@@ -392,3 +457,8 @@ while True:
     step_count += 1
     if steps > 0 and step_count >= steps:
         break
+
+if rec is not None:
+    import os
+    os.makedirs(args.video_dir, exist_ok=True)
+    rec.save(os.path.join(args.video_dir, "hello_hsr_sensor.mp4"))

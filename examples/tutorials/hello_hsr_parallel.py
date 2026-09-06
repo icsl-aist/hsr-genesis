@@ -13,6 +13,14 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--steps", type=int, default=0)
 parser.add_argument("--envs", type=int, default=16)
 parser.add_argument("--depth-res", type=str, default="160x120")
+parser.add_argument(
+    "--record-video", action="store_true",
+    help="Record offscreen camera video (mp4 + gif) to examples/tutorials/videos/",
+)
+parser.add_argument(
+    "--video-dir", type=str, default="examples/tutorials/videos",
+    help="Output directory for recorded videos",
+)
 args = parser.parse_args()
 
 n_envs = int(args.envs)
@@ -47,9 +55,9 @@ URDF_PATH = Path(__file__).resolve().parents[2] / "data" / "urdf" / "hsrb4s.urdf
 
 scene = gs.Scene(
     viewer_options=gs.options.ViewerOptions(
-        camera_pos=(3, -1, 1.5),
-        camera_lookat=(0.0, 0.0, 0.5),
-        camera_fov=30,
+        camera_pos=(7, -7, 16),
+        camera_lookat=(0.0, 0.0, 0.0),
+        camera_fov=65,
         max_FPS=60,
     ),
     vis_options=gs.options.VisOptions(
@@ -66,7 +74,7 @@ scene = gs.Scene(
     rigid_options=gs.options.RigidOptions(
         use_gjk_collision=True,
     ),
-    show_viewer=True,
+    show_viewer=not args.record_video,
 )
 
 scene.add_entity(
@@ -99,6 +107,14 @@ ik_target_marker = scene.add_entity(
     surface=gs.surfaces.Default(color=(1.0, 0.0, 0.0)),
 )
 
+rec = None
+if args.record_video:
+    from hsr_genesis.tutorial_utils import VideoRecorder
+
+    rec = VideoRecorder(
+        scene, res=(640, 480), pos=(7, -7, 16),
+        lookat=(0.0, 0.0, 0.0), fov=65, fps=50,
+    )
 scene.build(n_envs=n_envs, env_spacing=(3.0, 3.0))
 
 rng = torch.Generator(device=gs.device)
@@ -198,6 +214,8 @@ while True:
     def _step():
         scene.step()
         sim_time[0] += dt
+        if rec is not None:
+            rec.capture()
         if ik_target_marker is not None and current_target_pos is not None:
             ik_target_marker.set_pos(
                 current_target_pos,
@@ -235,3 +253,8 @@ while True:
         step_count += 1
         if step_count >= max_steps:
             break
+
+if rec is not None:
+    import os
+    os.makedirs(args.video_dir, exist_ok=True)
+    rec.save(os.path.join(args.video_dir, "hello_hsr_parallel.mp4"))
