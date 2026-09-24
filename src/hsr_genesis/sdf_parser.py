@@ -16,7 +16,9 @@ Scope (matches the ``tmc_wrs_gazebo`` dataset):
 Out of scope (not present in this dataset; can be added later):
   * Multi-link articulations / SDF ``<joint>``.
   * ``<plane>`` geometry (use ``gs.morphs.Plane`` instead).
-  * World-level xacro (lights, physics, multi-model poses).
+
+World-level SDF/xacro files (``<include>``ed models, world poses, physics) are
+handled by :mod:`hsr_genesis.sdf_world`.
 """
 
 from __future__ import annotations
@@ -240,6 +242,27 @@ def sdf_to_urdf(sdf_path: str | os.PathLike,
     return u.URDF(name=name, links=links, joints=[], materials=[])
 
 
+def _resolve_sdf_file(model_dir: str | os.PathLike) -> Path:
+    """Return the SDF file describing a Gazebo model directory.
+
+    Resolves the ``<sdf>`` entry of ``model.config`` when present, otherwise
+    falls back to the first ``*.sdf`` file in the directory.
+    """
+    model_dir = Path(model_dir)
+    config = model_dir / "model.config"
+    if config.exists():
+        cfg = ET.parse(config).getroot()
+        sdf_elem = cfg.find("sdf")
+        if sdf_elem is not None and sdf_elem.text:
+            sdf_file = model_dir / sdf_elem.text.strip()
+            if sdf_file.exists():
+                return sdf_file
+    sdfs = sorted(model_dir.glob("*.sdf"))
+    if not sdfs:
+        raise FileNotFoundError(f"No SDF file found in {model_dir}")
+    return sdfs[0]
+
+
 def load_sdf_model(model_dir: str | os.PathLike,
                    models_root: Optional[str | os.PathLike] = None) -> "u.URDF":
     """Load a Gazebo model directory (with ``model.config``) as a URDF.
@@ -247,20 +270,7 @@ def load_sdf_model(model_dir: str | os.PathLike,
     Resolves the SDF file referenced by ``model.config`` and converts it.
     Falls back to any ``*.sdf`` file in the directory if no config exists.
     """
-    model_dir = Path(model_dir)
-    config = model_dir / "model.config"
-    sdf_file = None
-    if config.exists():
-        cfg = ET.parse(config).getroot()
-        sdf_elem = cfg.find("sdf")
-        if sdf_elem is not None and sdf_elem.text:
-            sdf_file = model_dir / sdf_elem.text.strip()
-    if sdf_file is None or not sdf_file.exists():
-        sdfs = sorted(model_dir.glob("*.sdf"))
-        if not sdfs:
-            raise FileNotFoundError(f"No SDF file found in {model_dir}")
-        sdf_file = sdfs[0]
-    return sdf_to_urdf(sdf_file, models_root=models_root)
+    return sdf_to_urdf(_resolve_sdf_file(model_dir), models_root=models_root)
 
 
 def morph_from_sdf(sdf_path: str | os.PathLike,

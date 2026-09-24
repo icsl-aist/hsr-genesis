@@ -24,6 +24,10 @@ __all__ = [
     "sdf_to_urdf",
     "load_sdf_model",
     "morph_from_sdf",
+    "SDFWorldModel",
+    "SDFWorld",
+    "parse_sdf_world",
+    "spawn_sdf_world",
     # ArtVIP loader
     "ARTVIP_REPO_ID",
     "ARTVIP_CATEGORIES",
@@ -86,6 +90,10 @@ def __getattr__(name: str):
         from . import sdf_parser
 
         return getattr(sdf_parser, name)
+    if name in ("SDFWorldModel", "SDFWorld", "parse_sdf_world", "spawn_sdf_world"):
+        from . import sdf_world
+
+        return getattr(sdf_world, name)
     if name in (
         "ARTVIP_REPO_ID",
         "ARTVIP_CATEGORIES",
