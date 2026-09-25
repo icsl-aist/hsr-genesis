@@ -100,6 +100,32 @@ scene.build()
 `xacro_args` (e.g. `{"trofast_knob": "true", "fast_physics": "false"}`) selects the
 world variants the upstream CMake/launch files generate.
 
+### Object colors, materials and meshes
+
+Objects keep the appearance of the Gazebo world instead of rendering in
+Genesis' default white:
+
+- SDF `<material>` elements are translated into URDF visual materials:
+  `Gazebo/<Name>` script references use the colors of gazebo-classic's
+  `gazebo.material` (that file lives inside an installed Gazebo and is not part
+  of the submodule), and scripts shipped with a model (e.g.
+  `wrc_ground_plane/materials/wood.material`) are parsed from disk, including
+  their texture.  `sdf_materials(model_dir)` returns what a model declares.
+- A plane model's material becomes the `gs.morphs.Plane` surface, so the arena
+  floor shows its wood texture.
+- Collada (`.dae`) **collision** meshes are converted to STL: Genesis hands
+  collision meshes to MuJoCo, which cannot decode Collada, and a single `.dae`
+  collision mesh makes Genesis silently fall back to its legacy URDF parser
+  (wrong physics defaults, no textures).
+- Collada **visual** meshes that reference textures outside the mesh directory
+  (the `person_standing` model does) are converted to GLB with a permissive
+  texture resolver, because trimesh refuses to load those textures otherwise.
+
+Converted meshes are cached in `~/.cache/hsr_genesis` (`HSR_GENESIS_CACHE_DIR`
+or `XDG_CACHE_HOME` move/relocate that cache); files inside the submodule are
+never modified.
+
+
 ## Data (Required Assets)
 
 Required assets live under `hsr_genesis/data`:

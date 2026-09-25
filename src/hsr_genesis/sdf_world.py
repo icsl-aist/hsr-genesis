@@ -12,7 +12,8 @@ single-model SDFs at fixed poses.  Genesis has no SDF morph, so this module
 world (the standard Gazebo package layout) unless ``models_root`` is given.
 Models whose geometry is an SDF ``<plane>`` (e.g. ``wrc_ground_plane``) become
 ``gs.morphs.Plane``, since Genesis represents ground as an infinite plane and
-:func:`~hsr_genesis.sdf_parser.sdf_to_urdf` rejects ``<plane>`` geometry.
+:func:`~hsr_genesis.sdf_parser.sdf_to_urdf` rejects ``<plane>`` geometry; the
+plane model's ``<material>`` becomes the plane surface.
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ from hsr_genesis.sdf_parser import (
     _parse_pose,
     _resolve_sdf_file,
     load_sdf_model,
+    sdf_materials,
 )
 
 __all__ = [
@@ -231,6 +233,33 @@ def _pose_to_pos_euler(pose: np.ndarray) -> tuple[tuple[float, float, float],
     )
 
 
+def _plane_surface(gs, model: SDFWorldModel,
+                   models_root: Optional[Path]):
+    """Genesis surface for a plane model, taken from its SDF ``<material>``.
+
+    ``gs.morphs.Plane`` carries no surface of its own (Genesis hardcodes its
+    own plane texture), so the arena floor's material script (wood texture +
+    ambient color) has to be passed to ``scene.add_entity(surface=...)``.
+    Returns ``None`` when the model declares no usable material.
+    """
+    material = next(
+        (m for m in sdf_materials(model.model_dir, models_root=models_root)
+         if m.texture is not None or m.color is not None),
+        None,
+    )
+    if material is None:
+        return None
+    if material.texture is not None:
+        # Genesis rejects a surface that sets both 'color' and
+        # 'diffuse_texture'; the texture already carries the floor color.
+        return gs.surfaces.Default(
+            diffuse_texture=gs.textures.ImageTexture(image_path=material.texture),
+        )
+    if material.color is not None:
+        return gs.surfaces.Default(color=material.color)
+    return None
+
+
 def spawn_sdf_world(scene, world_path: str | os.PathLike, *,
                     models_root: Optional[str | os.PathLike] = None,
                     xacro_args: Optional[dict[str, str]] = None,
@@ -242,7 +271,9 @@ def spawn_sdf_world(scene, world_path: str | os.PathLike, *,
     Must be called *before* ``scene.build()``.  Each model is added at the pose
     written in the world, with ``fixed=True`` when the world marks it static
     (override with ``fixed``).  Plane-only models become ``gs.morphs.Plane``;
-    skip them entirely with ``add_ground_plane=False``.
+    skip them entirely with ``add_ground_plane=False``.  A plane model's SDF
+    ``<material>`` (e.g. the WRS floor's wood texture) is applied as the
+    entity surface.
 
     Parameters
     ----------
@@ -283,8 +314,13 @@ def spawn_sdf_world(scene, world_path: str | os.PathLike, *,
         if model.is_plane and not add_ground_plane:
             continue
         pos, euler = _pose_to_pos_euler(model.pose)
+        surface = None
         if model.is_plane:
             morph = gs.morphs.Plane(pos=pos, euler=euler)
+            surface = _plane_surface(
+                gs, model,
+                Path(models_root) if models_root is not None else None,
+            )
         else:
             morph = gs.morphs.URDF(
                 file=load_sdf_model(model.model_dir, models_root=models_root),
@@ -292,5 +328,5 @@ def spawn_sdf_world(scene, world_path: str | os.PathLike, *,
                 euler=euler,
                 fixed=model.static if fixed is None else fixed,
             )
-        entities[name] = scene.add_entity(morph, name=name)
+        entities[name] = scene.add_entity(morph, name=name, surface=surface)
     return entities

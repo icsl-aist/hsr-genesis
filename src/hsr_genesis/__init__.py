@@ -24,6 +24,8 @@ __all__ = [
     "sdf_to_urdf",
     "load_sdf_model",
     "morph_from_sdf",
+    "SDFMaterial",
+    "sdf_materials",
     "SDFWorldModel",
     "SDFWorld",
     "parse_sdf_world",
@@ -86,7 +88,7 @@ def __getattr__(name: str):
         from .raycast_filter_patch import clear_raycast_ignore_list
 
         return clear_raycast_ignore_list
-    if name in ("sdf_to_urdf", "load_sdf_model", "morph_from_sdf"):
+    if name in ("sdf_to_urdf", "load_sdf_model", "morph_from_sdf", "SDFMaterial", "sdf_materials"):
         from . import sdf_parser
 
         return getattr(sdf_parser, name)

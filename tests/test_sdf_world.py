@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import numpy as np
@@ -204,6 +205,13 @@ def test_spawn_sdf_world_subset(scene, tmp_path):
         _entity_pos(entities["apple"]), [-0.5, 0.0, 0.5], atol=0.05,
     )
 
+    # SDF materials survive into the scene: the bin keeps its Gazebo color and
+    # the ground plane the arena's wood texture.
+    bin_color = entities["bin"].vgeoms[0].vmesh.surface.texture.color
+    assert np.allclose(bin_color[:3], [0.0, 1.0, 0.0])
+    ground_texture = entities["ground"].vgeoms[0].vmesh.surface.texture
+    assert ground_texture.image_path.endswith(".jpg")
+
 
     for _ in range(300):
         scene.step()
@@ -261,3 +269,59 @@ def test_spawn_wrs2020_world(scene):
     assert np.allclose(
         _entity_pos(entities["wrc_bookshelf"]), [2.7, -1.0, 0.0], atol=1e-3,
     )
+
+
+class _MessageCollector(logging.Handler):
+    """Collect Genesis log messages (Genesis logs, not the stdlib default)."""
+
+    def __init__(self):
+        super().__init__(level=logging.WARNING)
+        self.messages: list[str] = []
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
+
+
+def test_spawn_keeps_object_colors_and_textures(scene, tmp_path, monkeypatch):
+    """Arena objects keep their Gazebo colors, Collada models their textures.
+
+    A Collada collision mesh would make Genesis fall back to its legacy URDF
+    parser (losing physics parameters and textures), so that warning is checked
+    as well.
+    """
+    _require_submodule()
+    monkeypatch.setenv("HSR_GENESIS_CACHE_DIR", str(tmp_path / "cache"))
+    world = _write_world(
+        tmp_path,
+        "<include><name>bin</name><static>1</static>"
+        "<uri>model://wrc_bin_black</uri></include>"
+        "<include><name>trofast</name><uri>model://trofast</uri>"
+        "<pose>1 0 0.5 0 0 0</pose></include>"
+        "<include><name>person</name><uri>model://person_standing</uri>"
+        "<pose>-1 0 0.5 0 0 0</pose></include>",
+    )
+
+    collector = _MessageCollector()
+    genesis_logger = logging.getLogger("genesis")
+    previous_level = genesis_logger.level
+    genesis_logger.addHandler(collector)
+    genesis_logger.setLevel(logging.WARNING)
+    try:
+        entities = sdf_world.spawn_sdf_world(scene, world, models_root=MODELS_DIR)
+        scene.build()
+    finally:
+        genesis_logger.removeHandler(collector)
+        genesis_logger.setLevel(previous_level)
+
+    # Gazebo script colors (black bin, orange trofast storage) reach the scene.
+    bin_color = entities["bin"].vgeoms[0].vmesh.surface.texture.color
+    assert np.allclose(bin_color[:3], [0.0, 0.0, 0.0])
+    trofast_color = entities["trofast"].vgeoms[0].vmesh.surface.texture.color
+    assert np.allclose(trofast_color[:3], [1.0, 0.5088, 0.0468], atol=1e-4)
+
+    # The person's Collada textures are loaded for every body part.
+    textures = [g.vmesh.surface.texture for g in entities["person"].vgeoms]
+    assert len(textures) == 7
+    assert all(texture.image_array is not None for texture in textures)
+
+    assert not [m for m in collector.messages if "Falling back" in m]
