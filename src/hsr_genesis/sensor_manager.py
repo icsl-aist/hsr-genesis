@@ -376,7 +376,7 @@ class URDFSensorManager:
                     disabled_names=disabled_names,
                 )
             ):
-                ft = self._create_force_torque(spec)
+                ft = self._create_force_torque(spec, draw_debug=draw_debug)
                 if ft is not None:
                     self._add(spec.name, self._wrap_sensor_with_update_rate(spec, ft))
             elif (
@@ -388,7 +388,7 @@ class URDFSensorManager:
                     disabled_names=disabled_names,
                 )
             ):
-                imu = self._create_imu(spec)
+                imu = self._create_imu(spec, draw_debug=draw_debug)
                 if imu is not None:
                     self._add(spec.name, self._wrap_sensor_with_update_rate(spec, imu))
         return dict(self._sensors)
@@ -459,6 +459,8 @@ class URDFSensorManager:
     def _create_force_torque(
         self,
         spec: URDFSensorSpec,
+        *,
+        draw_debug: bool = False,
     ) -> Any | None:
         if not hasattr(gs.sensors, "ForceTorque"):
             return None
@@ -475,12 +477,15 @@ class URDFSensorManager:
                 link_idx_local=link_idx_local,
                 pos_offset=pos_offset,
                 euler_offset=euler_offset,
+                draw_debug=bool(draw_debug),
             )
         )
 
     def _create_imu(
         self,
         spec: URDFSensorSpec,
+        *,
+        draw_debug: bool = False,
     ) -> Any | None:
         pos_offset = spec.pose_xyz
         euler_offset = _rpy_rad_to_euler_deg(spec.pose_rpy)
@@ -491,6 +496,7 @@ class URDFSensorManager:
                 link_idx_local=link_idx_local,
                 pos_offset=pos_offset,
                 euler_offset=euler_offset,
+                draw_debug=bool(draw_debug),
             )
         )
 

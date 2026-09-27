@@ -167,6 +167,24 @@ PYTHONPATH=src python examples/tutorials/spawn_ycb_objects.py
 
 If you see a viewer window, the example is running correctly.
 
+## Demos
+
+### GPU parallel simulation (1024 envs)
+
+![promo_video](https://github.com/icsl-aist/hsr-genesis/releases/download/gif-assets/promo_video.gif)
+
+### Sensor demo (debug visualization)
+
+![hello_hsr_sensor](https://github.com/icsl-aist/hsr-genesis/releases/download/gif-assets/hello_hsr_sensor.gif)
+
+### IK grasp
+
+![IK_grasp_hsr](https://github.com/icsl-aist/hsr-genesis/releases/download/gif-assets/IK_grasp_hsr.gif)
+
+### RRT path planning
+
+![rrt_path_planning_hsr](https://github.com/icsl-aist/hsr-genesis/releases/download/gif-assets/rrt_path_planning_hsr.gif)
+
 ## Docker
 
 The Docker environment provides a reproducible setup with CUDA 12.4,
@@ -249,8 +267,49 @@ simultaneously on the same GPU. Increasing the number of parallel environments
 (`n_envs`) amortizes kernel-launch overhead and keeps the GPU fully utilized.
 
 ```python
-scene.build(n_envs=512)   # tune to your GPU VRAM
+scene.build(n_envs=1024)   # tune to your GPU VRAM
 ```
+
+#### Measured throughput
+
+Benchmarked on the YCB grasp pipeline (approach → descend → grasp → lift)
+with `dt=0.02` s, 4 substeps, `show_viewer=False`. Realtime factor is
+steps/s relative to wall-clock (1.0× = realtime):
+
+| N envs | RTX 5060 Ti (16 GB) | | | A100-SXM4 (80 GB) | | |
+|--------|---------------------|------|------|--------------------|------|------|
+|        | steps/s | RT factor | envs·steps/s | steps/s | RT factor | envs·steps/s |
+| 1      | 32.4    | 0.65×     | 32           | 24.6    | 0.49×     | 25            |
+| 8      | 28.8    | 0.58×     | 230          | 21.0    | 0.42×     | 168           |
+| 32     | 27.4    | 0.55×     | 878          | 19.9    | 0.40×     | 636           |
+| 128    | 25.8    | 0.52×     | 3,308        | 18.9    | 0.38×     | 2,416         |
+| 256    | 24.8    | 0.50×     | 6,338        | 17.8    | 0.36×     | 4,546         |
+| 512    | 22.9    | 0.46×     | 11,702       | 16.7    | 0.33×     | 8,555         |
+| 1024   | 19.8    | 0.40×     | 20,224       | 15.6    | 0.31×     | 15,972        |
+| 4096   | 12.1    | 0.24×     | 49,605       | 10.3    | 0.21×     | 42,161        |
+
+The 5060 Ti is competitive with the A100 at low-to-mid N (higher clock
+speeds win when the GPU is underutilized), reaching **20,224 envs·steps/s**
+at 1024 envs — a **632×** throughput improvement over a single environment.
+At 4096 envs it peaks at **49,605 envs·steps/s** (1,550× over N=1) before
+hitting the 16 GB VRAM ceiling. The A100 scales further (max N=16,384,
+90,050 envs·steps/s) but is engine-limited, not VRAM-limited.
+
+Even at N=1 the 5060 Ti runs at **0.65× realtime** — fast enough for
+interactive development. At 1024 envs it still maintains 0.40× realtime
+per environment, meaning 1024 independent simulations complete in the
+time 410 sequential ones would.
+
+#### IK performance
+
+| Configuration | Time per call | Per-env |
+|---------------|---------------|---------|
+| Single env    | 5.78 ms       | 5.78 ms |
+| 256-env batch | 7.71 ms       | 0.030 ms |
+
+The 256-env batch achieves **0.030 ms/env** — a **192×** reduction in
+per-environment IK latency, enabling the IK planner to pre-compute
+approach/descend/lift trajectories for all environments at episode reset.
 
 Practical guidance:
 
@@ -261,3 +320,16 @@ Practical guidance:
   compute; profile with `nvitop` or `nsys` to find the sweet spot.
 - Combining `show_viewer=False` with a high `n_envs` is the recommended setup
   for RL training and large-scale data collection.
+
+## Citation
+
+If you use this work in your research, please cite the following paper:
+
+```bibtex
+@inproceedings{matsusaka2026hsr_genesis,
+  author    = {Yosuke Matsusaka and Keisuke Takeshita and Ryuichi Sakakibara and Takashi Yamamoto},
+  title     = {Development and Evaluation of a Massively Parallel Physics Simulator with GPU-Accelerated Inverse Kinematics for Mobile Manipulators},
+  booktitle = {Proceedings of the Robotics Society of Japan Annual Conference (RSJ)},
+  year      = {2026},
+}
+```

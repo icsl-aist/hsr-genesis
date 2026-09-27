@@ -48,6 +48,14 @@ parser.add_argument(
     "--seed", type=int, default=42,
     help="Random seed for object placement and target selection",
 )
+parser.add_argument(
+    "--record-video", action="store_true",
+    help="Record offscreen camera video (mp4 + gif) to examples/tutorials/videos/",
+)
+parser.add_argument(
+    "--video-dir", type=str, default="examples/tutorials/videos",
+    help="Output directory for recorded videos",
+)
 args = parser.parse_args()
 
 URDF_PATH = (
@@ -138,7 +146,7 @@ def _entity_pos(ent) -> np.ndarray:
 def _run_trajectory(
     hsr, scene, *,
     arm_traj, base_traj, dt, duration,
-    motor_idx=None, hand_cmd=None,
+    motor_idx=None, hand_cmd=None, rec=None,
 ):
     """Execute a whole-body trajectory for ``duration`` seconds.
 
@@ -158,14 +166,18 @@ def _run_trajectory(
         if step == 0 and motor_idx is not None and hand_cmd is not None:
             hsr.control_dofs_position(hand_cmd, dofs_idx_local=[motor_idx])
         scene.step()
+        if rec is not None:
+            rec.capture()
 
 
-def _run_gripper_hold(hsr, scene, gripper, *, dt, n_steps):
+def _run_gripper_hold(hsr, scene, gripper, *, dt, n_steps, rec=None):
     """Hold gripper closing force for ``n_steps`` while keeping arm still."""
     for _ in range(n_steps):
         gripper.step_apply_force(dt, envs_idx=[0])
         hsr.step_whole_body_trajectory_batched(dt, envs_idx=[0])
         scene.step()
+        if rec is not None:
+            rec.capture()
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +263,7 @@ def _spawn_ycb_objects(scene, rng):
 # ---------------------------------------------------------------------------
 
 def _pick_object(
-    hsr, scene, *, target_name, target_entity, target_pos, dt,
+    hsr, scene, *, target_name, target_entity, target_pos, dt, rec=None,
 ):
     """Run the full approach-grasp-lift sequence on the target object.
 
@@ -325,7 +337,7 @@ def _pick_object(
         hsr, scene,
         arm_traj=arm_traj, base_traj=base_traj,
         dt=dt, duration=approach_duration,
-        motor_idx=motor_idx, hand_cmd=hand_open,
+        motor_idx=motor_idx, hand_cmd=hand_open, rec=rec,
     )
 
     # --- Phase 4: descend to grasp pose ---
@@ -344,7 +356,7 @@ def _pick_object(
     _run_trajectory(
         hsr, scene,
         arm_traj=arm_traj, base_traj=base_traj,
-        dt=dt, duration=descend_duration,
+        dt=dt, duration=descend_duration, rec=rec,
     )
 
     # --- Phase 5: close gripper ---
@@ -356,7 +368,7 @@ def _pick_object(
     gripper.set_apply_force_goal(
         effort=effort, active_mask=active, envs_idx=[0],
     )
-    _run_gripper_hold(hsr, scene, gripper, dt=dt, n_steps=300)
+    _run_gripper_hold(hsr, scene, gripper, dt=dt, n_steps=300, rec=rec)
 
     # --- Phase 6: lift ---
     lift_pos = target_pos.copy()
@@ -378,10 +390,10 @@ def _pick_object(
         start_time=None,
     )
     lift_steps = int(lift_duration / dt) + 50
-    _run_gripper_hold(hsr, scene, gripper, dt=dt, n_steps=lift_steps)
+    _run_gripper_hold(hsr, scene, gripper, dt=dt, n_steps=lift_steps, rec=rec)
 
     # Hold and report.
-    _run_gripper_hold(hsr, scene, gripper, dt=dt, n_steps=100)
+    _run_gripper_hold(hsr, scene, gripper, dt=dt, n_steps=100, rec=rec)
     final_obj_pos = _entity_pos(target_entity)
     print(
         f"\n[done] {target_name} final pos="
@@ -434,6 +446,14 @@ def main() -> None:
     rng = np.random.default_rng(seed=args.seed)
     objects = _spawn_ycb_objects(scene, rng)
 
+    rec = None
+    if args.record_video:
+        from hsr_genesis.tutorial_utils import VideoRecorder
+
+        rec = VideoRecorder(
+            scene, res=(320, 240), pos=(3.5, -2.0, 2.0),
+            lookat=(0.0, 0.0, 0.5), fov=30, fps=50,
+        )
     scene.build()
 
     print(f"\nSpawned {len(objects)} YCB objects around the HSR.")
@@ -495,6 +515,8 @@ def main() -> None:
     for _ in range(args.settle_steps):
         hsr.step_whole_body_trajectory_batched(dt, envs_idx=[0])
         scene.step()
+        if rec is not None:
+            rec.capture()
     print("[settle] object positions after settling:")
     for name, ent in objects:
         pos = _entity_pos(ent)
@@ -518,7 +540,7 @@ def main() -> None:
         target_name=target_name,
         target_entity=target_entity,
         target_pos=target_pos,
-        dt=dt,
+        dt=dt, rec=rec,
     )
 
     # --- Phase 7: keep simulating (viewer loop) ---
@@ -528,6 +550,8 @@ def main() -> None:
         gripper.step_apply_force(dt, envs_idx=[0])
         hsr.step_whole_body_trajectory_batched(dt, envs_idx=[0])
         scene.step()
+        if rec is not None:
+            rec.capture()
         n_steps += 1
         if n_steps % 200 == 0:
             pos = _entity_pos(target_entity)
@@ -537,6 +561,12 @@ def main() -> None:
             )
         if args.steps > 0 and n_steps >= args.steps:
             break
+
+    if rec is not None:
+        import os
+        out_dir = args.video_dir
+        os.makedirs(out_dir, exist_ok=True)
+        rec.save(os.path.join(out_dir, "spawn_ycb_objects.mp4"))
 
 
 if __name__ == "__main__":
