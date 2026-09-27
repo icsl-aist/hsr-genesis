@@ -35,6 +35,8 @@ git submodule update --init --recursive
 - `hsr_genesis.base_controller`: Base controller utilities and kinematics kernels (ported from `hsrb_base_controllers`).
 - `hsr_genesis.gripper_controller`: Gripper control actions and interfaces (apply-force, grasp), ported from `hsrb_gripper_controller`.
 - `hsr_genesis.sensor_manager`: URDF-driven sensor attachment helpers for HSR.
+- `hsr_genesis.sdf_parser`: Gazebo SDF model → in-memory URDF converter (YCB objects from the `tmc_wrs_gazebo` submodule).
+- `hsr_genesis.sdf_world`: Gazebo SDF/xacro **world** importer — expands `wrs2020.world.xacro`, resolves `model://` URIs, and spawns the whole WRS2020 arena (furniture, bins, trays, ground plane) into a Genesis scene.
 
 ## HSR Rigid Entity Options
 
@@ -72,6 +74,58 @@ Genesis is initialized with a GPU backend:
 - `hsr_genesis.analytic_ik`
 - `hsr_genesis.base_controller`
 
+## Gazebo SDF World Import
+
+The `tmc_wrs_gazebo` submodule ships the WRS2020 arena as a Gazebo world file
+(`data/tmc_wrs_gazebo/tmc_wrs_gazebo_worlds/worlds/wrs2020.world.xacro`).
+`hsr_genesis.sdf_world` expands the xacro, resolves every `model://` URI
+against the sibling `models/` directory, and spawns all `<include>`d models at
+the poses written in the world (`<static>1</static>` models become fixed
+bodies; the `wrc_ground_plane` SDF `<plane>` becomes `gs.morphs.Plane`).
+
+```python
+import genesis as gs
+from hsr_genesis.sdf_world import parse_sdf_world, spawn_sdf_world
+
+world = parse_sdf_world("data/tmc_wrs_gazebo/tmc_wrs_gazebo_worlds/worlds/wrs2020.world.xacro")
+scene = gs.Scene(
+    sim_options=gs.options.SimOptions(
+        dt=world.max_step_size or 0.02, gravity=tuple(world.gravity),
+    ),
+)
+entities = spawn_sdf_world(scene, world.source, world=world)  # before scene.build()
+scene.build()
+```
+
+`xacro_args` (e.g. `{"trofast_knob": "true", "fast_physics": "false"}`) selects the
+world variants the upstream CMake/launch files generate.
+
+### Object colors, materials and meshes
+
+Objects keep the appearance of the Gazebo world instead of rendering in
+Genesis' default white:
+
+- SDF `<material>` elements are translated into URDF visual materials:
+  `Gazebo/<Name>` script references use the colors of gazebo-classic's
+  `gazebo.material` (that file lives inside an installed Gazebo and is not part
+  of the submodule), and scripts shipped with a model (e.g.
+  `wrc_ground_plane/materials/wood.material`) are parsed from disk, including
+  their texture.  `sdf_materials(model_dir)` returns what a model declares.
+- A plane model's material becomes the `gs.morphs.Plane` surface, so the arena
+  floor shows its wood texture.
+- Collada (`.dae`) **collision** meshes are converted to STL: Genesis hands
+  collision meshes to MuJoCo, which cannot decode Collada, and a single `.dae`
+  collision mesh makes Genesis silently fall back to its legacy URDF parser
+  (wrong physics defaults, no textures).
+- Collada **visual** meshes that reference textures outside the mesh directory
+  (the `person_standing` model does) are converted to GLB with a permissive
+  texture resolver, because trimesh refuses to load those textures otherwise.
+
+Converted meshes are cached in `~/.cache/hsr_genesis` (`HSR_GENESIS_CACHE_DIR`
+or `XDG_CACHE_HOME` move/relocate that cache); files inside the submodule are
+never modified.
+
+
 ## Data (Required Assets)
 
 Required assets live under `hsr_genesis/data`:
@@ -97,6 +151,18 @@ Sensor demo (whole-body PD control + base controller + URDF sensors):
 
 ```bash
 PYTHONPATH=src python examples/tutorials/hello_hsr_sensor.py
+```
+
+WRS2020 arena import (Gazebo world + HSR robot at the upstream start pose):
+
+```bash
+PYTHONPATH=src python examples/tutorials/spawn_wrc_world.py
+```
+
+YCB objects spawn + pick demo (SDF models from the submodule):
+
+```bash
+PYTHONPATH=src python examples/tutorials/spawn_ycb_objects.py
 ```
 
 If you see a viewer window, the example is running correctly.

@@ -24,6 +24,12 @@ __all__ = [
     "sdf_to_urdf",
     "load_sdf_model",
     "morph_from_sdf",
+    "SDFMaterial",
+    "sdf_materials",
+    "SDFWorldModel",
+    "SDFWorld",
+    "parse_sdf_world",
+    "spawn_sdf_world",
     # ArtVIP loader
     "ARTVIP_REPO_ID",
     "ARTVIP_CATEGORIES",
@@ -82,10 +88,14 @@ def __getattr__(name: str):
         from .raycast_filter_patch import clear_raycast_ignore_list
 
         return clear_raycast_ignore_list
-    if name in ("sdf_to_urdf", "load_sdf_model", "morph_from_sdf"):
+    if name in ("sdf_to_urdf", "load_sdf_model", "morph_from_sdf", "SDFMaterial", "sdf_materials"):
         from . import sdf_parser
 
         return getattr(sdf_parser, name)
+    if name in ("SDFWorldModel", "SDFWorld", "parse_sdf_world", "spawn_sdf_world"):
+        from . import sdf_world
+
+        return getattr(sdf_world, name)
     if name in (
         "ARTVIP_REPO_ID",
         "ARTVIP_CATEGORIES",
