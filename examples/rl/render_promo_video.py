@@ -35,7 +35,7 @@ from stable_baselines3 import PPO
 from hsr_pick_rl_env import HSRPickRLEnv, BatchedGenesisVecEnv
 from curriculum import CurriculumManager
 from camera_crane import CraneKeyframe, crane_path
-from ik_planner import IKPlanner
+from hsr_genesis.grasp_planning import IKPlanner
 
 
 def _ensure_genesis_initialized() -> None:

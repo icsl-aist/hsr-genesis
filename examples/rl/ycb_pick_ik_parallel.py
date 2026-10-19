@@ -40,6 +40,8 @@ import genesis as gs
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
+from hsr_genesis.grasp_planning import GraspSolver, SweepGraspPlanner
+
 # ---------------------------------------------------------------------------
 # Paths & constants
 # ---------------------------------------------------------------------------
@@ -97,6 +99,13 @@ def _yaw_from_quat_wxyz_batch(quat: torch.Tensor) -> torch.Tensor:
     siny_cosp = 2.0 * (w * z + x * y)
     cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
     return torch.atan2(siny_cosp, cosy_cosp)
+
+
+def _quat_conjugate_batch(quat_wxyz: torch.Tensor) -> torch.Tensor:
+    """Conjugate of batched WXYZ quaternions (inverse for unit quats)."""
+    return torch.stack([
+        quat_wxyz[:, 0], -quat_wxyz[:, 1], -quat_wxyz[:, 2], -quat_wxyz[:, 3],
+    ], dim=-1)
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +202,7 @@ class HSRPickEnv:
                 fov=camera_config.get("fov", 60),
                 GUI=False,
                 far=camera_config.get("far", 200.0),
+                debug=camera_config.get("debug", False),
             )
         else:
             self.camera = None
@@ -209,7 +219,9 @@ class HSRPickEnv:
 
         # End-effector setup.
         self.ee_link = self.hsr.get_link("hand_palm_link")
-        self.hsr.end_effector_offset = [0.0, 0.0, 0.09]
+        # IK targets the hand_palm_link origin directly (no end_effector_offset).
+        # The 9cm gripper length is accounted for in pre_grasp_height and grasp_offset_z.
+        self.hsr.end_effector_offset = None
         self.gripper = self.hsr.get_gripper_batched()
 
         # Joint index bookkeeping.
@@ -236,6 +248,22 @@ class HSRPickEnv:
         # Per-env grasp params (n_envs, 4) or None for module defaults.
         # Columns: [pre_grasp_height, grasp_offset_z, gripper_effort, grasp_hold_steps]
         self.grasp_params = grasp_params
+
+        # Batched IK solver shared by planners and env methods.
+        self.solver = GraspSolver(
+            self.hsr, self.ee_link, scene, self.envs_all,
+            self.arm_dofs_idx, self.n_envs, dt=self.dt,
+        )
+        # Default grasp-target provider surface: the object itself is the
+        # graspable part (no joint geometry); HSRArtvipPickEnv overrides
+        # these fields in _resolve_artvip_metadata().
+        self._graspable_local_offset = None
+        self._graspable_local_offset_3d = None
+        self._graspable_jaw_axis_local = None
+        self._joint_axis_local = None
+        self._joint_origin_local = None
+        self._target_joint_type = "revolute"
+        self._target_joint_limits = (0.0, 1.0)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -359,55 +387,102 @@ class HSRPickEnv:
         self.obj_init_z = self._obj_pos()[:, 2]
 
     # ------------------------------------------------------------------
+    # GraspTargetProvider implementation (default: point target).
+    # HSRArtvipPickEnv overrides with joint/handle geometry.
+    # ------------------------------------------------------------------
+
+    def obj_pos(self) -> torch.Tensor:
+        return self._obj_pos()
+
+    def obj_quat(self) -> torch.Tensor:
+        quat = self.obj.get_quat(envs_idx=self.envs_all)
+        return quat.unsqueeze(0) if quat.ndim == 1 else quat
+
+    def part_pos(self, obj_pos: torch.Tensor, obj_quat: torch.Tensor) -> torch.Tensor:
+        """Non-articulated object: grasp target is the object origin, unless
+        a local offset was resolved (subclass)."""
+        if self._graspable_local_offset_3d is not None:
+            return obj_pos + self._quat_rotate_batch(obj_quat, self._graspable_local_offset_3d)
+        return obj_pos.clone()
+
+    def surface_normal(self, part_pos: torch.Tensor, obj_quat: torch.Tensor) -> torch.Tensor | None:
+        return None
+
+    def jaw_axis(self, obj_quat: torch.Tensor) -> torch.Tensor | None:
+        if self._graspable_jaw_axis_local is None:
+            return None
+        local_axis = self._graspable_jaw_axis_local.unsqueeze(0).expand(self.n_envs, -1)
+        return self._quat_rotate_batch(obj_quat, local_axis)
+
+    def approach_dirs(
+        self, part_pos: torch.Tensor, surface_normal: torch.Tensor | None,
+    ) -> list[torch.Tensor]:
+        """8 evenly spaced XY directions → base ring around the object.
+
+        Gives the sweep a full 360° of stand points (45° apart); the
+        planner places the base at ``part_xy - dir*arm_reach`` for each
+        and rejects colliding or unreachable candidates.
+        """
+        N = self.n_envs
+        out = []
+        for k in range(8):
+            a = k * math.pi / 4.0
+            d = torch.zeros(N, 3, device=gs.device, dtype=gs.tc_float)
+            d[:, 0] = math.cos(a)
+            d[:, 1] = math.sin(a)
+            out.append(d)
+        return out
+
+    def yaw_candidates(self, obj_pos: torch.Tensor) -> list[torch.Tensor]:
+        """Full-circle yaw sweep (30° increments) for unconstrained objects."""
+        base = torch.zeros(self.n_envs, device=gs.device, dtype=gs.tc_float)
+        deltas = torch.linspace(0, 2 * math.pi, 13, device=gs.device, dtype=gs.tc_float)[:-1]
+        return [(base + d) for d in deltas]
+
+    def set_obj_pose(self, quat: torch.Tensor) -> None:
+        self.obj.set_quat(
+            quat, envs_idx=self.envs_all, zero_velocity=True, relative=False,
+        )
+        self._settle(20)
+
+    def terminal_target(self, grasp_pos: torch.Tensor, descend_pos: torch.Tensor) -> torch.Tensor:
+        """Lift the object straight up (non-articulated terminal phase)."""
+        lift = self._obj_pos().clone()
+        lift[:, 2] = 0.30  # LIFT_HEIGHT
+        return lift
+
+    # ------------------------------------------------------------------
     # IK helpers (batched).
     # ------------------------------------------------------------------
 
-    def _ik(self, goal_pos: torch.Tensor, *, init_qpos=None):
-        """IK to ``goal_pos`` (n_envs, 3) using batched analytic solver.
+    def _ik(self, goal_pos: torch.Tensor, *, init_qpos=None,
+            hand_quat: torch.Tensor | None = None):
+        """Batched analytic IK; delegates to :class:`GraspSolver`."""
+        return self.solver.solve(goal_pos, init_qpos=init_qpos, hand_quat=hand_quat)
 
-        ``inverse_kinematics`` uses ``torch.as_tensor`` internally (which
-        accepts non-contiguous memory), so a single batched call replaces
-        the per-env loop.  Returns (qpos (n_envs, n_qs), success_mask
-        (n_envs,)).
-        """
-        quat = torch.tensor(
-            HAND_QUAT, device=gs.device, dtype=gs.tc_float,
-        ).expand(self.n_envs, -1).contiguous()
-
-        qpos, error = self.hsr.inverse_kinematics(
-            link=self.ee_link,
-            pos=goal_pos.contiguous(),
-            quat=quat,
-            init_qpos=init_qpos.contiguous() if init_qpos is not None else None,
-            max_samples=200,
-            max_solver_iters=150,
-            max_step_size=0.7,
-            respect_joint_limit=False,
-            envs_idx=self.envs_all,
-            return_error=True,
+    def _calibrated_ik(self, goal_pos: torch.Tensor, *, init_qpos=None,
+                       hand_quat: torch.Tensor | None = None,
+                       max_iters: int = 3, respect_joint_limit: bool = True,
+                       max_step_size: float = 0.1):
+        """IK with sim-FK feedback calibration; delegates to GraspSolver."""
+        return self.solver.calibrated(
+            goal_pos, init_qpos=init_qpos, hand_quat=hand_quat,
+            max_iters=max_iters, respect_joint_limit=respect_joint_limit,
+            max_step_size=max_step_size,
         )
-        if error.ndim == 1:
-            error = error.unsqueeze(0)
-        if qpos.ndim == 1:
-            qpos = qpos.unsqueeze(0)
-        pos_err = error[:, :3].norm(dim=1)
-        success = torch.isfinite(pos_err) & (pos_err < 0.02)
-        return qpos, success
+
+    def _jacobian_ik(self, goal_pos, *, init_qpos=None,
+                     hand_quat=None, max_iters=50, max_step_size=0.1,
+                     pos_tol=1e-3):
+        """Position-only Jacobian IK (base fixed); delegates to GraspSolver."""
+        return self.solver.jacobian(
+            goal_pos, init_qpos=init_qpos, hand_quat=hand_quat,
+            max_iters=max_iters, max_step_size=max_step_size, pos_tol=pos_tol,
+        )
 
     def _qpos_to_arm_and_base(self, qpos: torch.Tensor):
-        """Extract per-env arm joint angles (n_envs, 5) and base [x,y,yaw].
-
-        IK fills ``qpos`` at the generalized-coordinate (qs) indices, which
-        differ from dof indices because the root free joint has 7 qs but 6
-        dofs.  For revolute arm joints the q value equals the dof position,
-        so we extract from ``arm_qs_idx``.
-        """
-        arm = qpos[:, self.arm_qs_idx]
-        base_pos = qpos[:, self.base_qs_idx[0:3]]
-        base_quat = qpos[:, self.base_qs_idx[3:7]]
-        yaw = _yaw_from_quat_wxyz_batch(base_quat)
-        base_xy_yaw = torch.stack([base_pos[:, 0], base_pos[:, 1], yaw], dim=-1)
-        return arm, base_xy_yaw
+        """Extract per-env arm joint angles (n_envs, 5) and base [x,y,yaw]."""
+        return self.solver.qpos_to_arm_and_base(qpos)
 
     def _set_whole_body(self, arm_positions, base_xy_yaw, duration):
         """Build per-env arm + base trajectories and load them."""
@@ -722,6 +797,14 @@ class HSRArtvipPickEnv(HSRPickEnv):
     The success rate will typically be lower than with simple YCB objects
     (large articulated objects are harder to lift), but the throughput
     metrics (steps/sec, envs·steps/sec, GPU memory) are the primary output.
+
+    After scene build, this class also resolves ArtVIP metadata (joint info,
+    part semantics, control script) for use by articulation-aware RL envs:
+      - Target joint selection (prefer control-script named joints, then
+        joints connected to graspable parts, then largest-range movable joint).
+      - Joint geometry in object-root local frame (axis + origin) for
+        computing world-space articulation directions at runtime.
+      - Graspable link handle for approach-shaping rewards.
     """
 
     def __init__(
@@ -740,12 +823,15 @@ class HSRArtvipPickEnv(HSRPickEnv):
         cache_dir: str | Path | None = None,
         decimate_face_num: int = 500,
         merge_meshes: bool = False,
+        obj_z: float | None = None,
     ) -> None:
         self._artvip_category = artvip_category
         self._artvip_object = artvip_object
         self._artvip_cache_dir = cache_dir
         self._decimate_face_num = decimate_face_num
         self._merge_meshes = merge_meshes
+        self._obj_z_override = obj_z
+        self._usd_path: Path | None = None
         # ArtVIP objects are much larger than YCB bricks; place them further
         # from the robot to reduce hand-object collision pairs during the
         # approach and descend phases.
@@ -763,6 +849,8 @@ class HSRArtvipPickEnv(HSRPickEnv):
             camera_config=camera_config,
             obj_radius_range=obj_radius_range,
         )
+        # Resolve ArtVIP metadata after scene is built and entity is ready.
+        self._resolve_artvip_metadata()
 
     def _build_objects(self, scene, object_names: list[str]) -> list:
         from hsr_genesis.artvip_loader import download_artvip_object, merge_fixed_meshes
@@ -774,11 +862,16 @@ class HSRArtvipPickEnv(HSRPickEnv):
         )
         if self._merge_meshes:
             usd_path = merge_fixed_meshes(usd_path)
+        self._usd_path = usd_path
+        obj_z_val = self._obj_z_override if self._obj_z_override is not None else OBJ_Z
+        # When the object is raised above the default ground position, fix it
+        # so it doesn't fall back down during settling.
+        obj_fixed = self._obj_z_override is not None and self._obj_z_override > OBJ_Z + 0.01
         entity = scene.add_entity(
             gs.morphs.USD(
                 file=str(usd_path),
-                pos=(0.6, 0.0, OBJ_Z),
-                fixed=False,
+                pos=(0.6, 0.0, obj_z_val),
+                fixed=obj_fixed,
                 decimate=True,
                 decimate_face_num=self._decimate_face_num,
                 convexify=True,
@@ -788,6 +881,564 @@ class HSRArtvipPickEnv(HSRPickEnv):
             ),
         )
         return [entity]
+
+    # ------------------------------------------------------------------
+    # ArtVIP metadata resolution
+    # ------------------------------------------------------------------
+
+    def _resolve_artvip_metadata(self) -> None:
+        """Parse ArtVIP USD metadata and resolve target joint + graspable link.
+
+        After scene.build(), the ArtVIP entity's joints and links are
+        available. This method:
+          1. Parses joint info and part info from the USD.
+          2. Selects a target joint (prefer control script, then graspable
+             part joints, then largest-range movable joint).
+          3. Finds the target joint's dof index in the Genesis entity.
+          4. Resolves the graspable link handle for approach shaping.
+          5. Computes joint geometry (axis + origin) in object-root local
+             frame for runtime world-space articulation direction.
+          6. Stores articulation threshold from control script or default.
+        """
+        from hsr_genesis.artvip_loader import (
+            parse_artvip_joint_info,
+            parse_artvip_part_info,
+            parse_artvip_control_script,
+        )
+
+        if self._usd_path is None:
+            return
+
+        usd_path = self._usd_path
+
+        # Parse joint info from USD.
+        joint_info = parse_artvip_joint_info(usd_path)
+
+        # Parse part info from USD.
+        part_info = parse_artvip_part_info(usd_path)
+
+        # Parse control script if available.
+        # ArtVIP control scripts are named inconsistently (e.g. trashcan_control.py
+        # vs trash_can_control.py), so glob for *_control.py in the resource dir.
+        ctrl_meta: dict = {}
+        resource_dir = Path(usd_path).parent / "resource"
+        ctrl_files = list(resource_dir.glob("*_control.py")) if resource_dir.is_dir() else []
+        if ctrl_files:
+            ctrl_meta = parse_artvip_control_script(ctrl_files[0])
+
+        # Resolve target joint.
+        target_joint = self._resolve_target_joint(joint_info, part_info, ctrl_meta)
+        self._target_joint_name = target_joint.name
+        self._target_joint_type = target_joint.joint_type
+        self._target_joint_limits = target_joint.limits
+        self._target_joint_range = abs(target_joint.limits[1] - target_joint.limits[0])
+        # Find the target joint in the Genesis entity by name.
+        # Genesis may rename USD joints, so try exact match first,
+        # then substring match, then fallback to first joint with dofs.
+        self._target_dof_idx: list[int] | None = None
+        genesis_joint_names = [j.name for j in self.obj.joints]
+        print(f"[artvip] Genesis entity joints: {genesis_joint_names}")
+        print(f"[artvip] Target USD joint name: {target_joint.name}")
+
+        # Try exact name match.
+        for joint in self.obj.joints:
+            if joint.name == target_joint.name:
+                dofs = joint.dofs_idx_local
+                if isinstance(dofs, (list, tuple)):
+                    self._target_dof_idx = [int(d) for d in dofs]
+                else:
+                    self._target_dof_idx = [int(dofs)]
+                break
+
+        # Try substring match (USD joint type prefix may be stripped/renamed).
+        if self._target_dof_idx is None:
+            # Extract the meaningful part of the USD joint name (after the type prefix).
+            usd_name_lower = target_joint.name.lower()
+            for joint in self.obj.joints:
+                gname_lower = joint.name.lower()
+                if (usd_name_lower in gname_lower or gname_lower in usd_name_lower
+                        or target_joint.name in joint.name
+                        or joint.name in target_joint.name):
+                    dofs = joint.dofs_idx_local
+                    if isinstance(dofs, (list, tuple)):
+                        self._target_dof_idx = [int(d) for d in dofs]
+                    else:
+                        self._target_dof_idx = [int(dofs)]
+                    print(f"[artvip] Matched by substring: USD='{target_joint.name}' → Genesis='{joint.name}'")
+                    break
+
+        # Fallback: first joint with non-None dofs_idx_local.
+        if self._target_dof_idx is None:
+            for joint in self.obj.joints:
+                dofs = joint.dofs_idx_local
+                if dofs is not None:
+                    if isinstance(dofs, (list, tuple)):
+                        self._target_dof_idx = [int(d) for d in dofs]
+                    else:
+                        self._target_dof_idx = [int(dofs)]
+                    print(f"[artvip] Fallback: using first joint with dofs: '{joint.name}'")
+                    break
+
+        # Resolve graspable interaction geometry and its containing physics link.
+        # Nested handles are not Genesis links, so preserve their semantic
+        # bounds center as the target while resolving the parent drawer/door
+        # link for runtime motion and contact state.
+        self._graspable_link_name: str | None = None
+        self._graspable_link = None
+        self._graspable_local_offset: torch.Tensor | None = None
+        self._graspable_local_offset_3d: torch.Tensor | None = None
+        self._graspable_jaw_axis_local: torch.Tensor | None = None
+        genesis_link_names = [lk.name for lk in self.obj.links]
+
+        def _resolve_link_by_short_name(short_name: str):
+            for lk in self.obj.links:
+                if lk.name == short_name or lk.name.endswith("/" + short_name):
+                    return lk
+            return None
+
+        selected_part = None
+        button_prim_name = ctrl_meta.get("button_prim_name")
+        if button_prim_name:
+            self._graspable_link_name = button_prim_name
+            self._graspable_link = _resolve_link_by_short_name(button_prim_name)
+            print(f"[artvip] Button-coupled mechanism: grasp target = {button_prim_name}")
+        else:
+            graspable_parts = part_info.get_graspable_parts() if part_info else []
+            target_bodies = {target_joint.body0, target_joint.body1}
+            connected = [p for p in graspable_parts if p.parent_link in target_bodies]
+            selected_part = (connected or graspable_parts or [None])[0]
+            if selected_part is not None:
+                short_name = selected_part.parent_link.split("/")[-1]
+                self._graspable_link_name = short_name
+                self._graspable_link = _resolve_link_by_short_name(short_name)
+                # Jaw separation follows the thinnest handle dimension.
+                # The palm-normal component is projected out by the planner.
+                extent = torch.tensor(
+                    selected_part.root_local_extent,
+                    device=gs.device,
+                    dtype=gs.tc_float,
+                )
+                jaw_idx = int(torch.argmin(extent).item())
+                jaw_axis = torch.zeros(3, device=gs.device, dtype=gs.tc_float)
+                jaw_axis[jaw_idx] = 1.0
+                self._graspable_jaw_axis_local = jaw_axis
+                print(f"[artvip] Grasp interaction part: {selected_part.prim_path}")
+
+        # Articulation threshold from control script or default 0.7.
+        self._articulation_threshold = float(ctrl_meta.get("joint_threshold", 0.7))
+
+        # Resolve joint geometry in object-root local frame.
+        self._resolve_joint_geometry(target_joint, usd_path)
+
+        # Compute the graspable offset from the Genesis link origin at
+        # runtime.  This matches what ``get_graspable_part_pos()`` returns
+        # (the link origin, not the handle mesh bounding-box center, which
+        # can differ by the handle's local offset within the link).
+        if self._graspable_link is not None and self._graspable_local_offset_3d is None:
+            obj_pos = self.obj.get_pos(envs_idx=self.envs_all)
+            obj_quat = self.obj.get_quat(envs_idx=self.envs_all)
+            if obj_pos.ndim == 1:
+                obj_pos = obj_pos.unsqueeze(0)
+                obj_quat = obj_quat.unsqueeze(0)
+            link_pos = self._graspable_link.get_pos(envs_idx=self.envs_all)
+            if link_pos.ndim == 1:
+                link_pos = link_pos.unsqueeze(0)
+            world_offset = link_pos - obj_pos
+            local_offset = self._quat_rotate_batch(
+                _quat_conjugate_batch(obj_quat), world_offset,
+            )
+            self._graspable_local_offset = local_offset[:, :2].clone()
+            self._graspable_local_offset_3d = local_offset.clone()
+        if self._graspable_local_offset_3d is not None:
+            print(f"[artvip] Graspable part local offset (xy): "
+                  f"{self._graspable_local_offset[0].cpu().tolist()}")
+            print(f"[artvip] Graspable part local offset (xyz): "
+                  f"{self._graspable_local_offset_3d[0].cpu().tolist()}")
+
+    def _random_object_pose(self):
+        """Sample object pose with yaw oriented so the graspable part faces the robot.
+
+        Overrides the parent's random-yaw placement.  Computes yaw so that
+        the graspable part's local offset from the object root points toward
+        the robot after placement.  The object center is placed farther from
+        the robot by the part offset magnitude, so the *graspable part* (not
+        the object center) lands at the target radius.
+        """
+        theta = OBJ_ANG_MIN + (OBJ_ANG_MAX - OBJ_ANG_MIN) * self._rand((self.n_envs,))
+        if self._obj_radius_range is not None:
+            r_min, r_max = self._obj_radius_range
+        else:
+            r_min, r_max = OBJ_RADIUS_MIN, OBJ_RADIUS_MAX
+        part_radius = r_min + (r_max - r_min) * self._rand((self.n_envs,))
+
+        # Compute yaw so the graspable part faces the robot.
+        if self._graspable_local_offset is not None:
+            offset = self._graspable_local_offset[0]  # (2,) — same for all envs
+            part_offset_mag = offset.norm()
+            local_angle = torch.atan2(offset[1], offset[0])
+            # Direction from object to robot (robot at origin).
+            # Place object center beyond the part: center_dist = part_radius + offset_mag
+            center_radius = part_radius + part_offset_mag
+            x = center_radius * torch.cos(theta)
+            y = center_radius * torch.sin(theta)
+            target_angle = torch.atan2(-y, -x)
+            yaw = target_angle - local_angle
+        else:
+            # Fallback: no offset, use radius directly with random yaw.
+            x = part_radius * torch.cos(theta)
+            y = part_radius * torch.sin(theta)
+            yaw = (self._rand((self.n_envs,)) * 2.0 - 1.0) * math.pi
+
+        z_val = self._obj_z_override if self._obj_z_override is not None else OBJ_Z
+        z = torch.full((self.n_envs,), z_val, device=gs.device, dtype=gs.tc_float)
+        pos = torch.stack([x, y, z], dim=-1)
+        half = yaw * 0.5
+        quat = torch.stack(
+            [torch.cos(half), torch.zeros_like(half),
+             torch.zeros_like(half), torch.sin(half)],
+            dim=-1,
+        )
+        return pos, quat
+
+    def _resolve_target_joint(self, joint_info, part_info, ctrl_meta):
+        """Select the target joint to articulate."""
+        # Prefer joints named in the control script.
+        ctrl_joint_names = ctrl_meta.get("joint_names", [])
+        movable_by_name = {j.name: j for j in joint_info.movable_joints}
+
+        for name in ctrl_joint_names:
+            if name in movable_by_name:
+                j = movable_by_name[name]
+                if j.limits[1] > j.limits[0]:
+                    return j
+
+        # Find movable joints connected to graspable parts.
+        graspable_parts = part_info.get_graspable_parts() if part_info else []
+        graspable_links = {p.parent_link for p in graspable_parts}
+
+        candidates = []
+        for j in joint_info.movable_joints:
+            if j.limits[1] <= j.limits[0]:
+                continue
+            if j.body1 in graspable_links or j.body0 in graspable_links:
+                candidates.append(j)
+
+        if candidates:
+            return max(candidates, key=lambda j: abs(j.limits[1] - j.limits[0]))
+
+        # Fallback: any movable joint with non-zero range.
+        movable = [j for j in joint_info.movable_joints if j.limits[1] > j.limits[0]]
+        if movable:
+            return max(movable, key=lambda j: abs(j.limits[1] - j.limits[0]))
+
+        raise ValueError(
+            f"No movable joint with non-zero range found in {self._artvip_object}"
+        )
+
+    def _resolve_joint_geometry(self, target_joint, usd_path) -> None:
+        """Compute joint axis and origin in object-root local frame.
+
+        The USD joint prim's world transform gives us the joint axis and a
+        point on the axis in USD world coordinates. We transform these into
+        the object root's local frame so that at runtime we can rotate them
+        into Genesis world coordinates using the entity's current pose.
+
+        Stores:
+          self._joint_axis_local  : (3,) torch tensor, object-root local
+          self._joint_origin_local: (3,) torch tensor, object-root local
+        """
+        from pxr import Usd, UsdGeom, Gf
+
+        try:
+            stage = Usd.Stage.Open(str(usd_path))
+        except Exception:
+            self._joint_axis_local = None
+            self._joint_origin_local = None
+            return
+
+        root = stage.GetDefaultPrim()
+        if not root or not root.IsValid():
+            root = stage.GetPseudoRoot()
+
+        # Root world transform (USD world → root local).
+        root_xform = UsdGeom.Xformable(root)
+        root_world = root_xform.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+        root_inv = root_world.GetInverse()
+
+        # Joint prim world transform.
+        joint_prim = stage.GetPrimAtPath(target_joint.prim_path)
+        if not joint_prim or not joint_prim.IsValid():
+            self._joint_axis_local = None
+            self._joint_origin_local = None
+            return
+
+        joint_xform = UsdGeom.Xformable(joint_prim)
+        joint_world = joint_xform.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+
+        # Joint axis in USD world frame (direction → TransformDir).
+        axis_usd = np.array(target_joint.axis, dtype=np.float64)
+        axis_world = joint_world.TransformDir(Gf.Vec3d(*axis_usd))
+
+        # Joint origin in USD world frame (point → TransformAffine).
+        origin_world = joint_world.ExtractTranslation()
+
+        # Transform to root local frame using inverse root matrix.
+        axis_local = root_inv.TransformDir(axis_world)
+        origin_local = root_inv.TransformAffine(origin_world)
+
+        self._joint_axis_local = torch.tensor(
+            [axis_local[0], axis_local[1], axis_local[2]],
+            device=gs.device, dtype=gs.tc_float,
+        )
+        self._joint_origin_local = torch.tensor(
+            [origin_local[0], origin_local[1], origin_local[2]],
+            device=gs.device, dtype=gs.tc_float,
+        )
+
+    # ------------------------------------------------------------------
+    # Runtime articulation queries
+    # ------------------------------------------------------------------
+
+    def get_target_joint_pos(self) -> torch.Tensor:
+        """Read the target joint position for all envs. Returns (n_envs, 1)."""
+        if self._target_dof_idx is None:
+            return torch.zeros(self.n_envs, 1, device=gs.device, dtype=gs.tc_float)
+        pos = self.obj.get_dofs_position(
+            dofs_idx_local=self._target_dof_idx,
+            envs_idx=self.envs_all,
+        )
+        if pos.ndim == 1:
+            pos = pos.unsqueeze(-1)
+        return pos
+
+    def get_graspable_part_pos(self) -> torch.Tensor:
+        """Get the graspable part world position for all envs. Returns (n_envs, 3)."""
+        if self._graspable_link is not None:
+            pos = self._graspable_link.get_pos(envs_idx=self.envs_all)
+        else:
+            pos = self._obj_pos()
+        if pos.ndim == 1:
+            pos = pos.unsqueeze(0)
+        return pos
+
+    def _quat_rotate_batch(self, quat_wxyz: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
+        """Rotate batched vectors by batched WXYZ quaternions."""
+        from hsr_genesis.grasp_planning import quat_rotate_batch
+        return quat_rotate_batch(quat_wxyz, vec)
+
+    def get_joint_axis_world(self) -> torch.Tensor:
+        """Transform the stored joint axis to world frame using current object pose.
+
+        Returns (n_envs, 3) world-frame axis vectors.
+        """
+        if self._joint_axis_local is None:
+            return torch.zeros(self.n_envs, 3, device=gs.device, dtype=gs.tc_float)
+        obj_quat = self.obj.get_quat(envs_idx=self.envs_all)
+        if obj_quat.ndim == 1:
+            obj_quat = obj_quat.unsqueeze(0)
+        return self._quat_rotate_batch(obj_quat, self._joint_axis_local)
+
+    def get_joint_origin_world(self) -> torch.Tensor:
+        """Transform the stored joint origin to world frame using current object pose.
+
+        Returns (n_envs, 3) world-frame positions on the joint axis.
+        """
+        if self._joint_origin_local is None:
+            return self._obj_pos()
+        obj_pos = self.obj.get_pos(envs_idx=self.envs_all)
+        obj_quat = self.obj.get_quat(envs_idx=self.envs_all)
+        if obj_pos.ndim == 1:
+            obj_pos = obj_pos.unsqueeze(0)
+        if obj_quat.ndim == 1:
+            obj_quat = obj_quat.unsqueeze(0)
+        rotated = self._quat_rotate_batch(obj_quat, self._joint_origin_local)
+        return obj_pos + rotated
+
+    def get_articulation_direction(self, grasp_pos: torch.Tensor) -> torch.Tensor:
+        """Compute the world-space direction to pull the graspable part to open the joint.
+
+        For **prismatic** joints: the direction is the joint axis (in world),
+        oriented toward the open limit (the limit further from the current
+        joint position).
+
+        For **revolute** joints: the direction is the tangent to the
+        articulation arc at the grasp point, computed as
+        ``cross(axis_world, r)`` where ``r = grasp_pos - axis_origin_world``.
+        The tangent is oriented toward the open limit.
+
+        Args:
+            grasp_pos: (n_envs, 3) world-frame grasp point (e.g. graspable
+                part position).
+
+        Returns:
+            (n_envs, 3) normalized world-frame articulation directions.
+        """
+        axis_world = self.get_joint_axis_world()  # (N, 3)
+        origin_world = self.get_joint_origin_world()  # (N, 3)
+
+        if self._target_joint_type == "prismatic":
+            direction = axis_world
+        else:
+            # Revolute: tangent = cross(axis, r), r = grasp - origin.
+            r = grasp_pos - origin_world  # (N, 3)
+            direction = torch.cross(axis_world, r, dim=-1)
+
+        # Normalize.
+        norm = direction.norm(dim=-1, keepdim=True)
+        norm = torch.clamp(norm, min=1e-6)
+        direction = direction / norm
+
+        # Orient toward open limit.
+        # The "open" direction is from the current joint position toward the
+        # limit that's further away.  At reset the joint is typically at one
+        # limit (closed), so we move toward the other.
+        qpos = self.get_target_joint_pos()  # (N, 1)
+        lower, upper = self._target_joint_limits
+        # If closer to lower, open toward upper; vice versa.
+        open_sign = torch.where(
+            (qpos - lower).abs() < (qpos - upper).abs(),
+            torch.ones_like(qpos),   # move toward upper → positive
+            -torch.ones_like(qpos),  # move toward lower → negative
+        )
+        direction = direction * open_sign
+
+        return direction
+
+    def get_surface_normal(self, grasp_pos: torch.Tensor) -> torch.Tensor:
+        """Compute the surface normal of the graspable part in world frame.
+
+        For **revolute** joints (hinged door/lid): the surface normal is
+        ``cross(axis_world, r)`` where ``r = grasp_pos - joint_origin``.
+        This gives a vector perpendicular to the door surface, pointing
+        outward from the hinge side.
+
+        For **prismatic** joints (drawer): the surface normal is the joint
+        axis direction — the drawer face is perpendicular to the slide
+        direction.
+
+        Args:
+            grasp_pos: (N, 3) world-frame grasp point.
+
+        Returns:
+            (N, 3) normalized surface normal vectors (horizontal component
+            only, z zeroed — the robot approaches horizontally).
+        """
+        axis_world = self.get_joint_axis_world()  # (N, 3)
+        origin_world = self.get_joint_origin_world()  # (N, 3)
+
+        if self._target_joint_type == "prismatic":
+            normal = axis_world
+        else:
+            # Revolute: normal = cross(axis, r), perpendicular to door surface.
+            r = grasp_pos - origin_world  # (N, 3)
+            normal = torch.cross(axis_world, r, dim=-1)
+
+        # Zero out z component — robot approaches horizontally.
+        normal[:, 2] = 0.0
+        norm = normal.norm(dim=-1, keepdim=True)
+        norm = torch.clamp(norm, min=1e-6)
+        return normal / norm
+
+    # ------------------------------------------------------------------
+    # GraspTargetProvider overrides (articulated object).
+    # ------------------------------------------------------------------
+
+    def part_pos(self, obj_pos: torch.Tensor, obj_quat: torch.Tensor) -> torch.Tensor:
+        """graspable-part world position.  Prefers the live link pose (links
+        articulate over time); falls back to obj_pos + rotated local offset."""
+        if self._graspable_link is not None:
+            pos = self._graspable_link.get_pos(envs_idx=self.envs_all)
+            return pos.unsqueeze(0) if pos.ndim == 1 else pos
+        if self._graspable_local_offset_3d is not None:
+            return obj_pos + self._quat_rotate_batch(
+                obj_quat, self._graspable_local_offset_3d,
+            )
+        return obj_pos.clone()
+
+    def surface_normal(self, part_pos: torch.Tensor, obj_quat: torch.Tensor) -> torch.Tensor | None:
+        """Surface normal from stored local joint geometry (analytic)."""
+        if self._joint_axis_local is None or self._joint_origin_local is None:
+            return None
+        N = part_pos.shape[0]
+        axis_local = self._joint_axis_local.unsqueeze(0).expand(N, -1)
+        origin_local = self._joint_origin_local.unsqueeze(0).expand(N, -1)
+
+        axis_world = self._quat_rotate_batch(obj_quat, axis_local)
+        origin_world = self._obj_pos() + self._quat_rotate_batch(obj_quat, origin_local)
+
+        if self._target_joint_type == "prismatic":
+            normal = axis_world
+        else:
+            r = part_pos - origin_world
+            normal = torch.cross(axis_world, r, dim=-1)
+
+        normal[:, 2] = 0.0
+        norm = normal.norm(dim=-1, keepdim=True)
+        norm = torch.clamp(norm, min=1e-6)
+        normal = normal / norm
+        return SweepGraspPlanner.orient_normal_toward_robot(normal, part_pos)
+
+    def approach_dirs(
+        self, part_pos: torch.Tensor, surface_normal: torch.Tensor | None,
+    ) -> list[torch.Tensor] | None:
+        """4 directions relative to the handle's surface normal.
+
+        Front (+normal), back (-normal, usually inside the object —
+        rejected by the collision check), and both perpendiculars.
+        Returns None when no normal is available.
+        """
+        if surface_normal is None:
+            return None
+        n = surface_normal.clone()
+        n[:, 2] = 0.0
+        n = n / n.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+        nx, ny = n[:, 0], n[:, 1]
+        z = torch.zeros_like(nx)
+        return [
+            torch.stack([nx, ny, z], dim=-1),
+            torch.stack([-nx, -ny, z], dim=-1),
+            torch.stack([-ny, nx, z], dim=-1),
+            torch.stack([ny, -nx, z], dim=-1),
+        ]
+
+    def yaw_candidates(self, obj_pos: torch.Tensor) -> list[torch.Tensor]:
+        """±60° sweep around the yaw facing the graspable part toward the
+        robot (when the local offset is known), else full circle."""
+        N = self.n_envs
+        device = gs.device
+        if self._graspable_local_offset is not None:
+            offset = self._graspable_local_offset[0]  # (2,)
+            local_angle = torch.atan2(offset[1], offset[0])
+            x, y = obj_pos[0, 0], obj_pos[0, 1]
+            target_angle = torch.atan2(-y, -x)
+            base_yaw = target_angle - local_angle
+            base_yaw = base_yaw.unsqueeze(0).expand(N) if base_yaw.ndim == 0 else base_yaw
+            deltas = torch.linspace(
+                -math.pi / 3, math.pi / 3, 7, device=device, dtype=gs.tc_float,
+            )
+            return [(base_yaw + d).expand(N) for d in deltas]
+        return super().yaw_candidates(obj_pos)
+
+    def terminal_target(self, grasp_pos: torch.Tensor, descend_pos: torch.Tensor) -> torch.Tensor:
+        """Articulation IK target: pull along the joint's articulation
+        direction by 50% of its physical range."""
+        direction = self.get_articulation_direction(grasp_pos)  # (N, 3)
+        lower, upper = self._target_joint_limits
+        joint_range = abs(upper - lower)
+        n = grasp_pos.shape[0]
+        if self._target_joint_type == "prismatic":
+            displacement = torch.full(
+                (n,), joint_range * 0.5,
+                device=grasp_pos.device, dtype=grasp_pos.dtype,
+            )
+        else:
+            # Revolute: arc length = radius * angle.
+            origin = self.get_joint_origin_world()
+            radius = (grasp_pos - origin).norm(dim=-1)
+            displacement = (radius * joint_range * 0.5).clamp(min=0.05, max=0.30)
+        return grasp_pos + direction * displacement.unsqueeze(-1)
+
+
 
 
 # ---------------------------------------------------------------------------

@@ -25,8 +25,8 @@ from gymnasium import spaces
 
 from stable_baselines3.common.vec_env.base_vec_env import VecEnv, VecEnvObs, VecEnvStepReturn
 
-from ycb_pick_ik_parallel import HSRPickEnv, GRIPPER_EFFORT, HAND_QUAT, LIFT_THRESHOLD
-from ik_planner import IKPlanner, IKPlan
+from ycb_pick_ik_parallel import HSRPickEnv, GRIPPER_EFFORT, LIFT_THRESHOLD
+from hsr_genesis.grasp_planning import IKPlanner, IKPlan
 from curriculum import CurriculumManager
 
 # Observation dimensions
@@ -245,7 +245,7 @@ class HSRPickRLEnv(gym.Env):
         # Compute IK plan for this episode when guidance is enabled.
         if self.use_ik_guidance:
             assert self._planner is not None
-            self._plan = self._planner.plan(env)
+            self._plan = self._planner.plan(env.solver, env)
             if self.gripper_effort_override is not None:
                 self._plan.gripper_effort = self.gripper_effort_override
             ik_success = self._plan.ik_success.cpu().numpy()
@@ -312,7 +312,7 @@ class HSRPickRLEnv(gym.Env):
             cur_qpos = env.hsr.get_qpos(envs_idx=env.envs_all)
             if cur_qpos.ndim == 1:
                 cur_qpos = cur_qpos.unsqueeze(0)
-            self._plan = self._planner.plan(env, init_qpos=cur_qpos)
+            self._plan = self._planner.plan(env.solver, env, init_qpos=cur_qpos)
             if self.gripper_effort_override is not None:
                 self._plan.gripper_effort = self.gripper_effort_override
 
@@ -603,15 +603,22 @@ class BatchedGenesisVecEnv(VecEnv):
 
     def __init__(self, env: HSRPickRLEnv) -> None:
         self.env = env
+        # Read per-env obs/action shape from the env's spaces (which are
+        # batched as (n_envs, dim)).  Strip the batch dimension so SB3 sees
+        # the single-env shape.
+        obs_shape = env.observation_space.shape
+        obs_dim = obs_shape[1] if len(obs_shape) > 1 else obs_shape[0]
+        act_shape = env.action_space.shape
+        act_dim = act_shape[1] if len(act_shape) > 1 else act_shape[0]
         super().__init__(
             num_envs=env.n_envs,
             observation_space=spaces.Box(
                 low=-np.inf, high=np.inf,
-                shape=(OBS_DIM,), dtype=np.float32,
+                shape=(obs_dim,), dtype=np.float32,
             ),
             action_space=spaces.Box(
                 low=-1.0, high=1.0,
-                shape=(ACTION_DIM,), dtype=np.float32,
+                shape=(act_dim,), dtype=np.float32,
             ),
         )
         self._actions: np.ndarray | None = None
