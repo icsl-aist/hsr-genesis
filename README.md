@@ -185,61 +185,31 @@ If you see a viewer window, the example is running correctly.
 
 ![rrt_path_planning_hsr](https://github.com/icsl-aist/hsr-genesis/releases/download/gif-assets/rrt_path_planning_hsr.gif)
 
-## Docker
+## Camera backends
 
-The Docker environment provides a reproducible setup with CUDA 12.4,
-necessary for the `batch_renderer` camera backend (the prebuilt
-`gs-madrona` wheel requires CUDA 12.x for NVVM JIT linking).
+Both the rasterizer and `batch_renderer` camera backends run in the native
+virtual environment. Batch rendering was verified with Genesis 1.4.5 and
+`gs-madrona` 0.0.10 on an RTX 5060 Ti with NVIDIA driver 595.99.02, including
+with `DISPLAY` and `WAYLAND_DISPLAY` unset.
 
-**Use Docker if you need `camera_backend="batch_renderer"`.**  If you
-only use the default rasterizer backend (or run headless physics without
-cameras), a native install with a modern CUDA toolkit may give better
-simulation performance — newer CUDA versions include optimised cuBLAS
-and cuDNN kernels that accelerate Genesis internals.
+Install the project using the virtual environment described above. The
+`gs-madrona` wheel installs its CUDA 12 NVRTC and nvJitLink dependencies through
+pip; these coexist with the CUDA 13 libraries used by the tested Torch
+installation. A compatible NVIDIA driver and host graphics/Vulkan libraries
+are required. No CUDA-library environment overrides were needed on the tested
+machine.
 
-### Prerequisites
-
-- Docker with the NVIDIA Container Toolkit (`nvidia-container-runtime`)
-- NVIDIA driver ≥ 550 (tested with 595)
-
-### Quick start
+Run the camera checks from the repository root:
 
 ```bash
-# Run all tests (headless, xvfb auto-started)
-./scripts/docker-run.sh
-
-# Run specific tests
-./scripts/docker-run.sh -- python -m pytest tests/test_camera_lighting.py -v
-
-# Run a user script (headless)
-./scripts/docker-run.sh -- python examples/tutorials/hello_hsr_sensor.py
-
-# Interactive shell
-./scripts/docker-run.sh -- bash
+PYTHONPATH=src .venv/bin/python -m pytest tests/test_camera_lighting.py -v -rs
 ```
 
-### Viewer (windowed GUI)
-
-To see the Genesis viewer window on your host desktop:
+The interactive viewer requires a desktop display. Launch an example with:
 
 ```bash
-xhost +local:docker
-./scripts/docker-run.sh --viewer -- examples/tutorials/hello_hsr_parallel.py
+PYTHONPATH=src .venv/bin/python examples/tutorials/hello_hsr_parallel.py
 ```
-
-The `--viewer` flag forwards your X11 socket and sets `--network host`
-so the OpenGL window appears on your host desktop.  Always run
-`xhost +local:docker` first to allow the container to connect.
-
-### How it works
-
-| Component | What it provides |
-|-----------|------------------|
-| `nvidia/cuda:12.4.1-runtime` | CUDA 12.4 runtime libraries |
-| `libnvidia-gl-550` | NVIDIA Vulkan ICD manifest (needed by batch renderer) |
-| `NVIDIA_DRIVER_CAPABILITIES=all` | Mounts host graphics/Vulkan driver libraries |
-| `xvfb-run` | Virtual framebuffer for headless rendering |
-| `libx11-dev libxrender-dev …` | X11 libraries for the Genesis viewer |
 
 ## Performance Tips
 

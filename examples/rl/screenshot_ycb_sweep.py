@@ -74,7 +74,7 @@ def main() -> None:
         curriculum=CurriculumManager(),
         use_ik_guidance=True,
         vis_options_overrides={
-            "env_separate_rigid": False,
+            "split_envs": False,
             "lights": [gs.options.vis.DirectionalLight(
                 dir=(0.5, 0.5, -1), color=(1, 1, 1), intensity=3.0,
             )],

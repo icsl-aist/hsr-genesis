@@ -14,6 +14,8 @@ All notable changes to this package will be documented in this file.
 - Tests `tests/test_sdf_world.py`.
 
 ### Changed
+- Remove the Dockerfile and Docker helper scripts; document native camera setup and verification.
+- Upgrade the pinned Genesis dependency to 1.4.5, including Colab setup. Adapt HSR entity construction, depth/lidar and viewer raycast filters, force-torque sensors, collider access, and planar RRT planning to the new APIs.
 - `sdf_parser`: extracted `_resolve_sdf_file` from `load_sdf_model` (shared with `sdf_world`); module scope note now points at `sdf_world` for world-level files.
 - Base trajectories now hold their final pose until `reset_base_trajectory_batched` or replacement; removed the automatic-stop constructor options `stop_velocity_threshold` and `stop_time_margin`.
 - Outer trajectory feedback and damping now use one controller-owned production tuning value instead of per-instance constructor overrides.

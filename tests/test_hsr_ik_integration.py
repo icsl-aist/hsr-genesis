@@ -74,9 +74,9 @@ def _mat4_from_pos_quat_wxyz(pos, quat):
     R = [[1.0 - (yy + zz), xy - wz, xz + wy],
          [xy + wz, 1.0 - (xx + zz), yz - wx],
          [xz - wy, yz + wx, 1.0 - (xx + yy)]]
-    T = torch.eye(4, dtype=gs.tc_float)
-    T[:3, :3] = torch.tensor(R, dtype=gs.tc_float)
-    T[:3, 3] = torch.tensor(pos, dtype=gs.tc_float)
+    T = torch.eye(4, dtype=gs.tc_float, device=gs.device)
+    T[:3, :3] = torch.tensor(R, dtype=gs.tc_float, device=gs.device)
+    T[:3, 3] = torch.tensor(pos, dtype=gs.tc_float, device=gs.device)
     return T
 
 
@@ -95,8 +95,8 @@ class TestHSRIKIntegration:
         offset_z = 0.04
         hsr.end_effector_offset = [0.0, 0.0, offset_z]
 
-        target_pos = torch.tensor([0.45, 0.0, 0.06], dtype=gs.tc_float)
-        target_quat = torch.tensor([0.0, 1.0, 0.0, 0.0], dtype=gs.tc_float)
+        target_pos = torch.tensor([0.45, 0.0, 0.06], dtype=gs.tc_float, device=gs.device)
+        target_quat = torch.tensor([0.0, 1.0, 0.0, 0.0], dtype=gs.tc_float, device=gs.device)
 
         qpos = hsr.inverse_kinematics(
             link=end_effector,
@@ -129,9 +129,9 @@ class TestHSRIKIntegration:
         R = torch.tensor([[1.0 - (yy + zz), xy - wz, xz + wy],
                           [xy + wz, 1.0 - (xx + zz), yz - wx],
                           [xz - wy, yz + wx, 1.0 - (xx + yy)]],
-                         dtype=gs.tc_float)
+                         dtype=gs.tc_float, device=gs.device)
 
-        local_point_t = torch.tensor([0.0, 0.0, offset_z], dtype=gs.tc_float)
+        local_point_t = torch.tensor([0.0, 0.0, offset_z], dtype=gs.tc_float, device=gs.device)
         offset_world = fk_pos[0] + R @ local_point_t
 
         assert torch.allclose(offset_world, target_pos, atol=5e-3), (
@@ -144,8 +144,8 @@ class TestHSRIKIntegration:
         hsr.end_effector_offset = None
         end_effector = hsr.get_link("hand_palm_link")
 
-        target_pos = torch.tensor([0.45, 0.0, 0.06], dtype=gs.tc_float)
-        target_quat = torch.tensor([0.0, 1.0, 0.0, 0.0], dtype=gs.tc_float)
+        target_pos = torch.tensor([0.45, 0.0, 0.06], dtype=gs.tc_float, device=gs.device)
+        target_quat = torch.tensor([0.0, 1.0, 0.0, 0.0], dtype=gs.tc_float, device=gs.device)
 
         # Create a custom init_qpos with a retracted arm configuration
         arm_dofs = hsr._ensure_arm_qs_idx()
@@ -182,8 +182,8 @@ class TestHSRIKIntegration:
         end_effector = hsr.get_link("hand_palm_link")
 
         # Pick a reachable target
-        target_pos = torch.tensor([0.45, 0.0, 0.06], dtype=gs.tc_float)
-        target_quat = torch.tensor([0.0, 1.0, 0.0, 0.0], dtype=gs.tc_float)
+        target_pos = torch.tensor([0.45, 0.0, 0.06], dtype=gs.tc_float, device=gs.device)
+        target_quat = torch.tensor([0.0, 1.0, 0.0, 0.0], dtype=gs.tc_float, device=gs.device)
 
         current_qpos = hsr.get_qpos().clone()
         base_qs_idx_local = hsr._ensure_base_qs_idx()
@@ -224,8 +224,8 @@ class TestHSRIKIntegration:
         hsr.end_effector_offset = None
         end_effector = hsr.get_link("hand_palm_link")
 
-        target_pos = torch.tensor([0.45, 0.0, 0.06], dtype=gs.tc_float)
-        target_quat = torch.tensor([0.0, 1.0, 0.0, 0.0], dtype=gs.tc_float)
+        target_pos = torch.tensor([0.45, 0.0, 0.06], dtype=gs.tc_float, device=gs.device)
+        target_quat = torch.tensor([0.0, 1.0, 0.0, 0.0], dtype=gs.tc_float, device=gs.device)
 
         current_qpos = hsr.get_qpos().clone()
         base_qs_idx_local = hsr._ensure_base_qs_idx()

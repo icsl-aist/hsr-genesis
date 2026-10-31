@@ -1089,6 +1089,9 @@ def load_artvip_object(
         Morph ready for ``scene.add_entity(...)``.
     """
     import genesis as gs
+    from .genesis_patches import apply_mesh_decimation_patch
+
+    apply_mesh_decimation_patch()
 
     usd_path = download_artvip_object(
         category, object_name, cache_dir=cache_dir, token=token,

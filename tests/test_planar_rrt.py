@@ -209,12 +209,12 @@ class TestPlanarRRT:
             f"qy must be 0, got range [{qy_vals.min().item():.6f}, {qy_vals.max().item():.6f}]"
         )
 
-    def test_planar_rrt_restores_q_limit(self):
+    def test_planar_rrt_preserves_dof_limits(self):
         hsr = _ensure_hsr()
         end_effector = hsr.get_link("hand_palm_link")
 
-        original_lower = np.array(hsr.q_limit[0], copy=True)
-        original_upper = np.array(hsr.q_limit[1], copy=True)
+        original_lower = hsr.get_dofs_limit()[0].detach().cpu().numpy().copy()
+        original_upper = hsr.get_dofs_limit()[1].detach().cpu().numpy().copy()
 
         start_qpos = hsr.get_qpos().clone()
         goal_pos = torch.tensor([0.5, 0.0, 0.3], dtype=gs.tc_float)
@@ -240,8 +240,8 @@ class TestPlanarRRT:
             timeout=10.0,
         )
 
-        restored_lower = np.array(hsr.q_limit[0])
-        restored_upper = np.array(hsr.q_limit[1])
+        restored_lower = hsr.get_dofs_limit()[0].detach().cpu().numpy()
+        restored_upper = hsr.get_dofs_limit()[1].detach().cpu().numpy()
 
         assert np.allclose(restored_lower, original_lower), "q_limit lower bounds not restored"
         assert np.allclose(restored_upper, original_upper), "q_limit upper bounds not restored"

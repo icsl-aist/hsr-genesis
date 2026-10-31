@@ -17,10 +17,6 @@ def _import_analytic_ik():
     if not getattr(gs, "_initialized", False):
         gs.init(backend=gs.cpu, precision="32", logging_level="warning")
 
-    try:
-        ti.init(arch=ti.cpu)
-    except Exception:
-        pass
 
     import hsr_genesis.analytic_ik as analytic_ik
 

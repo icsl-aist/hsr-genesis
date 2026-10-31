@@ -110,7 +110,7 @@ scene.add_entity(
 
 # Replicate VisOptions lights as per-camera lights (same as sensor_manager)
 camera_lights = []
-for light in scene.vis_options.lights:
+for light in scene.options.vis.lights:
     lt = getattr(light, "type", None)
     if lt == "directional":
         camera_lights.append({

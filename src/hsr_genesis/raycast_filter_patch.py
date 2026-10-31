@@ -22,7 +22,7 @@ class RaycastIgnoreList:
 class _SolverIgnoreState:
     solver_ref: weakref.ReferenceType
     ignore_list: RaycastIgnoreList = field(default_factory=RaycastIgnoreList)
-    geom_mask: object | None = None
+    mesh_masks: dict[bool, object] = field(default_factory=dict)
     dirty: bool = True
 
 
@@ -33,6 +33,12 @@ _PATCH_APPLIED = False
 def _resolve_solver(target):
     if target is None:
         return None
+    # Genesis solvers expose .sim too; resolve an explicit solver before
+    # interpreting .sim as a scene and selecting its default rigid solver.
+    from genesis.engine.solvers.base_solver import Solver
+
+    if isinstance(target, Solver):
+        return target
     if hasattr(target, "sim"):
         sim = getattr(target, "sim", None)
         return getattr(sim, "rigid_solver", None) if sim is not None else None
@@ -112,11 +118,11 @@ def clear_raycast_ignore_list(target) -> None:
     state.dirty = True
 
 
-def _build_ignore_geom_mask(solver, ignore_list: RaycastIgnoreList):
+def _build_ignore_geom_mask(solver, ignore_list: RaycastIgnoreList, *, visual=False):
     import torch
     import genesis as gs
 
-    geoms = list(getattr(solver, "geoms", []) or [])
+    geoms = list(getattr(solver, "vgeoms" if visual else "geoms", []) or [])
     if not geoms:
         return None
 
@@ -154,159 +160,21 @@ def _build_ignore_geom_mask(solver, ignore_list: RaycastIgnoreList):
     return mask
 
 
-def _get_ignore_geom_mask(solver):
-    state = _get_state(solver)
-    if state is None:
-        return None
-    if not state.dirty and state.geom_mask is not None:
-        return state.geom_mask
-
-    mask = _build_ignore_geom_mask(solver, state.ignore_list)
-    state.geom_mask = mask
-    if mask is None:
-        if not (state.ignore_list.geom_indices or state.ignore_list.entity_indices or state.ignore_list.link_names):
-            state.dirty = False
-        else:
-            state.dirty = True
-        return None
-    state.dirty = False
-    return mask
-
-
 def apply_raycast_filter_patch() -> None:
-    """Patch Genesis raycasters to honor ignore lists."""
+    """Install the Genesis 1.4.5 sensor and viewer filtering hooks."""
     global _PATCH_APPLIED
     if _PATCH_APPLIED:
         return
-
-    import genesis as gs
-    import torch
     import genesis.engine.sensors.raycaster as raycaster_mod
-    from genesis.utils import raycast_qd
-
+    from genesis.vis.viewer_plugins.raycast import Raycaster
+    from genesis.utils.misc import with_lock
     from .genesis_patches import apply_raycaster_ignore_patch
-    from .raycast_ignore_kernel import (
-        kernel_cast_ray_ignore_geom,
-        kernel_cast_rays_ignore_geom,
-    )
+    from .raycast_compat import update_raw_data, cast_viewer
 
     apply_raycaster_ignore_patch()
-
-    if getattr(raycaster_mod, "_hsr_ignore_filter_patch", False):
-        _PATCH_APPLIED = True
-        return
-
-    original_update = raycaster_mod.RaycasterSensor._update_shared_ground_truth_cache
-
-    @classmethod
-    def _update_shared_ground_truth_cache(cls, shared_metadata, shared_ground_truth_cache):
-        cls._update_bvh(shared_metadata)
-
-        links_pos = shared_metadata.solver.get_links_pos(links_idx=shared_metadata.links_idx)
-        links_quat = shared_metadata.solver.get_links_quat(links_idx=shared_metadata.links_idx)
-        if shared_metadata.solver.n_envs == 0:
-            links_pos = links_pos[None]
-            links_quat = links_quat[None]
-
-        if not hasattr(shared_metadata, "ignore_link_idx"):
-            n_sensors = int(shared_metadata.sensor_point_counts.shape[0])
-            shared_metadata.ignore_link_idx = torch.full((n_sensors,), -1, device=gs.device, dtype=gs.tc_int)
-            shared_metadata.ignore_root_idx = torch.full((n_sensors,), -1, device=gs.device, dtype=gs.tc_int)
-            shared_metadata.ignore_subtree_root_link_idx = torch.full(
-                (n_sensors,), -1, device=gs.device, dtype=gs.tc_int
-            )
-
-        ignore_geom_mask = _get_ignore_geom_mask(shared_metadata.solver)
-        has_sensor_ignore = (
-            (
-                hasattr(shared_metadata, "ignore_link_idx")
-                and shared_metadata.ignore_link_idx is not None
-                and (shared_metadata.ignore_link_idx >= 0).any()
-            )
-            or (
-                hasattr(shared_metadata, "ignore_root_idx")
-                and shared_metadata.ignore_root_idx is not None
-                and (shared_metadata.ignore_root_idx >= 0).any()
-            )
-            or (
-                hasattr(shared_metadata, "ignore_subtree_root_link_idx")
-                and shared_metadata.ignore_subtree_root_link_idx is not None
-                and (shared_metadata.ignore_subtree_root_link_idx >= 0).any()
-            )
-        )
-
-        if ignore_geom_mask is None and not has_sensor_ignore:
-            return original_update(shared_metadata, shared_ground_truth_cache)
-
-        if ignore_geom_mask is None:
-            ignore_geom_mask = torch.zeros(
-                (len(shared_metadata.solver.geoms),),
-                device=gs.device,
-                dtype=gs.tc_bool,
-            )
-
-        output_hits = shared_ground_truth_cache.contiguous()
-        kernel_cast_rays_ignore_geom(
-            shared_metadata.solver.fixed_verts_state,
-            shared_metadata.solver.free_verts_state,
-            shared_metadata.solver.verts_info,
-            shared_metadata.solver.faces_info,
-            shared_metadata.solver.geoms_info,
-            shared_metadata.solver.links_info,
-            shared_metadata.bvh.nodes,
-            shared_metadata.bvh.morton_codes,
-            links_pos,
-            links_quat,
-            shared_metadata.ray_starts,
-            shared_metadata.ray_dirs,
-            shared_metadata.max_ranges,
-            shared_metadata.no_hit_values,
-            shared_metadata.return_world_frame,
-            shared_metadata.points_to_sensor_idx,
-            shared_metadata.sensor_cache_offsets,
-            shared_metadata.sensor_point_offsets,
-            shared_metadata.sensor_point_counts,
-            shared_metadata.ignore_link_idx,
-            shared_metadata.ignore_root_idx,
-            shared_metadata.ignore_subtree_root_link_idx,
-            ignore_geom_mask,
-            output_hits,
-            gs.EPS,
-        )
-        if not shared_ground_truth_cache.is_contiguous():
-            shared_ground_truth_cache.copy_(output_hits)
-
-    raycaster_mod.RaycasterSensor._update_shared_ground_truth_cache = _update_shared_ground_truth_cache
-
-    original_cast = raycast_qd.Raycaster.cast
-
-    def _cast(self, ray_origin, ray_direction, max_range: float = 1000.0, envs_idx=None):
-        ignore_geom_mask = _get_ignore_geom_mask(self.solver)
-        if ignore_geom_mask is None:
-            ignore_geom_mask = torch.zeros(
-                (len(self.solver.geoms),),
-                device=gs.device,
-                dtype=gs.tc_bool,
-            )
-
-        kernel_cast_ray_ignore_geom(
-            self.solver.fixed_verts_state,
-            self.solver.free_verts_state,
-            self.solver.verts_info,
-            self.solver.faces_info,
-            self.bvh.nodes,
-            self.bvh.morton_codes,
-            gs.np.ascontiguousarray(ray_origin, dtype=gs.np_float),
-            gs.np.ascontiguousarray(ray_direction, dtype=gs.np_float),
-            float(max_range),
-            envs_idx if envs_idx is not None else self.envs_idx,
-            ignore_geom_mask,
-            self.result,
-            gs.EPS,
-        )
-        return self._raycast_from_result(self.result)
-
-    raycast_qd.Raycaster.cast = _cast
-
+    if not hasattr(raycaster_mod.RaycasterSensor, "_update_raw_data"):
+        raise RuntimeError("Raycast filtering requires the Genesis 1.4.5 RaycastContext API")
+    raycaster_mod.RaycasterSensor._update_raw_data = classmethod(update_raw_data)
+    Raycaster.cast = with_lock(cast_viewer)
     raycaster_mod._hsr_ignore_filter_patch = True
     _PATCH_APPLIED = True
