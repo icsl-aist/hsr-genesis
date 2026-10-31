@@ -153,7 +153,7 @@ class HSRPickEnv:
                 camera_pos=(3.5, -2.0, 2.0),
                 camera_lookat=(0.0, 0.0, 0.5),
                 camera_fov=30,
-                max_FPS=60,
+                refresh_rate=60,
             ),
             vis_options=gs.options.VisOptions(**vis_options_kwargs),
             sim_options=gs.options.SimOptions(dt=self.dt, substeps=4),

@@ -16,10 +16,6 @@ from hsr_genesis.base_controller import (  # noqa: E402
     IIRFilter,
 )
 
-try:
-    ti.init(arch=ti.cpu)
-except Exception:
-    pass
 
 
 class _FakeJoint:

@@ -334,9 +334,9 @@ _HSR_HAND_DISTAL_KEEP_COLLISION = ("hand_l_distal_link", "hand_r_distal_link")
 
 class HSRRigidEntity(RigidEntity):
     def __init__(self, *args, **kwargs) -> None:
+        morph = kwargs.pop("hsr_morph", kwargs.get("morph", None))
         super().__init__(*args, **kwargs)
         apply_runtime_patches()
-        morph = kwargs.get("morph", None)
         self._hsr_robot = getattr(morph, "hsr_robot", "hsrb")
         self._hsr_base_mode = getattr(morph, "hsr_base_mode", "planar")
         self._hsr_end_effector_frame = getattr(morph, "hsr_end_effector_frame", "hand_palm_link")
@@ -520,12 +520,18 @@ class HSRRigidEntity(RigidEntity):
         geoms_b = [geom.idx for geom in self.geoms if geom.link.name in link_names_b]
         if not geoms_a or not geoms_b:
             return
-        collision_pair_idx = solver.collider._collider_info.collision_pair_idx.to_numpy()
+        # Genesis 1.4.5 exposes collider_info and stores arrays as device tensors.
+        info = getattr(solver.collider, "collider_info", None)
+        if info is None:
+            info = solver.collider._collider_info
+        from genesis.utils.misc import qd_to_torch
+        pair_table = qd_to_torch(info.collision_pair_idx)
+        collision_pair_idx = pair_table.clone()
         for i_ga in geoms_a:
             for i_gb in geoms_b:
                 collision_pair_idx[i_ga, i_gb] = -1
                 collision_pair_idx[i_gb, i_ga] = -1
-        solver.collider._collider_info.collision_pair_idx.from_numpy(collision_pair_idx)
+        info.collision_pair_idx.from_torch(collision_pair_idx)
 
     def _hsr_apply_default_collision_disable(self) -> None:
         if self._hsr_collision_disable_applied:
@@ -2056,27 +2062,39 @@ class HSRRigidEntity(RigidEntity):
         envs_idx=None,
         base_xyyaw=None,
     ):
+        """Evaluate link poses without changing live dynamics or contact state."""
+        from genesis.engine.solvers.kinematic_solver import _offset_world_shift, _select_links_offset
+        from genesis.utils.geom import inv_quat, transform_quat_by_quat
+
+        # Genesis 1.4.5 moved this operation to a solver query. Unlike set_qpos,
+        # that query preserves contacts, constraint warm starts and sensor caches.
+        if self._solver.n_envs:
+            envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+        query_qpos = self.get_qpos(envs_idx=envs_idx).clone()
+        qs = self._get_global_idx(qs_idx_local, self.n_qs)
+        qs = torch.as_tensor(qs, device=gs.device, dtype=torch.long)
+        query_qpos[..., qs] = torch.as_tensor(qpos, device=gs.device, dtype=gs.tc_float)
         if base_xyyaw is not None:
-            if not torch.is_tensor(qpos):
-                qpos = torch.as_tensor(qpos, dtype=gs.tc_float)
             base_qs_idx = self._ensure_base_qs_idx()
             if len(base_qs_idx) >= 7:
                 bx, by, byaw = base_xyyaw
-                hc = math.cos(byaw * 0.5)
-                hs = math.sin(byaw * 0.5)
-                qpos[..., base_qs_idx[0]] = bx
-                qpos[..., base_qs_idx[1]] = by
-                qpos[..., base_qs_idx[2]] = 0.0
-                qpos[..., base_qs_idx[3]] = hc
-                qpos[..., base_qs_idx[4]] = 0.0
-                qpos[..., base_qs_idx[5]] = 0.0
-                qpos[..., base_qs_idx[6]] = hs
-        return super().forward_kinematics(
-            qpos,
-            qs_idx_local=qs_idx_local,
-            links_idx_local=links_idx_local,
-            envs_idx=envs_idx,
-        )
+                query_qpos[..., base_qs_idx[:7]] = query_qpos.new_tensor(
+                    (bx, by, 0.0, math.cos(byaw * 0.5), 0.0, 0.0, math.sin(byaw * 0.5))
+                )
+        pos, quat = self._solver.forward_kinematics_query(self, query_qpos, envs_idx=envs_idx)
+        local_links = self._get_global_idx(links_idx_local, self.n_links)
+        local_links = torch.as_tensor(local_links, device=gs.device, dtype=torch.long)
+        pos, quat = pos[..., local_links, :], quat[..., local_links, :]
+        # The native query returns internal solver frames. Strip the same
+        # authored-frame offsets as the public entity link-pose getters.
+        global_links = local_links + self._link_start
+        offset_pos = _select_links_offset(self._solver._links_offset_pos, global_links, envs_idx)
+        offset_quat = _select_links_offset(self._solver._links_offset_quat, global_links, envs_idx)
+        if self._solver.n_envs == 0 and offset_pos.ndim == 3:
+            offset_pos, offset_quat = offset_pos[0], offset_quat[0]
+        pos = pos - _offset_world_shift(offset_pos, offset_quat, quat)
+        quat = transform_quat_by_quat(inv_quat(offset_quat), quat)
+        return pos, quat
 
     @gs.assert_built
     def inverse_kinematics(
@@ -2478,80 +2496,46 @@ class HSRRigidEntity(RigidEntity):
         base_yaw_range: float = 6.2832,
         **kwargs,
     ):
-        """Plan a path with RRT/RRTConnect using virtual xyyaw joints for the base.
+        """Plan RRT/RRTConnect paths with a planar, unit-quaternion base.
 
-        The HSR's floating base uses a 7-DOF FREE joint internally, which the
-        Genesis RRT planner does not support.  This method constrains the free
-        joint DOFs to planar motion (z=0, roll=0, pitch=0) via ``q_limit``,
-        so the RRT effectively plans in x/y/yaw space for the base.  Quaternion
-        components are normalized in the returned path.
-
-        Parameters match :meth:`plan_path` with the addition of:
-        *base_xy_range* – max |x|,|y| motion for the base (meters).
-        *base_yaw_range* – half-range of yaw (radians).
+        ``base_xy_range`` bounds absolute base x/y coordinates in meters;
+        ``base_yaw_range`` bounds absolute yaw in radians. Joint limits and the
+        entity's current state are preserved by the native planner.
         """
-        if not hasattr(self, "_morph") or getattr(self._morph, "hsr_base_mode", None) != "planar":
-            from genesis.utils.misc import raise_exception
-            raise_exception("plan_path_planar requires an entity with ``base_mode=\"planar\"``.")
-
-        free_start = None
-        for joint in self.joints:
-            if joint.type == gs.JOINT_TYPE.FREE:
-                idxs = joint.qs_idx_local
-                free_start = min(idxs) if idxs else 0
-                break
-        if free_start is None:
+        if getattr(getattr(self, "_morph", None), "hsr_base_mode", None) != "planar":
+            gs.raise_exception('plan_path_planar requires an entity with base_mode="planar".')
+        if not np.isfinite(base_xy_range) or base_xy_range <= 0:
+            raise ValueError("base_xy_range must be finite and positive")
+        if not np.isfinite(base_yaw_range) or base_yaw_range <= 0:
+            raise ValueError("base_yaw_range must be finite and positive")
+        free_joints = [joint for joint in self.joints if joint.type == gs.JOINT_TYPE.FREE]
+        if not free_joints:
             return self.plan_path(qpos_goal=qpos_goal, qpos_start=qpos_start, **kwargs)
 
-        q_limit_lower = np.array(self.q_limit[0], copy=True)
-        q_limit_upper = np.array(self.q_limit[1], copy=True)
+        from .genesis_patches import apply_planar_rrt_patch
 
-        original_lower = q_limit_lower[free_start:free_start + 7].copy()
-        original_upper = q_limit_upper[free_start:free_start + 7].copy()
-
-        q_limit_lower[free_start + 0] = -base_xy_range     # x
-        q_limit_upper[free_start + 0] = base_xy_range
-        q_limit_lower[free_start + 1] = -base_xy_range     # y
-        q_limit_upper[free_start + 1] = base_xy_range
-        q_limit_lower[free_start + 2] = 0.0                # z (ground)
-        q_limit_upper[free_start + 2] = 0.0
-        q_limit_lower[free_start + 3] = -1.0               # qw (full range)
-        q_limit_upper[free_start + 3] = 1.0
-        q_limit_lower[free_start + 4] = 0.0                # qx (no roll)
-        q_limit_upper[free_start + 4] = 0.0
-        q_limit_lower[free_start + 5] = 0.0                # qy (no pitch)
-        q_limit_upper[free_start + 5] = 0.0
-        q_limit_lower[free_start + 6] = -base_yaw_range    # qz (yaw)
-        q_limit_upper[free_start + 6] = base_yaw_range
-
-        self.q_limit = np.stack([q_limit_lower, q_limit_upper])
-
+        apply_planar_rrt_patch()
+        previous_limits = getattr(self, "_hsr_planar_sampling_limits", None)
+        self._hsr_planar_sampling_limits = (float(base_xy_range), float(base_yaw_range))
         try:
             result = self.plan_path(qpos_goal=qpos_goal, qpos_start=qpos_start, **kwargs)
-
-            if isinstance(result, tuple):
-                path = result[0]
-            else:
-                path = result
-
-            if path.ndim >= 2:
-                qw = path[..., free_start + 3]
-                qx = path[..., free_start + 4]
-                qy = path[..., free_start + 5]
-                qz = path[..., free_start + 6]
-                norm = torch.sqrt(qw * qw + qx * qx + qy * qy + qz * qz).clamp(min=1e-12)
-                path[..., free_start + 3] = qw / norm
-                path[..., free_start + 4] = qx / norm
-                path[..., free_start + 5] = qy / norm
-                path[..., free_start + 6] = qz / norm
-
-            if isinstance(result, tuple):
-                return (path,) + result[1:]
-            return path
+            path = result[0] if isinstance(result, tuple) else result
+            # The ignore_collision path skips the final projected collision check.
+            # Keep its quaternion outputs valid too, including unsuccessful plans.
+            s = min(free_joints[0].qs_idx_local)
+            w, z = path[..., s + 3], path[..., s + 6]
+            yaw = 2 * torch.atan2(z, w)
+            yaw = yaw.clamp(-min(base_yaw_range, math.pi), min(base_yaw_range, math.pi))
+            path[..., s + 2] = 0
+            path[..., s + 3] = torch.cos(yaw / 2)
+            path[..., s + 4:s + 6] = 0
+            path[..., s + 6] = torch.sin(yaw / 2)
+            return (path,) + result[1:] if isinstance(result, tuple) else path
         finally:
-            q_limit_lower[free_start:free_start + 7] = original_lower
-            q_limit_upper[free_start:free_start + 7] = original_upper
-            self.q_limit = np.stack([q_limit_lower, q_limit_upper])
+            if previous_limits is None:
+                del self._hsr_planar_sampling_limits
+            else:
+                self._hsr_planar_sampling_limits = previous_limits
 
 class HSRBURDF(gs.morphs.URDF):
     def __init__(

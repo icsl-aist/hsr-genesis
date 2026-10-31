@@ -203,7 +203,7 @@ def _build_scene():
             camera_pos=(3.5, -2.0, 2.0),
             camera_lookat=(0.0, 0.0, 0.5),
             camera_fov=30,
-            max_FPS=60,
+            refresh_rate=60,
         ),
         vis_options=gs.options.VisOptions(
             show_world_frame=True,
@@ -458,7 +458,7 @@ def main() -> None:
 
     print(f"\nSpawned {len(objects)} YCB objects around the HSR.")
 
-    dt = float(scene.sim_options.dt)
+    dt = float(scene.dt)
 
     # --- Phase 1: let objects settle on the ground ---
     # Hold the robot joints at their initial positions while objects fall.

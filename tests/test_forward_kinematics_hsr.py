@@ -198,6 +198,47 @@ class TestForwardKinematics:
         assert pos.shape[1] == 3
         assert quat.shape[1] == 4
 
+    def test_partial_qpos_with_base_override_preserves_input_and_state(self):
+        hsr, link_indices = _ensure_hsr()
+        original_qpos = hsr.get_qpos().clone()
+        original_velocity = hsr.get_dofs_velocity().clone()
+        original_pos = hsr.get_links_pos().clone()
+        arm_indices = hsr._ensure_arm_qs_idx()
+        partial = torch.tensor([0.1, -0.4, 0.2, -0.1, 0.05], dtype=gs.tc_float)
+        partial_before = partial.clone()
+        velocity = torch.full_like(original_velocity, 0.125)
+        try:
+            hsr.set_dofs_velocity(velocity)
+            pos, _ = hsr.forward_kinematics(
+                partial, qs_idx_local=arm_indices, links_idx_local=link_indices,
+                base_xyyaw=(0.2, -0.1, 0.3),
+            )
+            torch.testing.assert_close(pos[0, :2], pos.new_tensor([0.2, -0.1]))
+            torch.testing.assert_close(partial, partial_before)
+            torch.testing.assert_close(hsr.get_qpos(), original_qpos)
+            torch.testing.assert_close(hsr.get_dofs_velocity(), velocity)
+            torch.testing.assert_close(hsr.get_links_pos(), original_pos)
+        finally:
+            hsr.set_dofs_velocity(original_velocity)
+
+    def test_fk_restores_state_when_reading_pose_fails(self, monkeypatch):
+        hsr, _ = _ensure_hsr()
+        original_qpos = hsr.get_qpos().clone()
+        original_pos = hsr.get_links_pos().clone()
+        qpos = _build_qpos(hsr, [0.3, -0.8, 0.5, -0.4, 0.2])
+
+        original_query = hsr._solver.forward_kinematics_query
+
+        def fail_read(*args, **kwargs):
+            original_query(*args, **kwargs)
+            raise RuntimeError("pose read failed")
+
+        monkeypatch.setattr(hsr._solver, "forward_kinematics_query", fail_read)
+        with pytest.raises(RuntimeError, match="pose read failed"):
+            hsr.forward_kinematics(qpos)
+        torch.testing.assert_close(hsr.get_qpos(), original_qpos)
+        torch.testing.assert_close(hsr.get_links_pos(), original_pos)
+
     def test_forward_kinematics_base_planar_without_override(self):
         hsr, link_indices = _ensure_hsr()
 
@@ -232,3 +273,46 @@ class TestForwardKinematics:
         ee_idx = link_indices[-1]
         assert torch.equal(pos[-1], pos_all[ee_idx])
         assert torch.equal(quat[-1], quat_all[ee_idx])
+
+
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_fk_query_preserves_contacts_and_authored_frames(n_envs):
+    from genesis.utils.misc import qd_to_torch
+    from hsr_genesis.hsr_rigid_entity import HSRRigidEntity
+
+    scene = gs.Scene(show_viewer=False)
+    scene.add_entity(gs.morphs.Plane())
+    box = scene.add_entity(gs.morphs.Box(
+        size=(0.1, 0.1, 0.1), pos=(0, 0, 0.045),
+        offset_pos=(0.05, 0.03, 0), offset_quat=(math.cos(0.2), 0, 0, math.sin(0.2)),
+    ))
+    scene.build(n_envs=n_envs)
+    try:
+        scene.step()
+        solver = scene.sim.rigid_solver
+        fields = (
+            solver.collider.collider_state.n_contacts,
+            solver.dyn_state.links.contact_force,
+            solver.constraint_solver.constraint_state.is_warmstart,
+            solver.constraint_solver.constraint_state.qacc_ws,
+        )
+        before = [qd_to_torch(field, copy=True) for field in fields]
+        assert before[0].sum() > 0
+        original_qpos = box.get_qpos().clone()
+        envs = [1] if n_envs else None
+        expected_pos = box.get_links_pos(envs_idx=envs).clone()
+        expected_quat = box.get_links_quat(envs_idx=envs).clone()
+        query = box.get_qpos(envs_idx=envs).clone()
+        query[..., 0] += 0.2
+        expected_pos[..., 0] += 0.2
+        pos, quat = HSRRigidEntity.forward_kinematics(box, query, links_idx_local=[0], envs_idx=envs)
+        torch.testing.assert_close(pos, expected_pos)
+        torch.testing.assert_close(quat, expected_quat)
+        torch.testing.assert_close(box.get_qpos(), original_qpos, rtol=0, atol=0)
+        for field, expected in zip(fields, before):
+            torch.testing.assert_close(qd_to_torch(field, copy=True), expected, rtol=0, atol=0)
+        with pytest.raises((RuntimeError, ValueError)):
+            HSRRigidEntity.forward_kinematics(box, torch.zeros(99, device=gs.device), envs_idx=envs)
+        torch.testing.assert_close(box.get_qpos(), original_qpos, rtol=0, atol=0)
+    finally:
+        scene.destroy()
