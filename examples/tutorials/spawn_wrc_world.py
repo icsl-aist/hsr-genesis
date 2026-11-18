@@ -101,7 +101,7 @@ def main() -> None:
             camera_pos=(1.5, -1.5, 1.8),
             camera_lookat=(0.0, 0.0, 0.5),
             camera_fov=45,
-            max_FPS=60,
+            refresh_rate=60,
         ),
         vis_options=gs.options.VisOptions(
             show_world_frame=True,

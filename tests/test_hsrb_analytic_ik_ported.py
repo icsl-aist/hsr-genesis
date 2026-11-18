@@ -13,10 +13,6 @@ def _import_analytic_ik():
     if not getattr(gs, "_initialized", False):
         gs.init(backend=gs.cpu, precision="32", logging_level="warning")
 
-    try:
-        ti.init(arch=ti.cpu)
-    except Exception:
-        pass
 
     import hsr_genesis.analytic_ik as analytic_ik
 
@@ -192,7 +188,8 @@ def test_ik_with_init_qpos_ported():
     sol_config = torch.cat([
         sol_alt[0].origin_to_base[:2, 3],  # x, y
         torch.tensor(
-            [math.atan2(sol_alt[0].origin_to_base[1, 0].item(), sol_alt[0].origin_to_base[0, 0].item())]
+            [math.atan2(sol_alt[0].origin_to_base[1, 0].item(), sol_alt[0].origin_to_base[0, 0].item())],
+            device=sol_alt[0].origin_to_base.device,
         ),  # base yaw
         sol_alt[0].solution_angle.position,  # arm joints
     ])

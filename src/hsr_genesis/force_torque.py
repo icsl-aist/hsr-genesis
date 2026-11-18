@@ -9,7 +9,7 @@ The wrench includes contributions from gravity, inertial forces
 the downstream chain.  The result is expressed in the sensor frame's
 local coordinates.
 
-Because upstream Genesis (as of 0.4.6) does not ship a
+Because upstream Genesis (as of 1.4.5) does not ship a
 ``ForceTorque`` sensor, this module defines both the options class
 and the sensor class, then registers them with Genesis's
 ``SensorManager`` and exposes the options as ``gs.sensors.ForceTorque``.
@@ -18,7 +18,6 @@ and the sensor class, then registers them with Genesis's
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-import numpy as np
 import torch
 from pydantic import Field
 
@@ -26,18 +25,16 @@ import genesis as gs
 from genesis.engine.sensors.base_sensor import (
     RigidSensorMetadataMixin,
     RigidSensorMixin,
-    Sensor,
-    SharedSensorMetadata,
+    SimpleSensor,
+    SimpleSensorMetadata,
 )
-from genesis.options.sensors.options import RigidSensorOptionsMixin
+from genesis.options.sensors.options import RigidSensorOptionsMixin, SimpleSensorOptions
 from genesis.typing import PositiveFloat, UnitIntervalVec4Type
-from genesis.utils.geom import quat_to_R, transform_by_quat
-from genesis.utils.misc import qd_to_torch, tensor_to_array
+from genesis.utils.geom import quat_to_R, transform_by_quat, transform_quat_by_quat
+from genesis.utils.misc import concat_with_tensor, qd_to_torch, tensor_to_array
 
 if TYPE_CHECKING:
     from genesis.ext.pyrender.mesh import Mesh
-    from genesis.engine.sensors.sensor_manager import SensorManager
-    from genesis.utils.ring_buffer import TensorRingBuffer
 
 
 # ---------------------------------------------------------------------------------------------
@@ -45,7 +42,7 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------------------------
 
 
-class ForceTorque(RigidSensorOptionsMixin["ForceTorqueSensor"]):
+class ForceTorque(RigidSensorOptionsMixin["ForceTorqueSensor"], SimpleSensorOptions["ForceTorqueSensor"]):
     """Options for a 6-DOF force-torque sensor.
 
     The sensor is attached to a RigidLink (the "FT sensor frame") and
@@ -84,7 +81,7 @@ ForceTorqueOptions = ForceTorque  # alias for internal use
 
 
 @dataclass
-class ForceTorqueSensorMetadata(RigidSensorMetadataMixin, SharedSensorMetadata):
+class ForceTorqueSensorMetadata(RigidSensorMetadataMixin, SimpleSensorMetadata):
     """Shared metadata for all ForceTorque sensors of the same class."""
 
     # Per-sensor downstream link info (lists indexed by sensor idx).
@@ -98,17 +95,15 @@ class ForceTorqueSensorMetadata(RigidSensorMetadataMixin, SharedSensorMetadata):
 # ---------------------------------------------------------------------------------------------
 
 
-class ForceTorqueSensor(RigidSensorMixin[ForceTorqueSensorMetadata], Sensor[ForceTorque, ForceTorqueSensorMetadata]):
+class ForceTorqueSensor(
+    RigidSensorMixin[ForceTorqueSensorMetadata],
+    SimpleSensor[ForceTorque, None, ForceTorqueSensorMetadata, torch.Tensor],
+):
     """6-DOF force-torque sensor using recursive Newton-Euler.
 
     Returns ``[fx, fy, fz, tx, ty, tz]`` in the sensor frame's local
     coordinates.
     """
-
-    def __init__(self, sensor_options: ForceTorque, sensor_idx: int, sensor_manager: "SensorManager"):
-        super().__init__(sensor_options, sensor_idx, sensor_manager)
-        self._debug_force_object: "Mesh | None" = None
-        self._debug_torque_object: "Mesh | None" = None
 
     # --- build -------------------------------------------------------------
 
@@ -121,6 +116,8 @@ class ForceTorqueSensor(RigidSensorMixin[ForceTorqueSensorMetadata], Sensor[Forc
         entity_idx = self._options.entity_idx
 
         if entity_idx is None or entity_idx < 0 or self._link is None:
+            # RigidSensorMixin only registers attached links; retain per-sensor alignment.
+            self._shared_metadata.links_idx = concat_with_tensor(self._shared_metadata.links_idx, -1)
             # Static sensor — no downstream links.
             self._shared_metadata.downstream_links_idx.append(torch.empty(0, dtype=gs.tc_int, device=gs.device))
             self._shared_metadata.downstream_masses.append(torch.empty(0, dtype=gs.tc_float, device=gs.device))
@@ -129,7 +126,7 @@ class ForceTorqueSensor(RigidSensorMixin[ForceTorqueSensorMetadata], Sensor[Forc
             )
             return
 
-        entity = solver.entities[entity_idx]
+        entity = self._manager._sim.entities[entity_idx]
         link_start = int(entity.link_start)
         ft_link_idx_local = self._options.link_idx_local
 
@@ -155,19 +152,14 @@ class ForceTorqueSensor(RigidSensorMixin[ForceTorqueSensorMetadata], Sensor[Forc
         self._shared_metadata.downstream_links_idx.append(downstream_global)
 
         # Cache masses (constant after build).
-        masses = solver.get_links_inertial_mass(links_idx=downstream_global)
+        masses = solver.get_links_mass(links_idx=downstream_global)
         if masses.dim() == 0:
             masses = masses.reshape(1)
         self._shared_metadata.downstream_masses.append(masses.to(gs.tc_float))
 
-        # Cache inertia tensors in link-local frame (will be rotated to world per-call).
-        inertias = []
-        for li in downstream_local:
-            link = entity.links[li]
-            I_local = np.array(link._inertial_i, dtype=np.float64)
-            inertias.append(I_local)
+        # Genesis 1.4.5 exposes inertias through the solver, in the inertial frame.
         self._shared_metadata.downstream_inertias.append(
-            torch.tensor(np.stack(inertias), device=gs.device, dtype=gs.tc_float)
+            solver.get_links_inertia(links_idx=downstream_global).to(gs.tc_float)
         )
 
     @staticmethod
@@ -200,15 +192,17 @@ class ForceTorqueSensor(RigidSensorMixin[ForceTorqueSensorMetadata], Sensor[Forc
     # --- ground truth ------------------------------------------------------
 
     @classmethod
-    def _update_shared_ground_truth_cache(
-        cls, shared_metadata: ForceTorqueSensorMetadata, shared_ground_truth_cache: torch.Tensor
+    def _update_raw_data(
+        cls, shared_context: None, shared_metadata: ForceTorqueSensorMetadata, raw_data_T: torch.Tensor
     ):
         assert shared_metadata.solver is not None
         solver = shared_metadata.solver
         n_envs = max(solver.n_envs, 1)
 
         # Zero the cache first.
-        shared_ground_truth_cache.zero_()
+        raw_data_T.zero_()
+        if not any(links.numel() for links in shared_metadata.downstream_links_idx):
+            return
 
         # Gravity vector (world frame).
         gravity = solver.get_gravity()  # (3,) or (n_envs, 3)
@@ -218,16 +212,18 @@ class ForceTorqueSensor(RigidSensorMixin[ForceTorqueSensorMetadata], Sensor[Forc
 
         # Read all link states once (world frame).
         # For n_envs == 0, these return (n_links, 3/4); we unsqueeze to (1, n_links, ...).
-        all_links_pos_com = solver.get_links_pos(ref="link_com")  # (n_links, 3) or (n_envs, n_links, 3)
+        all_links_pos_com = solver.get_links_pos(ref=gs.link_ref_frame.link_COM)  # (n_links, 3) or (n_envs, n_links, 3)
         all_links_quat = solver.get_links_quat()
+        all_links_pos = solver.get_links_pos()
+        all_inertial_quat = qd_to_torch(solver.dyn_state.links.i_quat, transpose=True, copy=True)
+        if solver.n_envs == 0:
+            all_inertial_quat = all_inertial_quat[0]
         all_links_ang_vel = solver.get_links_ang()
         all_links_acc = solver.get_links_acc()
         all_links_acc_ang = solver.get_links_acc_ang()
 
-        # Contact forces on all links.
-        # solver.links_state.contact_force has shape (3, n_links) or (3, n_links, n_envs) in qd layout.
-        # Use qd_to_torch for proper conversion.
-        all_contact_forces = qd_to_torch(solver.links_state.contact_force, None, slice(None), transpose=True, copy=True)
+        # Convert the device-side link contact field to batch-first Torch layout.
+        all_contact_forces = qd_to_torch(solver.dyn_state.links.contact_force, None, slice(None), transpose=True, copy=True)
         if solver.n_envs == 0:
             all_contact_forces = all_contact_forces[0]  # (n_links, 3)
         # else: (n_envs, n_links, 3)
@@ -236,46 +232,60 @@ class ForceTorqueSensor(RigidSensorMixin[ForceTorqueSensorMetadata], Sensor[Forc
         single_env = solver.n_envs == 0
         if single_env:
             all_links_pos_com = all_links_pos_com.unsqueeze(0)
+            all_links_pos = all_links_pos.unsqueeze(0)
+            all_inertial_quat = all_inertial_quat.unsqueeze(0)
             all_links_quat = all_links_quat.unsqueeze(0)
             all_links_ang_vel = all_links_ang_vel.unsqueeze(0)
             all_links_acc = all_links_acc.unsqueeze(0)
             all_links_acc_ang = all_links_acc_ang.unsqueeze(0)
             all_contact_forces = all_contact_forces.unsqueeze(0)
 
-        # Reshape cache for per-sensor writes: (n_envs, n_sensors, 6) then permute to (n_sensors*6, n_envs).
+        # get_links_acc measures the link origin; Newton-Euler uses acceleration at the COM.
+        com_offset = all_links_pos_com - all_links_pos
+        all_links_acc = all_links_acc + torch.cross(all_links_acc_ang, com_offset, dim=-1)
+        all_links_acc = all_links_acc + torch.cross(
+            all_links_ang_vel, torch.cross(all_links_ang_vel, com_offset, dim=-1), dim=-1
+        )
+
+        # Genesis 1.4.5 passes a transposed (sensor channels, environments) buffer.
         n_sensors = len(shared_metadata.downstream_links_idx)
-        out = shared_ground_truth_cache.reshape(n_envs, n_sensors, 6)
+        out = raw_data_T.T.view(n_envs, n_sensors, 6)
 
         for s_idx in range(n_sensors):
             ds_global = shared_metadata.downstream_links_idx[s_idx]  # (n_ds,)
             masses = shared_metadata.downstream_masses[s_idx]  # (n_ds,)
             inertias = shared_metadata.downstream_inertias[s_idx]  # (n_ds, 3, 3)
-            ft_global = shared_metadata.links_idx[s_idx]  # scalar tensor
 
             n_ds = ds_global.shape[0]
             if n_ds == 0:
                 continue
 
+            ft_global = shared_metadata.links_idx[s_idx]
+
             # Downstream link states (world frame).
             com_pos = all_links_pos_com[:, ds_global]  # (n_envs, n_ds, 3)
-            quats = all_links_quat[:, ds_global]  # (n_envs, n_ds, 4)
             ang_vel = all_links_ang_vel[:, ds_global]  # (n_envs, n_ds, 3)
             lin_acc = all_links_acc[:, ds_global]  # (n_envs, n_ds, 3)
             ang_acc = all_links_acc_ang[:, ds_global]  # (n_envs, n_ds, 3)
             contact_forces = all_contact_forces[:, ds_global]  # (n_envs, n_ds, 3)
 
             # FT sensor frame pose.
-            ft_pos = all_links_pos_com[:, [ft_global]]  # (n_envs, 1, 3)
-            ft_quat = all_links_quat[:, [ft_global]]  # (n_envs, 1, 4)
+            ft_link_quat = all_links_quat[:, ft_global]
+            ft_pos = (all_links_pos[:, ft_global] + transform_by_quat(
+                shared_metadata.offsets_pos[:, s_idx], ft_link_quat
+            )).unsqueeze(1)
+            ft_quat = transform_quat_by_quat(
+                shared_metadata.offsets_quat[:, s_idx], ft_link_quat
+            ).unsqueeze(1)
 
             # World-frame inertia: I_world = R @ I_local @ R^T
-            R = quat_to_R(quats)  # (n_envs, n_ds, 3, 3)
-            I_local_b = inertias.unsqueeze(0).expand(n_envs, -1, -1, -1)
+            R = quat_to_R(all_inertial_quat[:, ds_global])  # (n_envs, n_ds, 3, 3)
+            I_local_b = inertias if inertias.ndim == 4 else inertias.unsqueeze(0)
             I_world = R @ I_local_b @ R.transpose(-1, -2)  # (n_envs, n_ds, 3, 3)
 
             # Forces on each link (world frame):
             # F_joint = m * (a - g) - F_contact
-            m_exp = masses.unsqueeze(0).unsqueeze(-1)  # (1, n_ds, 1)
+            m_exp = (masses if masses.ndim == 2 else masses.unsqueeze(0)).unsqueeze(-1)  # (1, n_ds, 1)
             F_link = m_exp * (lin_acc - gravity.unsqueeze(1)) - contact_forces  # (n_envs, n_ds, 3)
 
             # Torques on each link (world frame, about FT sensor origin):
@@ -299,65 +309,26 @@ class ForceTorqueSensor(RigidSensorMixin[ForceTorqueSensorMetadata], Sensor[Forc
             out[:, s_idx, :3] = F_local
             out[:, s_idx, 3:] = T_local
 
-    # --- measured cache (with delay) ---------------------------------------
-
-    @classmethod
-    def _update_shared_cache(
-        cls,
-        shared_metadata: ForceTorqueSensorMetadata,
-        shared_ground_truth_cache: torch.Tensor,
-        shared_cache: torch.Tensor,
-        buffered_data: "TensorRingBuffer",
-    ):
-        buffered_data.set(shared_ground_truth_cache)
-        cls._apply_delay_to_shared_cache(shared_metadata, shared_cache, buffered_data)
-
     # --- debug visualization -----------------------------------------------
 
-    def _draw_debug(self, context):
-        """Draw force and torque arrows at the sensor location.
-
-        Only draws for the first rendered environment.
-        """
+    def _draw_debug(self, context, envs_idx: list[int]) -> list[tuple[None, "Mesh", None]]:
+        """Make force and torque arrows in the first rendered environment."""
+        if self._link is None or 0 not in envs_idx:
+            return []
         env_idx = context.rendered_envs_idx[0] if self._manager._sim.n_envs > 0 else None
-        if self._link is None:
-            return
-
-        # Clear previous debug objects.
-        if self._debug_force_object is not None:
-            context.clear_debug_object(self._debug_force_object)
-            self._debug_force_object = None
-        if self._debug_torque_object is not None:
-            context.clear_debug_object(self._debug_torque_object)
-            self._debug_torque_object = None
-
-        pos = tensor_to_array(self._link.get_pos(env_idx)).reshape((3,))
-        quat = self._link.get_quat(env_idx).reshape((4,))
-
+        quat = self._link.get_quat(env_idx, relative=False).reshape((4,))
+        pos = self._link.get_pos(env_idx, relative=False).reshape((3,))
+        pos = pos + transform_by_quat(self._shared_metadata.offsets_pos[0, self._idx], quat)
+        quat = transform_quat_by_quat(self._shared_metadata.offsets_quat[0, self._idx], quat)
         wrench = self.read(env_idx).reshape((6,))
-        force_local = wrench[:3] * float(self._options.debug_force_scale)
-        torque_local = wrench[3:] * float(self._options.debug_torque_scale)
-
-        force_world = tensor_to_array(transform_by_quat(force_local, quat)).reshape((3,))
-        torque_world = tensor_to_array(transform_by_quat(torque_local, quat)).reshape((3,))
-
-        self._debug_force_object = context.draw_debug_arrow(
-            pos=pos,
-            vec=force_world,
-            color=self._options.debug_force_color,
+        force = tensor_to_array(transform_by_quat(wrench[:3] * self._options.debug_force_scale, quat))
+        torque = tensor_to_array(transform_by_quat(wrench[3:] * self._options.debug_torque_scale, quat))
+        arrows = (
+            context.make_debug_arrow(pos=tensor_to_array(pos), vec=force, color=self._options.debug_force_color),
+            context.make_debug_arrow(pos=tensor_to_array(pos), vec=torque, color=self._options.debug_torque_color),
         )
-        self._debug_torque_object = context.draw_debug_arrow(
-            pos=pos,
-            vec=torque_world,
-            color=self._options.debug_torque_color,
-        )
+        return [(None, arrow, None) for arrow in arrows if arrow is not None]
 
 
-# ---------------------------------------------------------------------------------------------
-# Registration
-# ---------------------------------------------------------------------------------------------
-
-# Auto-registration happens in Sensor.__init_subclass__ when the class is
-# defined with Sensor[ForceTorque, ForceTorqueSensorMetadata].  We also
-# expose the options class as gs.sensors.ForceTorque for convenience.
+# Register the options with Genesis through SimpleSensor.__init_subclass__.
 gs.sensors.ForceTorque = ForceTorque

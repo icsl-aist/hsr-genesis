@@ -190,7 +190,7 @@ def render_promo(
     print(f"[promo] use_ik_guidance={use_ik_guidance}")
 
     # Build env with camera and vis_options overrides.
-    # env_separate_rigid=False: camera sees all envs in one frame at world positions.
+    # split_envs=False: camera sees all envs in one frame at world positions.
     # far=200: needed for high-altitude wide shots (default 20m clips distant robots).
     env = HSRPickRLEnv(
         n_envs=n_envs,
@@ -200,7 +200,7 @@ def render_promo(
         curriculum=curriculum,
         use_ik_guidance=use_ik_guidance,
         vis_options_overrides={
-            "env_separate_rigid": False,
+            "split_envs": False,
             "lights": [gs.options.vis.DirectionalLight(
                 dir=(0.5, 0.5, -1), color=(1, 1, 1), intensity=3.0,
             )],

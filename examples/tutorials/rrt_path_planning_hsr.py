@@ -256,7 +256,7 @@ def main() -> None:
             camera_pos=(3, -1, 1.5),
             camera_lookat=(0.0, 0.0, 0.5),
             camera_fov=30,
-            max_FPS=60,
+            refresh_rate=60,
         ),
         vis_options=gs.options.VisOptions(
             show_world_frame=True,
@@ -360,7 +360,7 @@ def main() -> None:
         )
     scene.build()
 
-    dt = float(scene.sim_options.dt)
+    dt = float(scene.dt)
     end_effector = hsr.get_link("hand_palm_link")
     arm_dofs_idx = _arm_dofs_idx_local(hsr)
 

@@ -39,6 +39,8 @@ def _entity_pos(entity) -> np.ndarray:
     pos = entity.get_pos()
     if pos.ndim > 1:
         pos = pos[0]
+    if hasattr(pos, "detach"):
+        pos = pos.detach().cpu().numpy()
     return np.asarray(pos, dtype=float)
 
 
@@ -199,8 +201,7 @@ def test_spawn_sdf_world_subset(scene, tmp_path):
     # its world pose and the apple starts at its world pose.
     assert np.allclose(_entity_pos(entities["ground"]), [0.0, 0.0, 0.0], atol=1e-4)
     assert np.allclose(_entity_pos(entities["bin"]), [1.0, 0.5, 0.0], atol=1e-4)
-    # Mesh models report their center-of-mass frame, which the SDF offsets from
-    # the model origin via <inertial><pose> (the apple: ~3.6 cm up).
+    # Genesis 1.4.5 reports the authored model origin by default.
     assert np.allclose(
         _entity_pos(entities["apple"]), [-0.5, 0.0, 0.5], atol=0.05,
     )
@@ -219,7 +220,10 @@ def test_spawn_sdf_world_subset(scene, tmp_path):
     # Static models are unaffected by gravity, the dynamic one settles on the
     # plane without falling through it.
     assert np.allclose(_entity_pos(entities["bin"]), [1.0, 0.5, 0.0], atol=1e-3)
-    apple_z = _entity_pos(entities["apple"])[2]
+    # Check the COM explicitly: the authored origin can sit at the contact
+    # plane (with small solver penetration), unlike the COM above it.
+    apple_com = entities["apple"].get_links_pos(links_idx_local=[0], ref=gs.link_ref_frame.link_COM)
+    apple_z = float(apple_com.reshape(-1, 3)[0, 2])
     assert 0.0 < apple_z < 0.15
 
 

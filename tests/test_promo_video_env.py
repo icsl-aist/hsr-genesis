@@ -28,7 +28,7 @@ def test_env_with_camera_and_vis_overrides():
         seed=0,
         disable_visualizer=True,
         vis_options_overrides={
-            "env_separate_rigid": False,
+            "split_envs": False,
             "lights": [gs.options.vis.DirectionalLight(
                 dir=(0.5, 0.5, -1), color=(1, 1, 1), intensity=3.0,
             )],
@@ -44,8 +44,8 @@ def test_env_with_camera_and_vis_overrides():
     assert env.camera is not None, "camera should be created when camera_config is provided"
     assert env.camera.res == (640, 480)
 
-    # Verify env_separate_rigid=False was applied
-    assert env.scene.vis_options.env_separate_rigid is False
+    # Verify split_envs=False was applied
+    assert env.scene.options.vis.split_envs is False
 
     # Clean up
     del env.scene
@@ -84,7 +84,7 @@ def test_rl_env_with_camera_and_vis_overrides():
         settle_steps=10,
         use_ik_guidance=True,
         vis_options_overrides={
-            "env_separate_rigid": False,
+            "split_envs": False,
         },
         camera_config={
             "res": (640, 480),
@@ -96,7 +96,7 @@ def test_rl_env_with_camera_and_vis_overrides():
     )
     assert env.camera is not None, "HSRPickRLEnv.camera should be set when camera_config provided"
     assert env.camera.res == (640, 480)
-    assert env._pick_env.scene.vis_options.env_separate_rigid is False
+    assert env._pick_env.scene.options.vis.split_envs is False
 
     del env._pick_env.scene
     import gc

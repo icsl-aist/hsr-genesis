@@ -40,7 +40,7 @@ def setup_colab(
     *,
     repo_url: str = "https://github.com/icsl-aist/hsr-genesis.git",
     repo_dir: str = "/content/hsr-genesis",
-    genesis_version: str = "0.4.6",
+    genesis_version: str = "1.4.5",
     force_reinstall: bool = False,
 ) -> None:
     """One-call Colab setup: install deps, clone repo (with submodules), configure EGL.

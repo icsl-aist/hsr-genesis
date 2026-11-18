@@ -537,9 +537,11 @@ class URDFSensorManager:
         # scene-level lights as per-camera options to avoid dark images.
         camera_lights: list[dict[str, Any]] = []
         if backend == "batch_renderer":
-            camera_lights = _vis_lights_to_camera_dicts(
-                self.scene.vis_options.lights,
-            )
+            vis_options = getattr(self.scene, "vis_options", None)
+            if vis_options is None:
+                # Genesis 1.4.5 groups visualization settings in Scene.options.
+                vis_options = self.scene.options.vis
+            camera_lights = _vis_lights_to_camera_dicts(vis_options.lights)
 
         sensor_options = options_cls(
             res=(width, height),

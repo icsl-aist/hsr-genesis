@@ -78,7 +78,7 @@ def main() -> None:
             camera_pos=(3, -1, 1.5),
             camera_lookat=(0.0, 0.0, 0.5),
             camera_fov=30,
-            max_FPS=60,
+            refresh_rate=60,
         ),
         sim_options=gs.options.SimOptions(dt=0.02, substeps=20),
         rigid_options=gs.options.RigidOptions(
@@ -159,7 +159,7 @@ def main() -> None:
     target_pos = (float(qpos[0]), float(qpos[1]), float(qpos[2]))
     target_yaw = _quat_wxyz_to_yaw(qpos[3:7])
 
-    dt = float(scene.sim_options.dt)
+    dt = float(scene.dt)
     duration = 3.0
 
     base_traj = Trajectory(

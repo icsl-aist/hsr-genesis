@@ -443,7 +443,7 @@ class TestYawOvershoot:
 
     def test_pure_yaw_rotation(self, scene_and_robot, capsys) -> None:
         scene, robot = scene_and_robot
-        dt = float(scene.sim_options.dt)
+        dt = float(scene.dt)
         target_yaw = math.pi / 2.0
         duration = 3.0
         steps = int(duration / dt) + int(0.5 / dt)  # +0.5 s settle
@@ -515,7 +515,7 @@ class TestXTranslation:
 
     def test_pure_x_translation(self, scene_and_robot, capsys) -> None:
         scene, robot = scene_and_robot
-        dt = float(scene.sim_options.dt)
+        dt = float(scene.dt)
         target_x = 0.5
         duration = 3.0
         steps = int(duration / dt) + int(0.5 / dt)
@@ -577,7 +577,7 @@ class TestDiagonalMove:
 
     def test_diagonal_move(self, scene_and_robot, capsys) -> None:
         scene, robot = scene_and_robot
-        dt = float(scene.sim_options.dt)
+        dt = float(scene.dt)
         tx, ty, tyaw = 0.4, 0.3, math.pi / 4.0
         duration = 3.0
         steps = int(duration / dt) + int(0.5 / dt)

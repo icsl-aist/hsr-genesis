@@ -254,7 +254,7 @@ def init_sim(
             camera_pos=cam_pos,
             camera_lookat=cam_lookat,
             camera_fov=cam_fov,
-            max_FPS=60,
+            refresh_rate=60,
         ),
         sim_options=gs.options.SimOptions(dt=dt, substeps=substeps),
         rigid_options=gs.options.RigidOptions(use_gjk_collision=True),

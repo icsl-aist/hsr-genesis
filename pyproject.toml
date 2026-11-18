@@ -13,7 +13,7 @@ authors = [
     { name = "HSR Genesis Contributors" }
 ]
 dependencies = [
-    "genesis-world==0.4.6",
+    "genesis-world==1.4.5",
     "torch",
     "PyYAML",
     "usd-core",
@@ -36,6 +36,7 @@ include = ["hsr_genesis", "hsr_genesis.*"]
 # Keep tests serial by default. Opt into parallelism explicitly with
 # `pytest -n auto` when you have multiple GPUs or are running CPU-only tests.
 [tool.pytest.ini_options]
+pythonpath = ["examples/tutorials"]
 addopts = [
     "--color=yes",
     "--import-mode=importlib",
