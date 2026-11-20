@@ -34,7 +34,7 @@ class _RateLimitedSensorProxy:
         self._cache: dict[Any, tuple[float, Any]] = {}
 
     def _scene_time(self) -> float:
-        return float(getattr(self._scene, "t", 0.0))
+        return float(self._scene.sim.cur_t)
 
     def _make_cache_key(self, method_name: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
         try:

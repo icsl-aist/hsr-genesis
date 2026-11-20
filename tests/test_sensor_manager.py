@@ -58,7 +58,7 @@ parse_gazebo_sensors = sensor_manager.parse_gazebo_sensors
 
 class _FakeScene:
     def __init__(self):
-        self.t = 0.0
+        self.sim = types.SimpleNamespace(cur_t=0.0)
 
 
 class _FakeCameraSensor:
@@ -137,12 +137,12 @@ def test_rate_limited_sensor_proxy_caches_until_next_period() -> None:
     assert first is second
     assert sensor.read_calls == 1
 
-    scene.t = 0.19
+    scene.sim.cur_t = 0.19
     third = proxy.read()
     assert third is first
     assert sensor.read_calls == 1
 
-    scene.t = 0.2
+    scene.sim.cur_t = 0.2
     fourth = proxy.read()
     assert fourth != first
     assert sensor.read_calls == 2
@@ -159,7 +159,7 @@ def test_rate_limited_sensor_proxy_tracks_read_image_separately() -> None:
     assert first is second
     assert sensor.read_image_calls == 1
 
-    scene.t = 0.11
+    scene.sim.cur_t = 0.11
     third = proxy.read_image()
 
     assert third != first
@@ -172,15 +172,29 @@ def test_rate_limited_sensor_proxy_invalidates_cache_when_time_rewinds() -> None
     proxy = _RateLimitedSensorProxy(sensor, scene, update_rate_hz=2.0)
 
     first = proxy.read()
-    scene.t = 0.6
+    scene.sim.cur_t = 0.6
     second = proxy.read()
     assert second != first
 
-    scene.t = 0.1
+    scene.sim.cur_t = 0.1
     third = proxy.read()
 
     assert third != second
     assert sensor.read_calls == 3
+
+
+def test_rate_limited_camera_refreshes_after_scene_steps() -> None:
+    gs = sensor_manager.gs
+    scene = gs.Scene(sim_options=gs.options.SimOptions(dt=0.01), show_viewer=False)
+    scene.add_entity(gs.morphs.Plane())
+    scene.build()
+    proxy = _RateLimitedSensorProxy(_FakeCameraSensor(), scene, update_rate_hz=75.0)
+
+    first = proxy.read()
+    scene.step()
+    assert proxy.read() is first
+    scene.step()
+    assert proxy.read() == {"frame": 2}
 
 
 # ---------------------------------------------------------------------------
