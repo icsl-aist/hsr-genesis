@@ -22,6 +22,9 @@ All notable changes to this package will be documented in this file.
 - Single-waypoint batched base control now uses shortest-path yaw and routes named or derivative-bearing trajectories through the canonical controller.
 - Steering gains now have one controller-owned source and no longer depend on initialization order.
 
+### Fixed
+- Robot-mounted camera feeds refresh at their configured rates during simulation and video recording.
+
 ## [0.1.0] - 2026-02-24
 
 ### Initial Import
